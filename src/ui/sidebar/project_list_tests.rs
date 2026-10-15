@@ -342,8 +342,8 @@ fn collapsed_remote_only_project_disclosure_restores_status() {
                     .into_iter()
                     .find(|header| header.key == KEY)
                     .expect("remote-only header");
-                let slot = (header.rect.x + 2, header.rect.y);
-                let title_start = header.rect.x + 4;
+                let slot = (sidebar_row_content_rect(header.rect).x + 2, header.rect.y);
+                let title_start = sidebar_row_content_rect(header.rect).x + 4;
                 let read = |app: &AppState| {
                     let terminal = render(app, area.width, area.height);
                     let buffer = terminal.backend().buffer();
@@ -479,7 +479,9 @@ fn collapsed_group_header_swaps_status_for_chevron_on_hover_and_focus() {
         let terminal = render(app, area.width, area.height);
         let buffer = terminal.backend().buffer();
         (
-            buffer[(card.rect.x, card.rect.y)].symbol().to_string(),
+            buffer[(sidebar_row_content_rect(card.rect).x, card.rect.y)]
+                .symbol()
+                .to_string(),
             (0..area.width)
                 .find(|x| {
                     buffer[(*x, card.rect.y)].symbol() == "o"

@@ -65,6 +65,7 @@ mod bar;
 pub(crate) mod board;
 pub(crate) mod text;
 pub(crate) mod ticket_actions;
+pub(crate) mod transcript_view;
 pub(crate) mod usage;
 mod user_actions;
 mod widgets;
@@ -116,7 +117,9 @@ pub(crate) use self::sidebar::tests::sidebar_work_item_fixture;
 #[cfg(test)]
 pub(crate) use self::sidebar::SPACES_SECTION_TITLE;
 #[cfg(test)]
-pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicator_row};
+pub(crate) use self::sidebar::{
+    compute_agent_card_areas, compute_workspace_card_areas, workspace_drop_indicator_row,
+};
 pub(crate) use self::sidebar::{
     compute_sidebar_section_header_areas, initial_collapsed_sidebar_groups,
     sidebar_blocker_scope_anchor_rect, sidebar_blocker_scope_menu_layout,
@@ -163,12 +166,12 @@ pub(crate) use self::{
         agent_counts_by_workspace, agent_panel_entries, all_agent_panel_entries,
         collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
         collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
-        compute_workspace_card_areas, expanded_sidebar_toggle_rect, needs_you_more_at,
-        needs_you_row_at, normalized_workspace_scroll, relative_agent_navigation_entry,
-        remote_agent_panel_entries, remote_agent_panel_entries_at, remote_agent_row_at,
-        repo_group_focus_plan, sidebar_agent_run_at, sidebar_aloop_target_at, sidebar_coverage,
-        sidebar_dim_header_at, sidebar_filter_anchor_rect, sidebar_filter_menu_layout,
-        sidebar_filter_options, sidebar_group_menu_item_count, sidebar_group_menu_layout,
+        expanded_sidebar_toggle_rect, needs_you_more_at, needs_you_row_at,
+        normalized_workspace_scroll, relative_agent_navigation_entry, remote_agent_panel_entries,
+        remote_agent_panel_entries_at, remote_agent_row_at, repo_group_focus_plan,
+        sidebar_agent_run_at, sidebar_aloop_target_at, sidebar_coverage, sidebar_dim_header_at,
+        sidebar_filter_anchor_rect, sidebar_filter_menu_layout, sidebar_filter_options,
+        sidebar_group_menu_item_count, sidebar_group_menu_layout,
         sidebar_group_mode_anchor_rect_for_app, sidebar_header_new_menu_rect,
         sidebar_header_new_thread_rect, sidebar_header_overflow_rect,
         sidebar_header_search_rect_for_app, sidebar_header_star_filter_rect,
@@ -354,6 +357,7 @@ fn compute_view_internal(
         std::time::Instant::now(),
         crate::app::settled::unix_seconds(std::time::SystemTime::now()),
     );
+    prepare_transcript_layouts(app);
 }
 
 #[cfg(test)]
@@ -372,6 +376,21 @@ pub(crate) fn compute_view_at(
         observed_at,
         observed_unix_s,
     );
+    prepare_transcript_layouts(app);
+}
+
+fn prepare_transcript_layouts(app: &mut AppState) {
+    let palette = &app.palette;
+    let views = &mut app.transcript_views;
+    for info in &app.view.pane_infos {
+        if info.inner_rect.width == 0 {
+            continue;
+        }
+        if let Some(view) = views.get_mut(&info.id).filter(|view| view.open) {
+            view.chat
+                .prepare_layout(palette, info.inner_rect.width, view.expand_tools);
+        }
+    }
 }
 
 fn compute_view_internal_at(
@@ -612,11 +631,14 @@ fn compute_view_internal_at(
         (Rect::default(), main_area)
     };
 
-    if !app.sidebar_collapsed {
-        app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
+    let sidebar_list_layout = if !app.sidebar_collapsed {
+        let list_area = workspace_list_rect_for_app(app, sidebar_area);
+        let layout = sidebar::SidebarListLayout::new(app, list_area);
+        app.workspace_scroll = layout.normalize_scroll(app.workspace_scroll);
         if let Some(active) = app.take_pending_workspace_reveal() {
             app.ensure_workspace_visible_in_sidebar(active, sidebar_area);
         }
+        Some(layout)
     } else {
         let (ws_area, _, _) = collapsed_sidebar_sections(sidebar_area);
         app.workspace_scroll = collapsed_sidebar_row_scroll(app, ws_area);
@@ -626,13 +648,19 @@ fn compute_view_internal_at(
                     collapsed_sidebar_scroll_for_target(app, ws_area, app.workspace_scroll, target);
             }
         }
-    }
-
-    let workspace_card_areas = if app.sidebar_collapsed {
-        Vec::new()
-    } else {
-        compute_workspace_card_areas(app, sidebar_area)
+        None
     };
+
+    let (workspace_card_areas, computed_agent_card_areas) =
+        if let Some(layout) = sidebar_list_layout.as_ref() {
+            sidebar::compute_sidebar_row_areas_from_layout(
+                app,
+                workspace_list_rect_for_app(app, sidebar_area),
+                layout,
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
     let visible_user_actions = tabs::visible_user_actions(app);
     let tab_bar_view = app
@@ -653,7 +681,7 @@ fn compute_view_internal_at(
         })
         .unwrap_or_default();
     app.tab_scroll = tab_bar_view.scroll;
-    // A hidden tab row leaves the toggles homeless; the status row takes them.
+    // Only drawn tab controls own row hit areas; fallback actions live in ⋯.
     let (
         repo_editor_button_hit_area,
         add_action_button_hit_area,
@@ -672,13 +700,6 @@ fn compute_view_internal_at(
             tab_bar_view.pane_toggle_below_hit_area,
             tab_bar_view.pane_toggle_right_hit_area,
         )
-    } else if app.active.is_some() {
-        tabs::tab_action_fallback_hit_areas(
-            status_bar_rect,
-            app.mouse_capture,
-            &visible_user_actions,
-            tabs::TabActionVisibility::from_state(app),
-        )
     } else {
         (
             Rect::default(),
@@ -692,8 +713,21 @@ fn compute_view_internal_at(
 
     let git_menu_layout = (app.server_mode() == Mode::GitMenu).then(|| {
         let in_git_repo = dock::chooser::focused_in_git_repo(app);
+        // Preserve the fallback popup anchor without making it a clickable
+        // status-row button. Only controls actually drawn there own hit areas.
+        let anchor = if git_menu_button_hit_area.width == 0 && app.active.is_some() {
+            tabs::tab_action_fallback_hit_areas(
+                status_bar_rect,
+                app.mouse_capture,
+                &visible_user_actions,
+                tabs::TabActionVisibility::from_state(app),
+            )
+            .3
+        } else {
+            git_menu_button_hit_area
+        };
         tabs::git_menu_dropdown_layout(
-            git_menu_button_hit_area,
+            anchor,
             area,
             app.git_menu.highlighted,
             app.status_git_ahead_behind,
@@ -752,20 +786,16 @@ fn compute_view_internal_at(
         })
         .unwrap_or_default();
 
-    let agent_card_areas = if app.sidebar_collapsed {
-        Vec::new()
+    let agent_card_areas = computed_agent_card_areas;
+    let tab_card_areas = if let Some(layout) = sidebar_list_layout.as_ref() {
+        sidebar::compute_tab_card_areas_from_layout(app, layout)
     } else {
-        sidebar::compute_agent_card_areas(app, sidebar_area)
+        Vec::new()
     };
-    let tab_card_areas = if app.sidebar_collapsed {
-        Vec::new()
+    let sidebar_hover_targets = if let Some(layout) = sidebar_list_layout.as_ref() {
+        sidebar::compute_sidebar_hover_targets_from_layout(app, sidebar_area, layout)
     } else {
-        sidebar::compute_tab_card_areas(app, sidebar_area)
-    };
-    let sidebar_hover_targets = if app.sidebar_collapsed {
         Vec::new()
-    } else {
-        sidebar::compute_sidebar_hover_targets(app, sidebar_area)
     };
     let sidebar_footer_work_hit_area = if app.sidebar_collapsed {
         Rect::default()
@@ -3359,10 +3389,33 @@ mod tests {
                 let below = app.view.pane_toggle_below_hit_area;
                 let right = app.view.pane_toggle_right_hit_area;
                 let add = app.view.add_action_button_hit_area;
-                assert!(add.width > 0, "{label}");
-                assert_eq!(menu.width > 0, pull, "{label}");
-                assert_eq!(below.width > 0, toggles, "{label}");
-                assert_eq!(right.width > 0, toggles, "{label}");
+                assert_eq!(add.width > 0, on_tab_row, "{label}");
+                assert_eq!(menu.width > 0, on_tab_row && pull, "{label}");
+                assert_eq!(below.width > 0, on_tab_row && toggles, "{label}");
+                assert_eq!(right.width > 0, on_tab_row && toggles, "{label}");
+                if !on_tab_row {
+                    app.status_more_open = true;
+                    compute_view(&mut app, Rect::new(0, 0, 120, 40));
+                    let has = |action| {
+                        app.view.status_segment_hit_areas.iter().any(|(kind, _)| {
+                            *kind == crate::app::state::StatusSegmentKind::MoreAction(action)
+                        })
+                    };
+                    assert!(has(crate::app::state::TopBarAction::AddAction));
+                    assert_eq!(has(crate::app::state::TopBarAction::GitMenu), pull);
+                    assert_eq!(
+                        has(crate::app::state::TopBarAction::PaneToggle(
+                            crate::app::state::PaneToggleDirection::Below
+                        )),
+                        toggles
+                    );
+                    assert_eq!(
+                        has(crate::app::state::TopBarAction::PaneToggle(
+                            crate::app::state::PaneToggleDirection::Right
+                        )),
+                        toggles
+                    );
+                }
                 // Every drawn control shares the row and never overlaps.
                 let mut spans: Vec<(u16, u16)> = [add, menu, below, right]
                     .into_iter()
@@ -3471,7 +3524,7 @@ mod tests {
     /// Every unit test used `AppState::test_new()`, whose tab row is `Top`, so
     /// the whole feature was invisible at runtime while the tests were green.
     #[test]
-    fn opted_in_pane_toggles_fall_back_to_the_status_row_under_the_default_config() {
+    fn opted_in_pane_toggles_live_in_more_under_the_default_config() {
         assert_eq!(
             crate::config::Config::default().ui.tab_bar_position,
             crate::config::TabBarPositionConfig::Hidden,
@@ -3498,15 +3551,28 @@ mod tests {
             let git = app.view.git_menu_button_hit_area;
             let below = app.view.pane_toggle_below_hit_area;
             let right = app.view.pane_toggle_right_hit_area;
-            assert_eq!(
-                git,
-                Rect::new(status.x + status.width - 16, status.y, 10, 1)
-            );
-            assert_eq!(
-                below,
-                Rect::new(status.x + status.width - 6, status.y, 3, 1)
-            );
-            assert_eq!(right, Rect::new(below.x + 3, status.y, 3, 1));
+            assert_eq!(git, Rect::default());
+            assert_eq!(below, Rect::default());
+            assert_eq!(right, Rect::default());
+            app.status_more_open = true;
+            compute_view(&mut app, Rect::new(0, 0, width, height));
+            for action in [
+                crate::app::state::TopBarAction::GitMenu,
+                crate::app::state::TopBarAction::PaneToggle(
+                    crate::app::state::PaneToggleDirection::Below,
+                ),
+                crate::app::state::TopBarAction::PaneToggle(
+                    crate::app::state::PaneToggleDirection::Right,
+                ),
+            ] {
+                assert!(app
+                    .view
+                    .status_segment_hit_areas
+                    .iter()
+                    .any(|(kind, rect)| *kind
+                        == crate::app::state::StatusSegmentKind::MoreAction(action)
+                        && rect.y > status.y));
+            }
 
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|frame| render(&app, frame)).unwrap();
@@ -3548,10 +3614,21 @@ mod tests {
 
             compute_view(&mut app, Rect::new(0, 0, width, height));
 
-            assert_eq!(app.view.git_menu_button_hit_area.width, 10);
+            assert_eq!(app.view.git_menu_button_hit_area, Rect::default());
             assert_eq!(
                 app.view.git_menu_popup_rect.y,
-                app.view.git_menu_button_hit_area.y + 1
+                app.view.status_bar_rect.y + 1
+            );
+            let anchor = tabs::tab_action_fallback_hit_areas(
+                app.view.status_bar_rect,
+                app.mouse_capture,
+                &tabs::visible_user_actions(&app),
+                tabs::TabActionVisibility::from_state(&app),
+            )
+            .3;
+            assert_eq!(
+                app.view.git_menu_popup_rect.x,
+                anchor.x.min(width - app.view.git_menu_popup_rect.width)
             );
             assert_eq!(app.view.git_menu_row_hit_areas.len(), 5);
             assert!(app
@@ -3930,9 +4007,7 @@ mod tests {
             app.view.status_bar_rect,
             app.view.status_bar_rect.y,
         );
-        assert!(row0.contains("CPU 92%"), "{row0:?}");
-        assert!(row0.contains("MEM 13.0/16G"), "{row0:?}");
-        assert_eq!(row0.matches('\u{25cf}').count(), 1, "{row0:?}");
+        assert_eq!(row0.matches('\u{25cf}').count(), 3, "{row0:?}");
         assert!(row0.starts_with(" H  F  O  B  S "), "{row0:?}");
     }
 
@@ -3986,9 +4061,7 @@ mod tests {
             app.view.status_bar_rect,
             app.view.status_bar_rect.y,
         );
-        assert!(row0.contains("MEM --"), "{row0:?}");
-        assert!(row0.contains("CPU --"), "{row0:?}");
-        assert!(row0.contains("DSK --"), "{row0:?}");
+        assert_eq!(row0.matches('\u{25cf}').count(), 3, "{row0:?}");
         assert!(row0.trim_end().ends_with("..."), "{row0:?}");
         rendered.push((
             "unavailable fallback",

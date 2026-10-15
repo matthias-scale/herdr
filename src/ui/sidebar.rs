@@ -24,7 +24,7 @@ use self::tokens::{ResolvedToken, ResolvedTokenKind};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::state_label_color;
 use super::status::status_report_age_micro_label;
-use super::text::{display_width, display_width_u16, middle_elide, truncate_end};
+use super::text::{display_width, middle_elide, truncate_end};
 use crate::app::state::{Palette, SidebarGroupMode, SidebarSortMode};
 use crate::app::{AppState, Mode};
 #[cfg(test)]
@@ -635,12 +635,35 @@ pub(crate) fn title_without_object_identifier(title: &str) -> Option<&str> {
     (github_identifier || linear_identifier).then_some(title)
 }
 
-fn compact_row_title_for_width<'a>(
+fn compact_row_title_for_app<'a>(
+    app: &AppState,
     title: &'a str,
     provider: &str,
     device: Option<&str>,
     width: usize,
     requested_prefix: usize,
+) -> &'a str {
+    compact_row_title_for_width_with_padding(
+        title,
+        provider,
+        device,
+        width,
+        requested_prefix,
+        sidebar_row_left_padding(app),
+    )
+}
+
+fn sidebar_row_left_padding(_app: &AppState) -> usize {
+    1
+}
+
+fn compact_row_title_for_width_with_padding<'a>(
+    title: &'a str,
+    provider: &str,
+    device: Option<&str>,
+    width: usize,
+    requested_prefix: usize,
+    left_padding: usize,
 ) -> &'a str {
     if width >= SIDEBAR_WIDE_ROW_MIN_WIDTH {
         return title;
@@ -648,8 +671,16 @@ fn compact_row_title_for_width<'a>(
     let Some(title_only) = title_without_object_identifier(title) else {
         return title;
     };
-    let widths = compact_row_widths(title, provider, device, width, requested_prefix);
-    let fixed_width = requested_prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+    let widths = compact_row_widths(
+        title,
+        provider,
+        device,
+        width,
+        requested_prefix,
+        left_padding,
+    );
+    let fixed_width =
+        requested_prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age + left_padding;
     if display_width(title) <= width.saturating_sub(fixed_width) {
         title
     } else {
@@ -715,6 +746,7 @@ fn compact_row_layout(
     nerd_font: bool,
     device: Option<&str>,
     show_provider: bool,
+    left_padding: usize,
 ) -> TabRowLayout {
     let (age, activity_instant) = compact_age(entry, now);
     let provider = if show_provider {
@@ -722,14 +754,15 @@ fn compact_row_layout(
     } else {
         String::new()
     };
-    let title = compact_row_title_for_width(
+    let title = compact_row_title_for_width_with_padding(
         compact_row_title(entry, tab),
         &provider,
         device,
         width,
         prefix_width,
+        left_padding,
     );
-    let widths = compact_row_widths(title, &provider, device, width, prefix_width);
+    let widths = compact_row_widths(title, &provider, device, width, prefix_width, left_padding);
     let done_marker = if entry_has_unread_done_marker(entry) && widths.age > 0 {
         "✓ "
     } else {
@@ -811,9 +844,25 @@ fn compact_row_prefix_width(
     device: Option<&str>,
     width: usize,
     requested_prefix: usize,
+    left_padding: usize,
 ) -> usize {
-    let title = compact_row_title_for_width(title, provider, device, width, requested_prefix);
-    compact_row_widths(title, provider, device, width, requested_prefix).prefix
+    let title = compact_row_title_for_width_with_padding(
+        title,
+        provider,
+        device,
+        width,
+        requested_prefix,
+        left_padding,
+    );
+    compact_row_widths(
+        title,
+        provider,
+        device,
+        width,
+        requested_prefix,
+        left_padding,
+    )
+    .prefix
 }
 
 /// Fields yield in a fixed order as the row narrows so the title never drops
@@ -825,12 +874,16 @@ fn compact_row_widths(
     device: Option<&str>,
     width: usize,
     requested_prefix: usize,
+    left_padding: usize,
 ) -> CompactRowWidths {
+    // Metadata must fit inside the inset content area, keeping the title
+    // readable when a full machine label is wider than the old device code.
+    let content_width = width.saturating_sub(if device.is_some() { left_padding } else { 0 });
     let title_width = display_width(title);
     let readable_title_width = title_width.min(SIDEBAR_MIN_NESTED_TITLE_WIDTH);
     let minimum_prefix_width = requested_prefix.min(SIDEBAR_MIN_NESTED_PREFIX_WIDTH);
     let fits = |provider: usize, age: usize| {
-        width
+        content_width
             >= SIDEBAR_DOT_FIELD_WIDTH
                 + provider
                 + age
@@ -856,7 +909,7 @@ fn compact_row_widths(
         }
     };
     let target_title_width = title_width.min(SIDEBAR_TITLE_TARGET_WIDTH);
-    let prefix_budget = width
+    let prefix_budget = content_width
         .saturating_sub(SIDEBAR_DOT_FIELD_WIDTH + provider + age)
         .saturating_sub(target_title_width);
     let preserve_nested_prefix = requested_prefix > 0 && fits(provider, age);
@@ -1265,7 +1318,8 @@ fn render_remote_compact_agent_row_body(
     _show_host_identity: bool,
     working_shelf: bool,
 ) {
-    if rect.width == 0 || rect.height == 0 {
+    let content_rect = sidebar_row_content_rect_for_app(app, rect);
+    if rect.width == 0 || rect.height == 0 || content_rect.width == 0 {
         return;
     }
     if let Some(bg) = bg {
@@ -1277,7 +1331,8 @@ fn render_remote_compact_agent_row_body(
     let requested_prefix = prefix_override.unwrap_or_else(|| usize::from(depth));
     let row_width = usize::from(rect.width);
     let device = sidebar_machine_label(app, &remote.agent_ref.host);
-    let title = compact_row_title_for_width(
+    let title = compact_row_title_for_app(
+        app,
         remote_sidebar_title(app, remote),
         sidebar_remote_row_provider(app, remote),
         device,
@@ -1290,6 +1345,7 @@ fn render_remote_compact_agent_row_body(
         device,
         row_width,
         requested_prefix,
+        sidebar_row_left_padding(app),
     );
     let provider_width = widths.provider;
     let age_width = remote_row_age_width(remote, app.view_observed_at, widths.age);
@@ -1303,7 +1359,7 @@ fn render_remote_compact_agent_row_body(
         + provider_width
         + age_width
         + display_width(done_marker);
-    let title_width = row_width.saturating_sub(fixed_width);
+    let title_width = usize::from(content_rect.width).saturating_sub(fixed_width);
     let selected = app
         .sidebar_selected_remote_agent
         .as_ref()
@@ -1354,7 +1410,7 @@ fn render_remote_compact_agent_row_body(
         compact_age_color(&remote.entry, app.view_observed_at, p)
     });
 
-    let mut x = rect.x.saturating_add(widths.prefix as u16);
+    let mut x = content_rect.x.saturating_add(widths.prefix as u16);
     frame.render_widget(
         Paragraph::new(Span::styled(remote.render_dot, row_style(dot_style))),
         Rect::new(x, rect.y, SIDEBAR_DOT_FIELD_WIDTH as u16, rect.height),
@@ -1450,10 +1506,15 @@ fn render_remote_compact_agent_row_body(
             let subtitle = format!("{}↳ {ask}", " ".repeat(requested_prefix));
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    truncate_end(&subtitle, usize::from(rect.width)),
+                    truncate_end(&subtitle, usize::from(content_rect.width)),
                     Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
                 )),
-                Rect::new(rect.x, rect.y.saturating_add(1), rect.width, 1),
+                Rect::new(
+                    content_rect.x,
+                    rect.y.saturating_add(1),
+                    content_rect.width,
+                    1,
+                ),
             );
         }
     }
@@ -1469,7 +1530,8 @@ fn render_compact_agent_row_body(
     bg: Option<Color>,
     prefix_override: Option<usize>,
 ) {
-    if rect.width == 0 || rect.height == 0 {
+    let content_rect = sidebar_row_content_rect_for_app(app, rect);
+    if rect.width == 0 || rect.height == 0 || content_rect.width == 0 {
         return;
     }
     let Some(target) = entry.local_target() else {
@@ -1480,7 +1542,8 @@ fn render_compact_agent_row_body(
     let provider = sidebar_row_provider(app, entry);
     let machine_host = sidebar_machine_host(app, entry);
     let device_code = sidebar_machine_label(app, machine_host);
-    let row_title = compact_row_title_for_width(
+    let row_title = compact_row_title_for_app(
+        app,
         compact_row_title(entry, tab),
         &provider,
         device_code,
@@ -1493,6 +1556,7 @@ fn render_compact_agent_row_body(
         device_code,
         usize::from(rect.width),
         requested_prefix_width,
+        sidebar_row_left_padding(app),
     );
     let prefix = " ".repeat(widths.prefix);
     let layout = compact_row_layout(
@@ -1504,13 +1568,14 @@ fn render_compact_agent_row_body(
         app.nerd_font,
         device_code,
         app.sidebar_show_provider_icons,
+        sidebar_row_left_padding(app),
     );
     let fixed_width = widths.prefix
         + SIDEBAR_DOT_FIELD_WIDTH
         + widths.provider
         + widths.age
         + display_width(&layout.done_marker);
-    let title_width = usize::from(rect.width).saturating_sub(fixed_width);
+    let title_width = usize::from(content_rect.width).saturating_sub(fixed_width);
     let pin_width = sidebar_pin_width(app, entry, rect, title_width, tab);
     let title_width = title_width.saturating_sub(pin_width);
     let control_pane = row_control_pane(app, entry, tab);
@@ -1558,14 +1623,14 @@ fn render_compact_agent_row_body(
             .workspaces
             .get(target.ws_idx)
             .is_some_and(|ws| ws.active_tab_index() == target.tab_idx);
-    let title_style =
-        if is_active || app.is_active_pane(target.ws_idx, target.tab_idx, target.pane_id) {
-            Style::default()
-                .fg(active_sidebar_title_color(p))
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.subtext0)
-        };
+    let is_focused = is_active || app.is_active_pane(target.ws_idx, target.tab_idx, target.pane_id);
+    let title_style = if is_focused {
+        Style::default()
+            .fg(active_sidebar_title_color(p))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(p.subtext0)
+    };
     let dot_color = compact_row_color(entry, p);
     let fade = blue_working_row(entry, p, dot_color) || entry.working_shelf;
     let row_style = |style| {
@@ -1658,7 +1723,7 @@ fn render_compact_agent_row_body(
         Span::styled(layout.done_marker, row_style(Style::default().fg(p.green))),
         Span::styled(age, row_style(age_style)),
     ]);
-    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
+    frame.render_widget(Paragraph::new(Line::from(spans)), content_rect);
 }
 
 fn selected_local_row_pane(
@@ -1713,14 +1778,22 @@ fn sidebar_pin_rect(
     }
     let provider = sidebar_row_provider(app, entry);
     let device = sidebar_machine_label(app, sidebar_machine_host(app, entry));
-    let title = compact_row_title_for_width(
+    let title = compact_row_title_for_app(
+        app,
         compact_row_title(entry, tab),
         &provider,
         device,
         usize::from(row.width),
         prefix,
     );
-    let widths = compact_row_widths(title, &provider, device, usize::from(row.width), prefix);
+    let widths = compact_row_widths(
+        title,
+        &provider,
+        device,
+        usize::from(row.width),
+        prefix,
+        sidebar_row_left_padding(app),
+    );
     let title_width = usize::from(row.width).saturating_sub(
         widths.prefix
             + SIDEBAR_DOT_FIELD_WIDTH
@@ -1844,7 +1917,8 @@ pub(crate) fn selected_row_control_at(
     let requested_prefix = usize::from(depth);
     let provider = sidebar_row_provider(app, entry);
     let device = sidebar_machine_label(app, sidebar_machine_host(app, entry));
-    let title = compact_row_title_for_width(
+    let title = compact_row_title_for_app(
+        app,
         compact_row_title(entry, tab),
         &provider,
         device,
@@ -1857,6 +1931,7 @@ pub(crate) fn selected_row_control_at(
         device,
         usize::from(rect.width),
         requested_prefix,
+        sidebar_row_left_padding(app),
     );
     let fixed_width = widths.prefix
         + SIDEBAR_DOT_FIELD_WIDTH
@@ -1915,7 +1990,8 @@ pub(crate) fn selected_remote_row_control_at(
     let requested_prefix = usize::from(depth);
     let row_width = usize::from(rect.width);
     let device = sidebar_machine_label(app, &entry.agent_ref.host);
-    let title = compact_row_title_for_width(
+    let title = compact_row_title_for_app(
+        app,
         remote_sidebar_title(app, entry),
         sidebar_remote_row_provider(app, entry),
         device,
@@ -1928,6 +2004,7 @@ pub(crate) fn selected_remote_row_control_at(
         device,
         row_width,
         requested_prefix,
+        sidebar_row_left_padding(app),
     );
     let age_width = remote_row_age_width(entry, app.view_observed_at, widths.age);
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + age_width;
@@ -1977,7 +2054,17 @@ pub(super) fn tab_row_layout(
     nerd_font: bool,
 ) -> TabRowLayout {
     let _ = (palette, indicator_style);
-    compact_row_layout(entry, now, width, prefix_width, true, nerd_font, None, true)
+    compact_row_layout(
+        entry,
+        now,
+        width,
+        prefix_width,
+        true,
+        nerd_font,
+        None,
+        true,
+        1,
+    )
 }
 
 /// A tab row's layout under the operator's display options, for callers that
@@ -1987,6 +2074,7 @@ pub(super) fn display_tab_row_layout(
     entry: &AgentPanelEntry,
     width: usize,
     prefix_width: usize,
+    left_padding: usize,
 ) -> TabRowLayout {
     compact_row_layout(
         entry,
@@ -1997,6 +2085,7 @@ pub(super) fn display_tab_row_layout(
         app.nerd_font,
         None,
         app.sidebar_show_provider_icons,
+        left_padding,
     )
 }
 
@@ -2011,7 +2100,17 @@ pub(super) fn mobile_tab_row_layout(
     nerd_font: bool,
 ) -> TabRowLayout {
     let _ = (palette, indicator_style);
-    compact_row_layout(entry, now, width, prefix_width, true, nerd_font, None, true)
+    compact_row_layout(
+        entry,
+        now,
+        width,
+        prefix_width,
+        true,
+        nerd_font,
+        None,
+        true,
+        0,
+    )
 }
 
 /// Foreground for the selected Space and the current tab title in the sidebar.
@@ -4121,10 +4220,17 @@ fn collapsed_sidebar_placement(
             .then(|| (section.to_string(), section.to_string()));
     }
 
+    let working_collapsed = section_is_collapsed(app, WORKING_SECTION_TITLE);
     let working_shelf = app.sidebar_sections_layout
-        && !section_is_collapsed(app, WORKING_SECTION_TITLE)
-        && sidebar_entry_has_working_state(entry);
+        && sidebar_entry_has_working_state(entry)
+        && (!entry.pinned || !working_collapsed);
     if working_shelf {
+        if section_is_collapsed(app, WORKING_SECTION_TITLE) {
+            return Some((
+                WORKING_SECTION_TITLE.to_string(),
+                WORKING_SECTION_TITLE.to_string(),
+            ));
+        }
         if devices::group_is_collapsed(app, "working", &app.agent_host_name, true, true) {
             return Some((
                 WORKING_SECTION_TITLE.to_string(),
@@ -4650,12 +4756,15 @@ fn compact_sidebar_rows_inner(
         let mut space_entries = Vec::new();
         let mut remote_main_entries = Vec::new();
         // Pinned windows also remain in their normal lifecycle section.
-        // Working panes stay in the device tree when Working is collapsed;
-        // otherwise they live in the Working shelf.
+        // Working panes live in the Working shelf even when it is collapsed.
         for entry in visible_entries.iter().cloned() {
             if entry.remote_entry.is_some() {
-                remote_main_entries.push(entry);
-            } else if working_collapsed || !sidebar_entry_has_working_state(&entry) {
+                if !sidebar_entry_has_working_state(&entry) {
+                    remote_main_entries.push(entry);
+                }
+            } else if !sidebar_entry_has_working_state(&entry)
+                || (working_collapsed && entry.pinned)
+            {
                 space_entries.push(entry);
             }
         }
@@ -4663,7 +4772,11 @@ fn compact_sidebar_rows_inner(
         let mut remote_settled = Vec::new();
         for entry in remote_entries.iter().cloned() {
             match sidebar_entry_lifecycle(app, &entry) {
-                SidebarEntryLifecycle::Active => remote_main_entries.push(entry),
+                SidebarEntryLifecycle::Active => {
+                    if !sidebar_entry_has_working_state(&entry) {
+                        remote_main_entries.push(entry);
+                    }
+                }
                 SidebarEntryLifecycle::Snoozed => remote_snoozed.push(entry),
                 SidebarEntryLifecycle::Settled => remote_settled.push(entry),
             }
@@ -4698,7 +4811,7 @@ fn compact_sidebar_rows_inner(
             }
             rows.push(SidebarRow::Divider);
         }
-        let workspace_activity = sidebar_workspace_activity(&space_entries);
+        let workspace_activity = sidebar_workspace_activity(&visible_entries);
         let local_main_agent_count = ordered_tab_entries(app, &space_entries).len();
         if local_main_agent_count > 0 {
             let key = devices::group_key("main", &app.agent_host_name);
@@ -4952,18 +5065,18 @@ fn sidebar_row_render_width(app: &AppState, rows: &[SidebarRow], mobile: bool) -
         app.view.sidebar_rect
     };
     if app.sidebar_collapsed {
-        return usize::from(collapsed_sidebar_sections(area).0.width);
+        return usize::from(sidebar_row_content_rect(collapsed_sidebar_sections(area).0).width);
     }
 
     let list = workspace_list_rect_for_app(app, area);
     let body_height = list.height.saturating_sub(sidebar_header_rows(app));
-    let content_height = rows.iter().enumerate().fold(0u16, |height, (index, row)| {
-        height
-            .saturating_add(sidebar_row_height(app, row, body_height))
-            .saturating_add(sidebar_row_gap(app, rows, index))
-    });
+    let (_, content_height) = workspace_group_spacing_and_content_height(app, rows, body_height);
     let has_scrollbar = body_height > 0 && content_height > body_height;
-    usize::from(list.width.saturating_sub(u16::from(has_scrollbar)))
+    usize::from(
+        list.width
+            .saturating_sub(u16::from(has_scrollbar))
+            .saturating_sub(u16::from(list.width > 0)),
+    )
 }
 
 fn mark_ambiguous_remote_titles(app: &AppState, rows: &mut [SidebarRow], width: usize) {
@@ -4993,8 +5106,9 @@ fn mark_ambiguous_remote_titles(app: &AppState, rows: &mut [SidebarRow], width: 
             _ => return None,
         };
         let requested_prefix = usize::from(depth);
-        let title = compact_row_title_for_width(title, &provider, device, width, requested_prefix);
-        let widths = compact_row_widths(title, &provider, device, width, requested_prefix);
+        let title =
+            compact_row_title_for_app(app, title, &provider, device, width, requested_prefix);
+        let widths = compact_row_widths(title, &provider, device, width, requested_prefix, 0);
         let fixed = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
         let title_width = width.saturating_sub(fixed);
         let title = if remote {
@@ -8689,16 +8803,7 @@ pub(crate) fn sidebar_space_member_indices(app: &AppState, root_idx: usize) -> V
 
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
     let ws_area = workspace_list_rect_for_app(app, area);
-    let body = workspace_list_body_rect(app, ws_area, false);
-    if body.height == 0 {
-        return requested;
-    }
-
-    if sidebar_rows(app).is_empty() {
-        0
-    } else {
-        requested.min(workspace_list_bottom_start(app, ws_area))
-    }
+    SidebarListLayout::new(app, ws_area).normalize_scroll(requested)
 }
 
 pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> {
@@ -9018,13 +9123,54 @@ fn agent_row_ordinals(rows: &[SidebarRow]) -> Vec<usize> {
         .collect()
 }
 
-fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
+#[derive(Clone, Copy)]
+pub(super) struct WorkspaceGroupSpacing {
+    spacers_fit: bool,
+    first_group_index: Option<usize>,
+}
+
+/// Sortable nested headers name tab/workspace groups. Device and other
+/// structural headers have no sort key and must not acquire group spacers.
+fn is_workspace_group_header(row: &SidebarRow) -> bool {
+    matches!(
+        row,
+        SidebarRow::Workspace { .. }
+            | SidebarRow::NestedHeader {
+                sort_key: Some(_),
+                ..
+            }
+    )
+}
+
+fn sidebar_row_gap(
+    app: &AppState,
+    rows: &[SidebarRow],
+    row_idx: usize,
+    workspace_spacing: WorkspaceGroupSpacing,
+) -> u16 {
     let Some(row) = rows.get(row_idx) else {
         return 0;
     };
     let Some(next) = rows.get(row_idx + 1) else {
         return 0;
     };
+    if is_workspace_group_header(next)
+        && !matches!(
+            row,
+            SidebarRow::Workspace { .. }
+                | SidebarRow::NestedHeader { .. }
+                | SidebarRow::SectionHeader { .. }
+                | SidebarRow::Divider
+                | SidebarRow::ShelfDivider
+        )
+    {
+        return u16::from(
+            workspace_spacing.spacers_fit
+                && workspace_spacing
+                    .first_group_index
+                    .is_some_and(|first| row_idx.saturating_add(1) > first),
+        );
+    }
     match (row, next) {
         (SidebarRow::Divider | SidebarRow::ShelfDivider, _)
         | (_, SidebarRow::Divider | SidebarRow::ShelfDivider) => 0,
@@ -9034,13 +9180,11 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
         (SidebarRow::NestedHeader { .. }, SidebarRow::Agent { .. }) => 0,
         (SidebarRow::NestedHeader { .. }, SidebarRow::NestedHeader { .. }) => 0,
         (_, SidebarRow::NestedHeader { .. }) => 0,
-        (SidebarRow::NestedHeader { .. }, SidebarRow::Workspace { .. }) => {
-            app.sidebar_spaces.row_gap
-        }
+        (SidebarRow::NestedHeader { .. }, SidebarRow::Workspace { .. }) => 0,
         (SidebarRow::Tab { .. }, SidebarRow::Agent { .. }) => 0,
         (SidebarRow::Workspace { .. }, SidebarRow::Agent { .. }) => 0,
         (_, SidebarRow::Workspace { indented: true, .. }) => 0,
-        (SidebarRow::Workspace { .. }, SidebarRow::Workspace { .. }) => app.sidebar_spaces.row_gap,
+        (SidebarRow::Workspace { .. }, SidebarRow::Workspace { .. }) => 0,
         (SidebarRow::Agent { .. }, SidebarRow::Agent { .. }) => app.sidebar_agents.row_gap,
         // Remote rows inside one projected group hug each other like local
         // rows under the same group header.
@@ -9105,43 +9249,221 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
     }
 }
 
-fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> usize {
-    let body = workspace_list_body_rect(app, area, false);
-    if body.width == 0 || body.height == 0 {
-        return 0;
+fn workspace_group_spacing(
+    app: &AppState,
+    rows: &[SidebarRow],
+    body_height: u16,
+) -> WorkspaceGroupSpacing {
+    workspace_group_spacing_and_content_height(app, rows, body_height).0
+}
+
+fn workspace_group_spacing_and_content_height(
+    app: &AppState,
+    rows: &[SidebarRow],
+    body_height: u16,
+) -> (WorkspaceGroupSpacing, u16) {
+    let mut first_group_index = None;
+    let mut spacer_count = 0usize;
+    let content_height = rows.iter().enumerate().fold(0u16, |height, (index, row)| {
+        if is_workspace_group_header(row) && first_group_index.is_none() {
+            first_group_index = Some(index);
+        }
+        let gap = sidebar_row_gap(
+            app,
+            rows,
+            index,
+            WorkspaceGroupSpacing {
+                spacers_fit: false,
+                first_group_index,
+            },
+        );
+        let spaced_gap = sidebar_row_gap(
+            app,
+            rows,
+            index,
+            WorkspaceGroupSpacing {
+                spacers_fit: true,
+                first_group_index,
+            },
+        );
+        spacer_count = spacer_count.saturating_add(usize::from(spaced_gap.saturating_sub(gap)));
+        height
+            .saturating_add(sidebar_row_height(app, row, body_height))
+            .saturating_add(gap)
+    });
+    let spacers_fit =
+        usize::from(content_height).saturating_add(spacer_count) <= usize::from(body_height);
+    let total_content_height = content_height.saturating_add(if spacers_fit {
+        u16::try_from(spacer_count).unwrap_or(u16::MAX)
+    } else {
+        0
+    });
+    (
+        WorkspaceGroupSpacing {
+            spacers_fit,
+            first_group_index,
+        },
+        total_content_height,
+    )
+}
+
+/// Row measurements shared by every geometry helper in one sidebar pass.
+/// Keeping the rows and spacer decision together avoids repeating the full
+/// height/gap scan in scroll metrics, hit areas, and section helpers.
+pub(crate) struct SidebarListLayout {
+    rows: Vec<SidebarRow>,
+    list_area: Rect,
+    body_height: u16,
+    workspace_spacing: WorkspaceGroupSpacing,
+    max_scroll: usize,
+}
+
+impl SidebarListLayout {
+    pub(crate) fn new(app: &AppState, list_area: Rect) -> Self {
+        Self::from_rows(app, list_area, sidebar_rows(app))
     }
 
+    pub(crate) fn from_rows(app: &AppState, list_area: Rect, rows: Vec<SidebarRow>) -> Self {
+        let body_height = workspace_list_body_rect(app, list_area, false).height;
+        let workspace_spacing = workspace_group_spacing(app, &rows, body_height);
+        let max_scroll =
+            workspace_list_bottom_start_from_rows(app, &rows, body_height, workspace_spacing);
+        Self {
+            rows,
+            list_area,
+            body_height,
+            workspace_spacing,
+            max_scroll,
+        }
+    }
+
+    pub(crate) fn rows(&self) -> &[SidebarRow] {
+        &self.rows
+    }
+
+    pub(crate) fn normalize_scroll(&self, requested: usize) -> usize {
+        if self.body_height == 0 {
+            requested
+        } else if self.rows.is_empty() {
+            0
+        } else {
+            requested.min(self.max_scroll)
+        }
+    }
+
+    pub(crate) fn metrics(&self, app: &AppState) -> crate::pane::ScrollMetrics {
+        self.metrics_for_scroll(app, app.workspace_scroll)
+    }
+
+    fn metrics_for_scroll(
+        &self,
+        app: &AppState,
+        requested_scroll: usize,
+    ) -> crate::pane::ScrollMetrics {
+        let scroll = requested_scroll.min(self.max_scroll);
+        let viewport_rows = if self.body_height == 0
+            || workspace_list_body_rect(app, self.list_area, false).width == 0
+        {
+            0
+        } else {
+            workspace_list_visible_count_from_rows(
+                app,
+                &self.rows,
+                self.body_height,
+                self.workspace_spacing,
+                scroll,
+            )
+        };
+        crate::pane::ScrollMetrics {
+            offset_from_bottom: self.max_scroll.saturating_sub(scroll),
+            max_offset_from_bottom: self.max_scroll,
+            viewport_rows,
+        }
+    }
+
+    pub(crate) fn body(&self, app: &AppState, metrics: crate::pane::ScrollMetrics) -> Rect {
+        workspace_list_body_rect(app, self.list_area, should_show_scrollbar(metrics))
+    }
+
+    pub(super) fn workspace_spacing(&self) -> WorkspaceGroupSpacing {
+        self.workspace_spacing
+    }
+
+    fn visible_count(&self, app: &AppState, scroll: usize) -> usize {
+        workspace_list_visible_count_from_rows(
+            app,
+            &self.rows,
+            self.body_height,
+            self.workspace_spacing,
+            scroll,
+        )
+    }
+}
+
+fn workspace_list_visible_count_from_rows(
+    app: &AppState,
+    entries: &[SidebarRow],
+    body_height: u16,
+    workspace_spacing: WorkspaceGroupSpacing,
+    scroll: usize,
+) -> usize {
     let mut used_rows = 0u16;
     let mut visible = 0usize;
-    let entries = sidebar_rows(app);
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
-        let row_height = sidebar_row_height(app, entry, body.height);
-        let gap = sidebar_row_gap(app, &entries, entry_idx);
-        if used_rows.saturating_add(row_height) > body.height {
+        let row_height = sidebar_row_height(app, entry, body_height);
+        let gap = sidebar_row_gap(app, entries, entry_idx, workspace_spacing);
+        if used_rows.saturating_add(row_height) > body_height {
             break;
         }
         used_rows = used_rows.saturating_add(row_height);
         visible += 1;
-        used_rows = used_rows.saturating_add(gap).min(body.height);
+        used_rows = used_rows.saturating_add(gap).min(body_height);
     }
     visible
 }
 
-fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
-    let body = workspace_list_body_rect(app, area, false);
-    let entries = sidebar_rows(app);
+fn workspace_list_bottom_start_from_rows(
+    app: &AppState,
+    entries: &[SidebarRow],
+    body_height: u16,
+    workspace_spacing: WorkspaceGroupSpacing,
+) -> usize {
     let mut used_rows = 0u16;
     let mut start = entries.len();
     for (entry_idx, entry) in entries.iter().enumerate().rev() {
-        let gap = sidebar_row_gap(app, &entries, entry_idx);
-        let needed = sidebar_row_height(app, entry, body.height).saturating_add(gap);
-        if used_rows.saturating_add(needed) > body.height {
+        let gap = sidebar_row_gap(app, entries, entry_idx, workspace_spacing);
+        let needed = sidebar_row_height(app, entry, body_height).saturating_add(gap);
+        if used_rows.saturating_add(needed) > body_height {
             break;
         }
         used_rows = used_rows.saturating_add(needed);
         start = entry_idx;
     }
     start.min(entries.len().saturating_sub(1))
+}
+
+fn sidebar_row_content_rect(rect: Rect) -> Rect {
+    Rect::new(
+        rect.x.saturating_add(u16::from(rect.width > 0)),
+        rect.y,
+        rect.width.saturating_sub(1),
+        rect.height,
+    )
+}
+
+fn sidebar_row_content_rect_for_app(_app: &AppState, rect: Rect) -> Rect {
+    sidebar_row_content_rect(rect)
+}
+
+#[cfg(test)]
+fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> usize {
+    let body = workspace_list_body_rect(app, area, false);
+    if body.width == 0 || body.height == 0 {
+        return 0;
+    }
+    let rows = sidebar_rows(app);
+    let spacing = workspace_group_spacing(app, &rows, body.height);
+    workspace_list_visible_count_from_rows(app, &rows, body.height, spacing, scroll)
 }
 
 /// Position of `ws_idx` in the unified sidebar row list, which is the index
@@ -9197,14 +9519,15 @@ pub(crate) fn sidebar_row_scroll_for_target(
     target: usize,
 ) -> usize {
     let ws_area = workspace_list_rect_for_app(app, area);
-    let max_scroll = workspace_list_bottom_start(app, ws_area);
+    let layout = SidebarListLayout::new(app, ws_area);
+    let max_scroll = layout.max_scroll;
     if target < current_scroll {
         return target.min(max_scroll);
     }
 
     let mut scroll = current_scroll.min(max_scroll);
     while scroll < target {
-        let visible = workspace_list_visible_count(app, ws_area, scroll);
+        let visible = layout.visible_count(app, scroll);
         if visible > 0 && target < scroll.saturating_add(visible) {
             break;
         }
@@ -9217,15 +9540,7 @@ pub(crate) fn workspace_list_scroll_metrics(
     app: &AppState,
     area: Rect,
 ) -> crate::pane::ScrollMetrics {
-    let max_scroll = workspace_list_bottom_start(app, area);
-    let scroll = app.workspace_scroll.min(max_scroll);
-    let viewport_rows = workspace_list_visible_count(app, area, scroll);
-
-    crate::pane::ScrollMetrics {
-        offset_from_bottom: max_scroll.saturating_sub(scroll),
-        max_offset_from_bottom: max_scroll,
-        viewport_rows,
-    }
+    SidebarListLayout::new(app, area).metrics(app)
 }
 
 /// Leading sidebar rows hidden by the scroll position. The renderer and the
@@ -9265,8 +9580,24 @@ pub(crate) fn compute_sidebar_row_areas(
         return (Vec::new(), Vec::new());
     }
 
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
+    let layout = SidebarListLayout::new(app, ws_area);
+    compute_sidebar_row_areas_from_layout(app, ws_area, &layout)
+}
+
+pub(crate) fn compute_sidebar_row_areas_from_layout(
+    app: &AppState,
+    ws_area: Rect,
+    layout: &SidebarListLayout,
+) -> (
+    Vec<crate::app::state::WorkspaceCardArea>,
+    Vec<crate::app::state::AgentCardArea>,
+) {
+    if ws_area == Rect::default() {
+        return (Vec::new(), Vec::new());
+    }
+
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
     if body.width == 0 || body.height == 0 {
         return (Vec::new(), Vec::new());
     }
@@ -9277,7 +9608,8 @@ pub(crate) fn compute_sidebar_row_areas(
     let mut cards = Vec::new();
     let mut agent_cards = Vec::new();
 
-    let entries = sidebar_rows(app);
+    let entries = layout.rows();
+    let workspace_spacing = layout.workspace_spacing();
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
         match entry {
             SidebarRow::Workspace {
@@ -9345,7 +9677,7 @@ pub(crate) fn compute_sidebar_row_areas(
         }
         row_y = row_y
             .saturating_add(sidebar_row_height(app, entry, body.height))
-            .saturating_add(sidebar_row_gap(app, &entries, entry_idx))
+            .saturating_add(sidebar_row_gap(app, entries, entry_idx, workspace_spacing))
             .min(body_bottom);
     }
 
@@ -9357,6 +9689,14 @@ pub(crate) fn compute_workspace_card_areas(
     area: Rect,
 ) -> Vec<crate::app::state::WorkspaceCardArea> {
     compute_workspace_list_areas(app, area).0
+}
+
+pub(crate) fn compute_workspace_card_areas_from_layout(
+    app: &AppState,
+    ws_area: Rect,
+    layout: &SidebarListLayout,
+) -> Vec<crate::app::state::WorkspaceCardArea> {
+    compute_sidebar_row_areas_from_layout(app, ws_area, layout).0
 }
 
 pub(crate) fn compute_agent_card_areas(
@@ -9371,11 +9711,20 @@ pub(crate) fn compute_tab_card_areas(
     area: Rect,
 ) -> Vec<crate::app::state::TabCardArea> {
     let ws_area = workspace_list_rect_for_app(app, area);
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
+    let layout = SidebarListLayout::new(app, ws_area);
+    compute_tab_card_areas_from_layout(app, &layout)
+}
+
+pub(crate) fn compute_tab_card_areas_from_layout(
+    app: &AppState,
+    layout: &SidebarListLayout,
+) -> Vec<crate::app::state::TabCardArea> {
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
     let mut y = body.y;
     let mut out = Vec::new();
-    let rows = sidebar_rows(app);
+    let rows = layout.rows();
+    let workspace_spacing = layout.workspace_spacing();
     for (idx, row) in rows
         .iter()
         .enumerate()
@@ -9398,9 +9747,12 @@ pub(crate) fn compute_tab_card_areas(
                 rect: Rect::new(body.x, y, body.width, height),
             });
         }
-        y = y
-            .saturating_add(height)
-            .saturating_add(sidebar_row_gap(app, &rows, idx));
+        y = y.saturating_add(height).saturating_add(sidebar_row_gap(
+            app,
+            rows,
+            idx,
+            workspace_spacing,
+        ));
     }
     out
 }
@@ -9433,20 +9785,34 @@ struct NestedHeaderArea {
 
 fn compute_sidebar_nested_header_areas(app: &AppState, area: Rect) -> Vec<NestedHeaderArea> {
     let ws_area = workspace_list_rect_for_app(app, area);
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
-    let rows = sidebar_rows(app);
-    let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
-    nested_header_areas_from_rows(app, &rows, body, scroll_skip)
+    let layout = SidebarListLayout::new(app, ws_area);
+    compute_sidebar_nested_header_areas_from_layout(app, ws_area, &layout)
 }
 
-/// Header geometry from rows a caller already walked, so a frame that needs
-/// both the headers and something else from the same rows pays for one build.
-fn nested_header_areas_from_rows(
+fn compute_sidebar_nested_header_areas_from_layout(
+    app: &AppState,
+    _ws_area: Rect,
+    layout: &SidebarListLayout,
+) -> Vec<NestedHeaderArea> {
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
+    let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
+    nested_header_areas_from_rows_with_spacing(
+        app,
+        layout.rows(),
+        body,
+        scroll_skip,
+        layout.workspace_spacing(),
+    )
+}
+
+/// Header geometry using the rows and spacer decision already measured for the pass.
+fn nested_header_areas_from_rows_with_spacing(
     app: &AppState,
     rows: &[SidebarRow],
     body: Rect,
     scroll_skip: usize,
+    workspace_spacing: WorkspaceGroupSpacing,
 ) -> Vec<NestedHeaderArea> {
     let mut y = body.y;
     let mut out = Vec::new();
@@ -9486,9 +9852,12 @@ fn nested_header_areas_from_rows(
                 rect: nested_header_rect(key, body, y, height),
             });
         }
-        y = y
-            .saturating_add(height)
-            .saturating_add(sidebar_row_gap(app, rows, idx));
+        y = y.saturating_add(height).saturating_add(sidebar_row_gap(
+            app,
+            rows,
+            idx,
+            workspace_spacing,
+        ));
     }
     out
 }
@@ -9522,11 +9891,17 @@ pub(crate) fn compute_remote_agent_row_areas(
         return Vec::new();
     }
     let ws_area = workspace_list_rect_for_app(app, area);
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
-    let rows = sidebar_rows(app);
+    let layout = SidebarListLayout::new(app, ws_area);
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
     let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
-    remote_agent_row_areas_from_rows(app, &rows, body, scroll_skip)
+    remote_agent_row_areas_from_rows(
+        app,
+        layout.rows(),
+        body,
+        scroll_skip,
+        layout.workspace_spacing(),
+    )
 }
 
 /// Remote row geometry from rows a caller already walked, so the render pass
@@ -9536,6 +9911,7 @@ fn remote_agent_row_areas_from_rows(
     rows: &[SidebarRow],
     body: Rect,
     scroll_skip: usize,
+    workspace_spacing: WorkspaceGroupSpacing,
 ) -> Vec<RemoteAgentRowArea> {
     if body.width == 0 || body.height == 0 {
         return Vec::new();
@@ -9554,9 +9930,12 @@ fn remote_agent_row_areas_from_rows(
                 row_idx: idx,
             });
         }
-        y = y
-            .saturating_add(height)
-            .saturating_add(sidebar_row_gap(app, rows, idx));
+        y = y.saturating_add(height).saturating_add(sidebar_row_gap(
+            app,
+            rows,
+            idx,
+            workspace_spacing,
+        ));
     }
     out
 }
@@ -9579,6 +9958,7 @@ fn needs_you_row_areas_from_rows(
     rows: &[SidebarRow],
     body: Rect,
     scroll_skip: usize,
+    workspace_spacing: WorkspaceGroupSpacing,
 ) -> Vec<(usize, Rect)> {
     if body.width == 0 || body.height == 0 {
         return Vec::new();
@@ -9598,9 +9978,12 @@ fn needs_you_row_areas_from_rows(
         ) {
             out.push((idx, Rect::new(body.x, y, body.width, height)));
         }
-        y = y
-            .saturating_add(height)
-            .saturating_add(sidebar_row_gap(app, rows, idx));
+        y = y.saturating_add(height).saturating_add(sidebar_row_gap(
+            app,
+            rows,
+            idx,
+            workspace_spacing,
+        ));
     }
     out
 }
@@ -9608,11 +9991,12 @@ fn needs_you_row_areas_from_rows(
 /// The `Needs you` strip row at this screen row, if any.
 pub(crate) fn needs_you_row_at(app: &AppState, row: u16) -> Option<NeedsYouTarget> {
     let ws_area = workspace_list_rect_for_app(app, app.view.sidebar_rect);
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
-    let rows = sidebar_rows(app);
+    let layout = SidebarListLayout::new(app, ws_area);
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
+    let rows = layout.rows();
     let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
-    needs_you_row_areas_from_rows(app, &rows, body, scroll_skip)
+    needs_you_row_areas_from_rows(app, rows, body, scroll_skip, layout.workspace_spacing())
         .into_iter()
         .find(|(_, rect)| row >= rect.y && row < rect.bottom())
         .and_then(|(idx, _)| match rows.get(idx) {
@@ -9623,11 +10007,12 @@ pub(crate) fn needs_you_row_at(app: &AppState, row: u16) -> Option<NeedsYouTarge
 
 pub(crate) fn needs_you_more_at(app: &AppState, row: u16) -> bool {
     let list = workspace_list_rect_for_app(app, app.view.sidebar_rect);
-    let metrics = workspace_list_scroll_metrics(app, list);
-    let body = workspace_list_body_rect(app, list, should_show_scrollbar(metrics));
-    let rows = sidebar_rows(app);
+    let layout = SidebarListLayout::new(app, list);
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
+    let rows = layout.rows();
     let scroll = workspace_list_scroll_skip(app, &metrics);
-    needs_you_row_areas_from_rows(app, &rows, body, scroll)
+    needs_you_row_areas_from_rows(app, rows, body, scroll, layout.workspace_spacing())
         .into_iter()
         .any(|(index, rect)| {
             rect.y == row && matches!(rows.get(index), Some(SidebarRow::NeedsYouMore { .. }))
@@ -9647,7 +10032,8 @@ pub(super) fn render_needs_you_row(
     provider: &str,
     rect: Rect,
 ) {
-    if rect.width == 0 || rect.height == 0 {
+    let content_rect = sidebar_row_content_rect_for_app(app, rect);
+    if rect.width == 0 || rect.height == 0 || content_rect.width == 0 {
         return;
     }
     let p = &app.palette;
@@ -9665,8 +10051,9 @@ pub(super) fn render_needs_you_row(
         device.strip_prefix(' '),
         usize::from(rect.width),
         NEEDS_YOU_REQUESTED_PREFIX_WIDTH,
+        sidebar_row_left_padding(app),
     );
-    let title_width = usize::from(rect.width).saturating_sub(
+    let title_width = usize::from(content_rect.width).saturating_sub(
         prefix
             + SIDEBAR_DOT_FIELD_WIDTH
             + display_width(space_icon)
@@ -9690,7 +10077,7 @@ pub(super) fn render_needs_you_row(
             Span::styled(device, Style::default().fg(p.overlay0)),
             Span::raw(" ".repeat(age_width)),
         ])),
-        Rect::new(rect.x, rect.y, rect.width, 1),
+        Rect::new(content_rect.x, rect.y, content_rect.width, 1),
     );
     if rect.height > 1 {
         if let Some(subtitle) = subtitle {
@@ -9698,10 +10085,15 @@ pub(super) fn render_needs_you_row(
             let line = format!("{}↳ {subtitle}", " ".repeat(indent));
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    truncate_end(&line, usize::from(rect.width)),
+                    truncate_end(&line, usize::from(content_rect.width)),
                     Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
                 )),
-                Rect::new(rect.x, rect.y.saturating_add(1), rect.width, 1),
+                Rect::new(
+                    content_rect.x,
+                    rect.y.saturating_add(1),
+                    content_rect.width,
+                    1,
+                ),
             );
         }
     }
@@ -9717,7 +10109,8 @@ pub(super) fn render_pod_header_row(
     fresh: bool,
     collapsed: bool,
 ) {
-    if rect.width == 0 || rect.height == 0 {
+    let content_rect = sidebar_row_content_rect(rect);
+    if rect.width == 0 || rect.height == 0 || content_rect.width == 0 {
         return;
     }
     let prefix = if collapsed { "  ▸ " } else { "  ▾ " };
@@ -9726,15 +10119,20 @@ pub(super) fn render_pod_header_row(
     let owner = format!(" ·{owner}");
     let fixed = display_width(prefix) + display_width(&count) + display_width(stale);
     let full_title_width = display_width(title);
-    let show_owner = fixed + full_title_width + display_width(&owner) <= usize::from(rect.width);
+    let show_owner =
+        fixed + full_title_width + display_width(&owner) <= usize::from(content_rect.width);
     let owner = if show_owner { owner } else { String::new() };
     let title = truncate_end(
         title,
-        usize::from(rect.width)
+        usize::from(content_rect.width)
             .saturating_sub(fixed)
             .saturating_sub(display_width(&owner)),
     );
-    let modifier = if fresh { Modifier::BOLD } else { Modifier::DIM };
+    let modifier = if fresh {
+        Modifier::empty()
+    } else {
+        Modifier::DIM
+    };
     let style = Style::default()
         .fg(if fresh {
             app.palette.subtext0
@@ -9760,7 +10158,7 @@ pub(super) fn render_pod_header_row(
             ),
             Span::styled(stale, style),
         ])),
-        rect,
+        content_rect,
     );
 }
 
@@ -9773,7 +10171,8 @@ pub(super) fn render_pod_member_row(
     host: &str,
     blocked: bool,
 ) {
-    if rect.width == 0 || rect.height == 0 {
+    let content_rect = sidebar_row_content_rect(rect);
+    if rect.width == 0 || rect.height == 0 || content_rect.width == 0 {
         return;
     }
     let prefix = "    ";
@@ -9790,7 +10189,7 @@ pub(super) fn render_pod_member_row(
     let host_label = if show_host { host_label } else { String::new() };
     let title = truncate_end(
         title,
-        usize::from(rect.width)
+        usize::from(content_rect.width)
             .saturating_sub(fixed)
             .saturating_sub(display_width(&age_label))
             .saturating_sub(display_width(&host_label)),
@@ -9820,7 +10219,7 @@ pub(super) fn render_pod_member_row(
                     .add_modifier(Modifier::DIM),
             ),
         ])),
-        rect,
+        content_rect,
     );
 }
 
@@ -9829,6 +10228,7 @@ fn pod_row_areas_from_rows(
     rows: &[SidebarRow],
     body: Rect,
     scroll_skip: usize,
+    workspace_spacing: WorkspaceGroupSpacing,
 ) -> Vec<(usize, Rect)> {
     let mut y = body.y;
     let mut out = Vec::new();
@@ -9843,9 +10243,12 @@ fn pod_row_areas_from_rows(
         ) {
             out.push((idx, Rect::new(body.x, y, body.width, height)));
         }
-        y = y
-            .saturating_add(height)
-            .saturating_add(sidebar_row_gap(app, rows, idx));
+        y = y.saturating_add(height).saturating_add(sidebar_row_gap(
+            app,
+            rows,
+            idx,
+            workspace_spacing,
+        ));
     }
     out
 }
@@ -9855,11 +10258,12 @@ pub(crate) fn sidebar_pod_header_at(
     row: u16,
 ) -> Option<(crate::groups::GroupId, bool)> {
     let list = workspace_list_rect_for_app(app, app.view.sidebar_rect);
-    let metrics = workspace_list_scroll_metrics(app, list);
-    let body = workspace_list_body_rect(app, list, should_show_scrollbar(metrics));
-    let rows = sidebar_rows(app);
+    let layout = SidebarListLayout::new(app, list);
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
+    let rows = layout.rows();
     let scroll = workspace_list_scroll_skip(app, &metrics);
-    pod_row_areas_from_rows(app, &rows, body, scroll)
+    pod_row_areas_from_rows(app, rows, body, scroll, layout.workspace_spacing())
         .into_iter()
         .find(|(_, rect)| row >= rect.y && row < rect.bottom())
         .and_then(|(idx, _)| match rows.get(idx) {
@@ -9872,11 +10276,12 @@ pub(crate) fn sidebar_pod_header_at(
 
 pub(crate) fn sidebar_pod_member_at(app: &AppState, row: u16) -> Option<PodTarget> {
     let list = workspace_list_rect_for_app(app, app.view.sidebar_rect);
-    let metrics = workspace_list_scroll_metrics(app, list);
-    let body = workspace_list_body_rect(app, list, should_show_scrollbar(metrics));
-    let rows = sidebar_rows(app);
+    let layout = SidebarListLayout::new(app, list);
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
+    let rows = layout.rows();
     let scroll = workspace_list_scroll_skip(app, &metrics);
-    pod_row_areas_from_rows(app, &rows, body, scroll)
+    pod_row_areas_from_rows(app, rows, body, scroll, layout.workspace_spacing())
         .into_iter()
         .find(|(_, rect)| row >= rect.y && row < rect.bottom())
         .and_then(|(idx, _)| match rows.get(idx) {
@@ -10022,6 +10427,7 @@ fn remote_snooze_control_tooltip(entry: &RemoteAgentPanelEntry) -> String {
 ///
 /// One walk of the visible rows per frame, on the same geometry the row
 /// renderers use, so an anchor cannot drift from what it explains.
+#[cfg(test)]
 pub(crate) fn compute_sidebar_hover_targets(
     app: &AppState,
     area: Rect,
@@ -10030,14 +10436,24 @@ pub(crate) fn compute_sidebar_hover_targets(
     if ws_area == Rect::default() {
         return Vec::new();
     }
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
+    let layout = SidebarListLayout::new(app, ws_area);
+    compute_sidebar_hover_targets_from_layout(app, area, &layout)
+}
+
+pub(crate) fn compute_sidebar_hover_targets_from_layout(
+    app: &AppState,
+    area: Rect,
+    layout: &SidebarListLayout,
+) -> Vec<crate::app::state::SidebarHoverTarget> {
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
     if body.width == 0 || body.height == 0 {
         return Vec::new();
     }
 
-    let rows = sidebar_rows(app);
+    let rows = layout.rows();
     let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
+    let workspace_spacing = layout.workspace_spacing();
     let mut visible = Vec::new();
     let mut y = body.y;
     for (idx, row) in rows.iter().enumerate().skip(scroll_skip) {
@@ -10046,9 +10462,12 @@ pub(crate) fn compute_sidebar_hover_targets(
             break;
         }
         visible.push((row, y));
-        y = y
-            .saturating_add(height)
-            .saturating_add(sidebar_row_gap(app, &rows, idx));
+        y = y.saturating_add(height).saturating_add(sidebar_row_gap(
+            app,
+            rows,
+            idx,
+            workspace_spacing,
+        ));
     }
 
     // The narrow-view prefix is a property of the whole list, and the row
@@ -10056,7 +10475,7 @@ pub(crate) fn compute_sidebar_hover_targets(
     let narrow_prefix = visible
         .iter()
         .any(|(row, _)| matches!(row, SidebarRow::Tab { .. }))
-        .then(|| narrow_view_tab_prefix_from_rows(app, &rows, usize::from(body.width)))
+        .then(|| narrow_view_tab_prefix_from_rows(app, rows, usize::from(body.width)))
         .flatten();
 
     let mut targets = Vec::new();
@@ -10133,7 +10552,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                     ) =>
             {
                 let width = display_width(section_header_glyph_for_app(app, title));
-                if let Some(rect) = clamp_row_cells(body, row_y, 3, width) {
+                if let Some(rect) = clamp_row_cells(body, row_y, 4, width) {
                     targets.push(crate::app::state::SidebarHoverTarget {
                         rect,
                         label: (*title).to_string(),
@@ -10148,7 +10567,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                 host,
                 ..
             } => {
-                if let Some(rect) = clamp_row_cells(body, row_y, 2, display_width(space_icon)) {
+                if let Some(rect) = clamp_row_cells(body, row_y, 3, display_width(space_icon)) {
                     targets.push(crate::app::state::SidebarHoverTarget {
                         rect,
                         label: space_name.clone(),
@@ -10183,11 +10602,13 @@ pub(crate) fn compute_sidebar_hover_targets(
                 let Some(target) = entry.local_target() else {
                     continue;
                 };
+                let content_body = sidebar_row_content_rect_for_app(app, body);
                 let tab = matches!(row, SidebarRow::Tab { .. });
                 let requested_prefix = narrow_prefix.unwrap_or_else(|| usize::from(*depth));
                 let provider = sidebar_row_provider(app, entry);
                 let device = sidebar_machine_label(app, sidebar_machine_host(app, entry));
-                let title = compact_row_title_for_width(
+                let title = compact_row_title_for_app(
+                    app,
                     compact_row_title(entry, tab),
                     &provider,
                     device,
@@ -10200,10 +10621,10 @@ pub(crate) fn compute_sidebar_hover_targets(
                     device,
                     usize::from(body.width),
                     requested_prefix,
+                    sidebar_row_left_padding(app),
                 );
                 let prefix = widths.prefix;
-                let Some(rect) = clamp_row_cells(body, row_y, prefix, SIDEBAR_DOT_FIELD_WIDTH)
-                else {
+                let Some(rect) = clamp_row_cells(content_body, row_y, prefix, 1) else {
                     continue;
                 };
                 if !entry.working_shelf {
@@ -10227,9 +10648,9 @@ pub(crate) fn compute_sidebar_hover_targets(
                 // The machine label occupies the end of the metadata field.
                 if widths.device {
                     if let Some(rect) = clamp_row_cells(
-                        body,
+                        content_body,
                         row_y,
-                        usize::from(body.width).saturating_sub(
+                        usize::from(content_body.width).saturating_sub(
                             widths.age + done_width + device.map_or(0, display_width),
                         ),
                         device.map_or(0, display_width),
@@ -10244,9 +10665,9 @@ pub(crate) fn compute_sidebar_hover_targets(
                 }
                 if widths.age > 0 {
                     if let Some(rect) = clamp_row_cells(
-                        body,
+                        content_body,
                         row_y,
-                        usize::from(body.width).saturating_sub(widths.age),
+                        usize::from(content_body.width).saturating_sub(widths.age),
                         widths.age,
                     ) {
                         targets.push(crate::app::state::SidebarHoverTarget {
@@ -10261,10 +10682,10 @@ pub(crate) fn compute_sidebar_hover_targets(
                         });
                     }
                 }
-                let title_width = usize::from(body.width).saturating_sub(fixed_width);
+                let title_width = usize::from(content_body.width).saturating_sub(fixed_width);
                 if widths.provider > 0 {
                     if let Some(rect) = clamp_row_cells(
-                        body,
+                        content_body,
                         row_y,
                         prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width,
                         widths.provider,
@@ -10296,13 +10717,13 @@ pub(crate) fn compute_sidebar_hover_targets(
                 let pin_width = sidebar_pin_width(
                     app,
                     entry,
-                    Rect::new(body.x, row_y, body.width, 1),
+                    Rect::new(content_body.x, row_y, content_body.width, 1),
                     title_width,
                     tab,
                 );
                 if pin_width > 0 {
                     if let Some(rect) = clamp_row_cells(
-                        body,
+                        content_body,
                         row_y,
                         prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - pin_width,
                         pin_width,
@@ -10320,8 +10741,11 @@ pub(crate) fn compute_sidebar_hover_targets(
                 }
                 let title_width = title_width.saturating_sub(pin_width);
                 let control_pane = row_control_pane(app, entry, tab);
-                let available_width =
-                    selected_row_controls_width(control_pane.as_ref(), title_width, body.width);
+                let available_width = selected_row_controls_width(
+                    control_pane.as_ref(),
+                    title_width,
+                    content_body.width,
+                );
                 let controls_visible = control_pane.as_ref().is_some_and(|control| control.snoozed)
                     || selected_local_row_pane(app, entry, tab).is_some()
                     || sidebar_row_is_hovered(app, row_y);
@@ -10331,9 +10755,12 @@ pub(crate) fn compute_sidebar_hover_targets(
                         if controls_width > 0 {
                             let start =
                                 prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - controls_width;
-                            if let Some(rect) =
-                                clamp_row_cells(body, row_y, start, SIDEBAR_SNOOZE_CONTROL_WIDTH)
-                            {
+                            if let Some(rect) = clamp_row_cells(
+                                content_body,
+                                row_y,
+                                start,
+                                SIDEBAR_SNOOZE_CONTROL_WIDTH,
+                            ) {
                                 targets.push(crate::app::state::SidebarHoverTarget {
                                     rect,
                                     label: if control.show_unsettle {
@@ -10366,7 +10793,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                             }
                             if control.show_settle {
                                 if let Some(rect) = clamp_row_cells(
-                                    body,
+                                    content_body,
                                     row_y,
                                     start + SIDEBAR_SNOOZE_CONTROL_WIDTH,
                                     SIDEBAR_SETTLE_CONTROL_WIDTH,
@@ -10384,7 +10811,8 @@ pub(crate) fn compute_sidebar_hover_targets(
                                 }
                             }
                         }
-                        if let Some(rect) = clamp_row_cells(body, row_y, 0, usize::from(body.width))
+                        if let Some(rect) =
+                            clamp_row_cells(content_body, row_y, 0, usize::from(content_body.width))
                         {
                             targets.push(crate::app::state::SidebarHoverTarget {
                                 rect,
@@ -10402,10 +10830,12 @@ pub(crate) fn compute_sidebar_hover_targets(
                 working_shelf,
                 ..
             } => {
+                let content_body = sidebar_row_content_rect_for_app(app, body);
                 let requested_prefix = usize::from(*depth);
                 let row_width = usize::from(body.width);
                 let device = sidebar_machine_label(app, &entry.agent_ref.host);
-                let title = compact_row_title_for_width(
+                let title = compact_row_title_for_app(
+                    app,
                     remote_sidebar_title(app, entry),
                     sidebar_remote_row_provider(app, entry),
                     device,
@@ -10418,11 +10848,10 @@ pub(crate) fn compute_sidebar_hover_targets(
                     device,
                     row_width,
                     requested_prefix,
+                    sidebar_row_left_padding(app),
                 );
                 if !working_shelf {
-                    if let Some(rect) =
-                        clamp_row_cells(body, row_y, widths.prefix, SIDEBAR_DOT_FIELD_WIDTH)
-                    {
+                    if let Some(rect) = clamp_row_cells(content_body, row_y, widths.prefix, 1) {
                         targets.push(crate::app::state::SidebarHoverTarget {
                             rect,
                             label: agent_dot_tooltip(entry),
@@ -10445,9 +10874,9 @@ pub(crate) fn compute_sidebar_hover_targets(
                 // Cover the full machine label with its host tooltip.
                 if widths.device {
                     if let Some(rect) = clamp_row_cells(
-                        body,
+                        content_body,
                         row_y,
-                        row_width.saturating_sub(
+                        usize::from(content_body.width).saturating_sub(
                             age_width + done_width + device.map_or(0, display_width),
                         ),
                         device.map_or(0, display_width),
@@ -10461,9 +10890,12 @@ pub(crate) fn compute_sidebar_hover_targets(
                     }
                 }
                 if age_width > 0 && entry.snoozed_until.is_none() {
-                    if let Some(rect) =
-                        clamp_row_cells(body, row_y, row_width.saturating_sub(age_width), age_width)
-                    {
+                    if let Some(rect) = clamp_row_cells(
+                        content_body,
+                        row_y,
+                        usize::from(content_body.width).saturating_sub(age_width),
+                        age_width,
+                    ) {
                         targets.push(crate::app::state::SidebarHoverTarget {
                             rect,
                             label: age_tooltip(
@@ -10476,10 +10908,10 @@ pub(crate) fn compute_sidebar_hover_targets(
                         });
                     }
                 }
-                let title_width = row_width.saturating_sub(fixed_width);
+                let title_width = usize::from(content_body.width).saturating_sub(fixed_width);
                 if widths.provider > 0 {
                     if let Some(rect) = clamp_row_cells(
-                        body,
+                        content_body,
                         row_y,
                         widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width,
                         widths.provider,
@@ -10499,7 +10931,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                 }
                 let control = remote_row_control(entry);
                 let available_width =
-                    selected_row_controls_width(control.as_ref(), title_width, body.width);
+                    selected_row_controls_width(control.as_ref(), title_width, content_body.width);
                 let selected = app
                     .sidebar_selected_remote_agent
                     .as_ref()
@@ -10513,9 +10945,12 @@ pub(crate) fn compute_sidebar_hover_targets(
                         if controls_width > 0 {
                             let start = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width
                                 - controls_width;
-                            if let Some(rect) =
-                                clamp_row_cells(body, row_y, start, SIDEBAR_SNOOZE_CONTROL_WIDTH)
-                            {
+                            if let Some(rect) = clamp_row_cells(
+                                content_body,
+                                row_y,
+                                start,
+                                SIDEBAR_SNOOZE_CONTROL_WIDTH,
+                            ) {
                                 targets.push(crate::app::state::SidebarHoverTarget {
                                     rect,
                                     label: if control.show_unsettle {
@@ -10537,7 +10972,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                             }
                             if control.show_settle {
                                 if let Some(rect) = clamp_row_cells(
-                                    body,
+                                    content_body,
                                     row_y,
                                     start + SIDEBAR_SNOOZE_CONTROL_WIDTH,
                                     SIDEBAR_SETTLE_CONTROL_WIDTH,
@@ -10555,7 +10990,8 @@ pub(crate) fn compute_sidebar_hover_targets(
                                 }
                             }
                         }
-                        if let Some(rect) = clamp_row_cells(body, row_y, 0, usize::from(body.width))
+                        if let Some(rect) =
+                            clamp_row_cells(content_body, row_y, 0, usize::from(content_body.width))
                         {
                             targets.push(crate::app::state::SidebarHoverTarget {
                                 rect,
@@ -10583,13 +11019,15 @@ pub(crate) fn compute_sidebar_hover_targets(
         }
     }
 
-    for header in nested_header_areas_from_rows(app, &rows, body, scroll_skip) {
+    for header in
+        nested_header_areas_from_rows_with_spacing(app, rows, body, scroll_skip, workspace_spacing)
+    {
         let spans = nested_header_spans(&header);
         if let (Some(glyph), Some(status)) = (spans.glyph, header.status) {
             if let Some(rect) = clamp_row_cells(
                 body,
                 header.rect.y,
-                spans.prefix_width,
+                usize::from(header.rect.x.saturating_sub(body.x)) + 1 + spans.prefix_width,
                 display_width(glyph),
             ) {
                 targets.push(crate::app::state::SidebarHoverTarget {
@@ -10606,7 +11044,10 @@ pub(crate) fn compute_sidebar_hover_targets(
             if let Some(rect) = clamp_row_cells(
                 body,
                 header.rect.y,
-                spans.prefix_width + spans.glyph_width,
+                usize::from(header.rect.x.saturating_sub(body.x))
+                    + 1
+                    + spans.prefix_width
+                    + spans.glyph_width,
                 display_width(&spans.title),
             ) {
                 targets.push(crate::app::state::SidebarHoverTarget {
@@ -10765,12 +11206,21 @@ fn compute_symphony_job_areas(app: &AppState, area: Rect) -> Vec<SymphonyJobArea
 /// the two can never disagree about where the section sits.
 fn compute_symphony_areas(app: &AppState, area: Rect) -> (Vec<SymphonyJobArea>, Option<Rect>) {
     let ws_area = workspace_list_rect_for_app(app, area);
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
+    let layout = SidebarListLayout::new(app, ws_area);
+    compute_symphony_areas_from_layout(app, &layout)
+}
+
+fn compute_symphony_areas_from_layout(
+    app: &AppState,
+    layout: &SidebarListLayout,
+) -> (Vec<SymphonyJobArea>, Option<Rect>) {
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
     let mut y = body.y;
     let mut out = Vec::new();
     let mut empty = None;
-    let rows = sidebar_rows(app);
+    let rows = layout.rows();
+    let workspace_spacing = layout.workspace_spacing();
     for (idx, row) in rows
         .iter()
         .enumerate()
@@ -10800,9 +11250,12 @@ fn compute_symphony_areas(app: &AppState, area: Rect) -> (Vec<SymphonyJobArea>, 
                 rect: Rect::new(body.x, y, body.width, height),
             });
         }
-        y = y
-            .saturating_add(height)
-            .saturating_add(sidebar_row_gap(app, &rows, idx));
+        y = y.saturating_add(height).saturating_add(sidebar_row_gap(
+            app,
+            rows,
+            idx,
+            workspace_spacing,
+        ));
     }
     (out, empty)
 }
@@ -10831,18 +11284,19 @@ pub(crate) fn sidebar_aloop_target_at(
 /// The placeholder row. Deliberately dim and dotless: it names no workflow, so
 /// it borrows none of the agent row's state vocabulary.
 fn render_symphony_empty(app: &AppState, frame: &mut Frame, rect: Rect) {
-    if rect.width == 0 || rect.height == 0 {
+    let content_rect = sidebar_row_content_rect(rect);
+    if rect.width == 0 || rect.height == 0 || content_rect.width == 0 {
         return;
     }
     let indent = SYMPHONY_ROW_DEPTH * 2;
     let text = format!("{}{SYMPHONY_EMPTY_LABEL}", " ".repeat(indent));
     let line = Line::from(Span::styled(
-        crate::ui::text::truncate_end(&text, usize::from(rect.width)),
+        crate::ui::text::truncate_end(&text, usize::from(content_rect.width)),
         Style::default()
             .fg(app.palette.overlay0)
             .add_modifier(Modifier::DIM),
     ));
-    frame.render_widget(Paragraph::new(line), rect);
+    frame.render_widget(Paragraph::new(line), content_rect);
 }
 
 fn render_symphony_job(
@@ -10851,7 +11305,9 @@ fn render_symphony_job(
     job: &SymphonyJobArea,
     now: std::time::SystemTime,
 ) {
-    if job.rect.width == 0 || job.rect.height == 0 {
+    let rect = job.rect;
+    let content_rect = sidebar_row_content_rect(rect);
+    if rect.width == 0 || rect.height == 0 || content_rect.width == 0 {
         return;
     }
     let p = &app.palette;
@@ -10860,11 +11316,18 @@ fn render_symphony_job(
     // dot, title, the status the row is in, and how long it has been in it. A
     // workflow is one more thing that is either running or waiting on you.
     let status = symphony_job_status(job.phase.as_str(), job.wait.as_deref());
-    let width = usize::from(job.rect.width);
+    let width = usize::from(rect.width);
     let requested_prefix_width = SYMPHONY_ROW_DEPTH;
-    let widths = compact_row_widths(&job.name, &status, None, width, requested_prefix_width);
+    let widths = compact_row_widths(
+        &job.name,
+        &status,
+        None,
+        width,
+        requested_prefix_width,
+        sidebar_row_left_padding(app),
+    );
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
-    let title_width = width.saturating_sub(fixed_width);
+    let title_width = usize::from(content_rect.width).saturating_sub(fixed_width);
     let title = pad_right(&truncate_end(&job.name, title_width), title_width);
     let dot = pad_right(
         compact_dot_for_state(state, true, true, false, false, false),
@@ -10897,7 +11360,7 @@ fn render_symphony_job(
                 }),
             ),
         ])),
-        Rect::new(job.rect.x, job.rect.y, job.rect.width, 1),
+        Rect::new(content_rect.x, rect.y, content_rect.width, 1),
     );
 }
 
@@ -11159,11 +11622,20 @@ pub(crate) fn compute_sidebar_section_header_areas(
     area: Rect,
 ) -> Vec<SectionHeaderArea> {
     let ws_area = workspace_list_rect_for_app(app, area);
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
+    let layout = SidebarListLayout::new(app, ws_area);
+    compute_sidebar_section_header_areas_from_layout(app, &layout)
+}
+
+fn compute_sidebar_section_header_areas_from_layout(
+    app: &AppState,
+    layout: &SidebarListLayout,
+) -> Vec<SectionHeaderArea> {
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
     let mut y = body.y;
     let mut out = Vec::new();
-    let rows = sidebar_rows(app);
+    let rows = layout.rows();
+    let workspace_spacing = layout.workspace_spacing();
     for (idx, row) in rows
         .iter()
         .enumerate()
@@ -11184,9 +11656,12 @@ pub(crate) fn compute_sidebar_section_header_areas(
                 rect: Rect::new(body.x, y, body.width, height),
             });
         }
-        y = y
-            .saturating_add(height)
-            .saturating_add(sidebar_row_gap(app, &rows, idx));
+        y = y.saturating_add(height).saturating_add(sidebar_row_gap(
+            app,
+            rows,
+            idx,
+            workspace_spacing,
+        ));
     }
     out
 }
@@ -11196,6 +11671,7 @@ fn compute_sidebar_divider_areas(
     body: Rect,
     rows: &[SidebarRow],
     metrics: crate::pane::ScrollMetrics,
+    workspace_spacing: WorkspaceGroupSpacing,
 ) -> Vec<(Rect, bool)> {
     let body = workspace_list_body_rect(app, body, should_show_scrollbar(metrics));
     let mut y = body.y;
@@ -11215,9 +11691,12 @@ fn compute_sidebar_divider_areas(
                 matches!(row, SidebarRow::ShelfDivider),
             ));
         }
-        y = y
-            .saturating_add(height)
-            .saturating_add(sidebar_row_gap(app, rows, idx));
+        y = y.saturating_add(height).saturating_add(sidebar_row_gap(
+            app,
+            rows,
+            idx,
+            workspace_spacing,
+        ));
     }
     out
 }
@@ -11245,19 +11724,12 @@ pub(crate) fn workspace_agent_chevron_rect(
     card: &crate::app::state::WorkspaceCardArea,
     has_agents: bool,
 ) -> Rect {
-    if !has_agents || card.rect.width < 2 || card.rect.height == 0 {
+    let content = sidebar_row_content_rect(card.rect);
+    let chevron_offset = u16::from(!card.repo_header);
+    if !has_agents || content.width <= chevron_offset || card.rect.height == 0 {
         return Rect::default();
     }
-    Rect::new(
-        if card.repo_header {
-            card.rect.x
-        } else {
-            card.rect.x.saturating_add(1)
-        },
-        card.rect.y,
-        1,
-        1,
-    )
+    Rect::new(content.x.saturating_add(chevron_offset), card.rect.y, 1, 1)
 }
 
 #[cfg(test)]
@@ -11387,6 +11859,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         if y >= ws_area.y + ws_area.height {
             break;
         }
+        let row_rect = sidebar_row_content_rect(Rect::new(ws_area.x, y, ws_area.width, 1));
         match row {
             SidebarRow::Workspace {
                 ws_idx, indented, ..
@@ -11438,12 +11911,9 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     icon_bg,
                 );
                 let num_style = if is_selected {
-                    Style::default()
-                        .fg(p.text)
-                        .bg(selection_bg)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(p.text).bg(selection_bg)
                 } else if is_active {
-                    let style = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
+                    let style = Style::default().fg(p.text);
                     if is_navigating {
                         style.bg(p.active_row_bg)
                     } else {
@@ -11457,7 +11927,17 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 } else {
                     format!("{}", ws_idx + 1)
                 };
-                let gap = if display_width_u16(&index).saturating_add(2) <= ws_area.width {
+                let icon_width = display_width(icon);
+                let index = if display_width(&index)
+                    <= usize::from(row_rect.width).saturating_sub(icon_width)
+                {
+                    index
+                } else {
+                    String::new()
+                };
+                let gap = if !index.is_empty()
+                    && display_width(&index) + 1 + icon_width <= usize::from(row_rect.width)
+                {
                     " "
                 } else {
                     ""
@@ -11469,8 +11949,16 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                         Span::styled(icon, icon_style),
                     ]))
                     .style(row_style),
-                    Rect::new(ws_area.x, y, ws_area.width, 1),
+                    row_rect,
                 );
+                if is_active {
+                    frame.buffer_mut()[(ws_area.x, y)].set_style(
+                        Style::default()
+                            .fg(p.text)
+                            .bg(p.sidebar_background())
+                            .add_modifier(Modifier::BOLD),
+                    );
+                }
                 if is_active && is_navigating {
                     let buf = frame.buffer_mut();
                     for x in ws_area.x..ws_area.x + ws_area.width {
@@ -11501,23 +11989,36 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 } else {
                     Style::default().fg(p.overlay0)
                 };
+                let position = if *depth == 0 {
+                    format!("{}", agent_ordinals[row_idx])
+                } else if *depth > 1 {
+                    "  ".to_string()
+                } else {
+                    " ".to_string()
+                };
+                let position = if display_width(&position)
+                    <= usize::from(row_rect.width).saturating_sub(display_width(icon))
+                {
+                    position
+                } else {
+                    String::new()
+                };
+                let separator = if !position.is_empty()
+                    && display_width(&position) + 1 + display_width(icon)
+                        <= usize::from(row_rect.width)
+                {
+                    " "
+                } else {
+                    ""
+                };
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
-                        Span::styled(
-                            if *depth == 0 {
-                                format!("{}", agent_ordinals[row_idx])
-                            } else if *depth > 1 {
-                                "  ".to_string()
-                            } else {
-                                " ".to_string()
-                            },
-                            position_style,
-                        ),
-                        Span::raw(" "),
+                        Span::styled(position, position_style),
+                        Span::raw(separator),
                         Span::styled(icon, icon_style),
                     ]))
                     .style(row_style),
-                    Rect::new(ws_area.x, y, ws_area.width, 1),
+                    row_rect,
                 );
                 if is_active {
                     let buf = frame.buffer_mut();
@@ -11587,9 +12088,12 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 } else {
                     Style::default().fg(p.overlay0)
                 };
+                let prefix_width = usize::from(row_rect.width)
+                    .saturating_sub(display_width(icon))
+                    .min(2);
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
-                        Span::styled("  ", position_style),
+                        Span::styled(" ".repeat(prefix_width), position_style),
                         Span::styled(icon, icon_style),
                     ]))
                     .style(row_style),
@@ -11617,10 +12121,10 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 // a rule: the grouping is still legible, the labels are not.
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
-                        "─".repeat(usize::from(ws_area.width)),
+                        "─".repeat(usize::from(row_rect.width)),
                         Style::default().fg(section_header_color(title, p)),
                     ))),
-                    Rect::new(ws_area.x, y, ws_area.width, 1),
+                    row_rect,
                 );
             }
             SidebarRow::Divider | SidebarRow::ShelfDivider => {
@@ -11635,7 +12139,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                         } else {
                             "─"
                         }
-                        .repeat(usize::from(ws_area.width)),
+                        .repeat(usize::from(row_rect.width)),
                         if matches!(row, SidebarRow::ShelfDivider) {
                             Style::default()
                                 .fg(p.surface_dim)
@@ -11644,17 +12148,17 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                             Style::default().fg(p.surface_dim)
                         },
                     ))),
-                    Rect::new(ws_area.x, y, ws_area.width, 1),
+                    row_rect,
                 );
             }
             SidebarRow::NestedHeader { dim, .. } => {
                 let color = if *dim { p.overlay0 } else { p.accent };
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
-                        "─".repeat(usize::from(ws_area.width)),
+                        "─".repeat(usize::from(row_rect.width)),
                         Style::default().fg(color),
                     ))),
-                    Rect::new(ws_area.x, y, ws_area.width, 1),
+                    row_rect,
                 );
             }
             SidebarRow::PodHeader { fresh, .. } => {
@@ -11666,7 +12170,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                             Modifier::DIM
                         },
                     )),
-                    Rect::new(ws_area.x, y, ws_area.width, 1),
+                    row_rect,
                 );
             }
             SidebarRow::PodMember { blocked, .. } => {
@@ -11676,7 +12180,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     } else {
                         p.overlay0
                     })),
-                    Rect::new(ws_area.x, y, ws_area.width, 1),
+                    row_rect,
                 );
             }
             // Collapsed there is no room for a workflow name; the section rule
@@ -11703,7 +12207,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                             .fg(if *blocked { p.red } else { p.peach })
                             .add_modifier(Modifier::BOLD),
                     ))),
-                    Rect::new(ws_area.x, y, ws_area.width, 1),
+                    row_rect,
                 );
             }
             SidebarRow::NeedsYouMore { .. } | SidebarRow::BlockersOtherDevices { .. } => {}
@@ -11718,11 +12222,23 @@ pub(crate) fn workspace_drop_slots(
     cards: &[crate::app::state::WorkspaceCardArea],
     area: Rect,
 ) -> Vec<(crate::app::state::WorkspaceDropTarget, u16)> {
+    let layout = SidebarListLayout::new(app, area);
+    workspace_drop_slots_from_layout(app, cards, area, &layout)
+}
+
+fn workspace_drop_slots_from_layout(
+    app: &AppState,
+    cards: &[crate::app::state::WorkspaceCardArea],
+    area: Rect,
+    layout: &SidebarListLayout,
+) -> Vec<(crate::app::state::WorkspaceDropTarget, u16)> {
     if area.height == 0 || cards.is_empty() {
         return Vec::new();
     }
     let list_bottom = area.y + area.height.saturating_sub(1);
     let entries = workspace_list_entries(app);
+    let sidebar_rows = layout.rows();
+    let workspace_spacing = layout.workspace_spacing();
     let entry_position = |ws_idx| {
         entries.iter().position(|entry| {
             matches!(
@@ -11760,12 +12276,51 @@ pub(crate) fn workspace_drop_slots(
         if previous_root == Some(root_idx) {
             continue;
         }
+        let prior_root = previous_root;
         previous_root = Some(root_idx);
         if let Some(row) = card.rect.y.checked_sub(1).filter(|row| *row < list_bottom) {
-            slots.push((
-                crate::app::state::WorkspaceDropTarget::Before(root_idx),
-                row,
-            ));
+            let target = crate::app::state::WorkspaceDropTarget::Before(root_idx);
+
+            let previous_row_index = sidebar_rows
+                .iter()
+                .position(|entry| {
+                    matches!(entry, SidebarRow::Workspace { ws_idx, indented: false, .. } if *ws_idx == root_idx)
+                })
+                .and_then(|row_idx| row_idx.checked_sub(1));
+            let preceded_by_workspace = previous_row_index.is_some_and(|row_idx| {
+                matches!(
+                    sidebar_rows[row_idx],
+                    SidebarRow::Workspace {
+                        indented: false,
+                        ..
+                    }
+                )
+            });
+            let has_spacer = previous_row_index.is_some_and(|row_idx| {
+                sidebar_row_gap(app, sidebar_rows, row_idx, workspace_spacing) > 0
+            });
+            let prior_group_is_compact = prior_root
+                .is_some_and(|prior_root| sidebar_space_member_indices(app, prior_root).len() > 1);
+            if prior_root.is_some()
+                && preceded_by_workspace
+                && !prior_group_is_compact
+                && has_spacer
+            {
+                // Keep the preceding flat workspace row as a drop hit zone;
+                // the insertion marker itself stays on the spacer below it.
+                if let Some(alias_row) = card.rect.y.checked_sub(2).filter(|row| *row < list_bottom)
+                {
+                    slots.push((target, alias_row));
+                }
+            }
+            // Adjacent collapsed headers have no blank row. Keep a compact
+            // group's own header out of the following group's drop target.
+            let row = if preceded_by_workspace && prior_group_is_compact && !has_spacer {
+                card.rect.y
+            } else {
+                row
+            };
+            slots.push((target, row));
         }
     }
 
@@ -11802,14 +12357,28 @@ pub(crate) fn workspace_drop_slots(
     slots
 }
 
+#[cfg(test)]
 pub(crate) fn workspace_drop_indicator_row(
     app: &AppState,
     cards: &[crate::app::state::WorkspaceCardArea],
     area: Rect,
     target: crate::app::state::WorkspaceDropTarget,
 ) -> Option<u16> {
-    workspace_drop_slots(app, cards, area)
+    let layout = SidebarListLayout::new(app, area);
+    workspace_drop_indicator_row_from_layout(app, cards, area, target, &layout)
+}
+
+fn workspace_drop_indicator_row_from_layout(
+    app: &AppState,
+    cards: &[crate::app::state::WorkspaceCardArea],
+    area: Rect,
+    target: crate::app::state::WorkspaceDropTarget,
+    layout: &SidebarListLayout,
+) -> Option<u16> {
+    // Flat-list hit-zone aliases precede their canonical spacer positions.
+    workspace_drop_slots_from_layout(app, cards, area, layout)
         .into_iter()
+        .rev()
         .find_map(|(candidate, row)| (candidate == target).then_some(row))
 }
 
@@ -12833,6 +13402,7 @@ fn render_section_header(
     if header.rect.width == 0 || header.rect.height == 0 {
         return;
     }
+    let rect = sidebar_row_content_rect(header.rect);
     let p = &app.palette;
     if app.sidebar_sections_layout
         && matches!(
@@ -12881,8 +13451,7 @@ fn render_section_header(
             } else {
                 0
             };
-            let label_width =
-                usize::from(header.rect.width).saturating_sub(prefix_width + count_width);
+            let label_width = usize::from(rect.width).saturating_sub(prefix_width + count_width);
             let label = if app.sidebar_blocker_scope == crate::app::state::BlockerScope::ThisDevice
             {
                 "[Local ▾]".to_string()
@@ -12904,7 +13473,7 @@ fn render_section_header(
                 Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
             ));
         }
-        frame.render_widget(Paragraph::new(Line::from(spans)), header.rect);
+        frame.render_widget(Paragraph::new(Line::from(spans)), rect);
         return;
     }
     let color = section_header_color(header.title, p);
@@ -12929,7 +13498,7 @@ fn render_section_header(
     let glyph_gap = usize::from(!glyph.is_empty());
     let title = truncate_end(
         header.title,
-        usize::from(header.rect.width).saturating_sub(
+        usize::from(rect.width).saturating_sub(
             display_width(" ▾ ")
                 + display_width(glyph)
                 + glyph_gap
@@ -12970,7 +13539,7 @@ fn render_section_header(
     ]);
     frame.render_widget(
         Paragraph::new(Line::from(spans)),
-        Rect::new(header.rect.x, header.rect.y, header.rect.width, 1),
+        Rect::new(rect.x, header.rect.y, rect.width, 1),
     );
 }
 
@@ -13032,7 +13601,7 @@ fn nested_header_spans(header: &NestedHeaderArea) -> NestedHeaderSpans {
     // The status glyph sits before the id, so it costs the title its width.
     let glyph = header.status.map(WorkGroupStatus::glyph);
     let glyph_width = glyph.map(|glyph| display_width(glyph) + 1).unwrap_or(0);
-    let title_width = usize::from(header.rect.width)
+    let title_width = usize::from(header.rect.width.saturating_sub(1))
         .saturating_sub(prefix_width)
         .saturating_sub(glyph_width)
         .saturating_sub(count_width)
@@ -13079,12 +13648,18 @@ fn nested_header_sort_col(header: &NestedHeaderArea) -> Option<u16> {
     // Prefix, status glyph, title, count, then the space before the glyph.
     let offset =
         spans.prefix_width + spans.glyph_width + display_width(&spans.title) + count_width + 1;
-    let col = header.rect.x.checked_add(u16::try_from(offset).ok()?)?;
+    let col = sidebar_row_content_rect(header.rect)
+        .x
+        .checked_add(u16::try_from(offset).ok()?)?;
     (col < header.rect.right()).then_some(col)
 }
 
 fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeaderArea) {
     if header.rect.width == 0 || header.rect.height == 0 {
+        return;
+    }
+    let rect = sidebar_row_content_rect(header.rect);
+    if rect.width == 0 {
         return;
     }
     let p = &app.palette;
@@ -13128,7 +13703,7 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
         Style::default().fg(color).add_modifier(if header.dim {
             Modifier::DIM
         } else {
-            Modifier::BOLD
+            Modifier::empty()
         }),
     ));
     if let Some(count_label) = count_label {
@@ -13176,10 +13751,12 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
     } else {
         Paragraph::new(Line::from(spans))
     };
-    frame.render_widget(
-        paragraph,
-        Rect::new(header.rect.x, header.rect.y, header.rect.width, 1),
-    );
+    frame.render_widget(paragraph, Rect::new(rect.x, header.rect.y, rect.width, 1));
+    if selected {
+        frame
+            .buffer_mut()
+            .set_style(header.rect, Style::default().bg(p.surface1));
+    }
 }
 
 fn render_workspace_list(
@@ -13196,6 +13773,10 @@ fn render_workspace_list(
     let sidebar_area = area;
     let list_area = workspace_list_rect_for_app(app, sidebar_area);
     let list_bottom = list_area.y + list_area.height;
+    let layout =
+        SidebarListLayout::from_rows(app, list_area, sidebar_rows_from(app, terminal_runtimes));
+    let metrics = layout.metrics(app);
+    let row_entries = layout.rows();
     let workspace_labels = sidebar_workspace_labels(app, terminal_runtimes);
     let dragged_ws_idx = match app.drag.as_ref().map(|drag| &drag.target) {
         Some(crate::app::state::DragTarget::WorkspaceReorder { source_ws_idx, .. }) => {
@@ -13207,17 +13788,16 @@ fn render_workspace_list(
         Some(crate::app::state::DragTarget::WorkspaceReorder {
             drop_target: Some(drop_target),
             ..
-        }) => workspace_drop_indicator_row(
+        }) => workspace_drop_indicator_row_from_layout(
             app,
             &app.view.workspace_card_areas,
             list_area,
             *drop_target,
+            &layout,
         ),
         _ => None,
     };
 
-    let metrics = workspace_list_scroll_metrics(app, list_area);
-    let row_entries = sidebar_rows_from(app, terminal_runtimes);
     let workspace_headers = row_entries
         .iter()
         .skip(workspace_list_scroll_skip(app, &metrics))
@@ -13245,14 +13825,23 @@ fn render_workspace_list(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let scrollbar_rect = workspace_list_scrollbar_rect(app, sidebar_area);
-    let computed_cards = compute_workspace_card_areas(app, sidebar_area);
+    let scrollbar_body = layout.body(app, metrics);
+    let scrollbar_rect =
+        (should_show_scrollbar(metrics) && scrollbar_body.width > 0 && scrollbar_body.height > 0)
+            .then_some(Rect::new(
+                list_area.x + list_area.width.saturating_sub(1),
+                scrollbar_body.y,
+                1,
+                scrollbar_body.height,
+            ));
+    let computed_cards = compute_workspace_card_areas_from_layout(app, list_area, &layout);
     let cards = &computed_cards;
     for (card_index, card) in cards.iter().enumerate() {
         let i = card.ws_idx;
         let ws = &app.workspaces[i];
         let row_y = card.rect.y;
         let row_height = card.rect.height;
+        let row_rect = sidebar_row_content_rect(card.rect);
         let member_indices = sidebar_space_member_indices(app, i);
         let selected = is_navigating && member_indices.contains(&app.selected);
         let is_active = app
@@ -13286,9 +13875,7 @@ fn render_workspace_list(
                 |(title, ..)| ((*title).clone(), false),
             );
         let name_style = if selected || is_active || is_dragged {
-            Style::default()
-                .fg(active_sidebar_title_color(p))
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(active_sidebar_title_color(p))
         } else if is_derived {
             Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
         } else {
@@ -13364,11 +13951,10 @@ fn render_workspace_list(
             + space_icon_width
             + display_width(&count_label)
             + state_count_width
-            + sort_width
-            + usize::from(selection_bar);
+            + sort_width;
         let title = truncate_end(
             &display_label,
-            usize::from(card.rect.width).saturating_sub(fixed_width),
+            usize::from(row_rect.width).saturating_sub(fixed_width),
         );
         let mut spans = Vec::new();
         if !repo_header {
@@ -13408,12 +13994,9 @@ fn render_workspace_list(
                 Style::default().fg(count.color),
             ));
         }
-        if selection_bar {
-            spans.insert(0, Span::styled("▎", Style::default().fg(selected_accent)));
-        }
         frame.render_widget(
             Paragraph::new(Line::from(spans)),
-            Rect::new(card.rect.x, row_y, card.rect.width, 1),
+            Rect::new(row_rect.x, row_y, row_rect.width, 1),
         );
         if selected {
             frame.buffer_mut().set_style(
@@ -13441,7 +14024,7 @@ fn render_workspace_list(
         }
     }
 
-    let section_headers = compute_sidebar_section_header_areas(app, sidebar_area);
+    let section_headers = compute_sidebar_section_header_areas_from_layout(app, &layout);
     let has_matching_rows = row_entries.iter().any(|row| {
         matches!(
             row,
@@ -13456,22 +14039,23 @@ fn render_workspace_list(
     if (!has_matching_rows && !app.sidebar_work_filter.query.is_empty())
         || (row_entries.is_empty() && !app.sidebar_shows_spaces_tree())
     {
-        let body = workspace_list_body_rect(app, list_area, should_show_scrollbar(metrics));
+        let body = layout.body(app, metrics);
         let empty_y = section_headers
             .iter()
             .map(|header| header.rect.bottom())
             .max()
             .unwrap_or(body.y);
         if body.width > 0 && empty_y < body.bottom() {
+            let rect = sidebar_row_content_rect(Rect::new(body.x, empty_y, body.width, 1));
             frame.render_widget(
                 Paragraph::new(" no matching agents")
                     .style(Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)),
-                Rect::new(body.x, empty_y, body.width, 1),
+                rect,
             );
         }
     }
     let agent_cards = if app.view.agent_card_areas.is_empty() {
-        compute_agent_card_areas(app, sidebar_area)
+        compute_sidebar_row_areas_from_layout(app, list_area, &layout).1
     } else {
         app.view.agent_card_areas.clone()
     };
@@ -13489,9 +14073,14 @@ fn render_workspace_list(
         };
         render_section_header(app, frame, &header, count, host_counts, collapsed);
     }
-    let divider_body = workspace_list_rect_for_app(app, sidebar_area);
-    for (divider, shelf) in compute_sidebar_divider_areas(app, divider_body, &row_entries, metrics)
-    {
+    for (divider, shelf) in compute_sidebar_divider_areas(
+        app,
+        list_area,
+        row_entries,
+        metrics,
+        layout.workspace_spacing(),
+    ) {
+        let divider = sidebar_row_content_rect(divider);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 if shelf {
@@ -13515,13 +14104,15 @@ fn render_workspace_list(
             divider,
         );
     }
-    for header in compute_sidebar_nested_header_areas(app, sidebar_area) {
+    for header in compute_sidebar_nested_header_areas_from_layout(app, list_area, &layout) {
         render_nested_header(app, frame, &header);
     }
     {
-        let body = workspace_list_body_rect(app, list_area, should_show_scrollbar(metrics));
+        let body = layout.body(app, metrics);
         let scroll = workspace_list_scroll_skip(app, &metrics);
-        for (row_idx, rect) in pod_row_areas_from_rows(app, &row_entries, body, scroll) {
+        for (row_idx, rect) in
+            pod_row_areas_from_rows(app, row_entries, body, scroll, layout.workspace_spacing())
+        {
             match row_entries.get(row_idx) {
                 Some(SidebarRow::PodHeader {
                     group_id,
@@ -13557,34 +14148,34 @@ fn render_workspace_list(
             }
         }
     }
-    let tab_cards = compute_tab_card_areas(app, sidebar_area);
-    let narrow_prefix = tab_cards
-        .first()
-        .and_then(|card| narrow_view_tab_prefix(app, usize::from(card.rect.width)));
+    let tab_cards = compute_tab_card_areas_from_layout(app, &layout);
+    let narrow_prefix = tab_cards.first().and_then(|card| {
+        narrow_view_tab_prefix_from_rows(app, row_entries, usize::from(card.rect.width))
+    });
     // One wall clock for the whole section, so two rows drawn in the same
     // frame can never disagree about how old they are.
     let symphony_now = std::time::SystemTime::now();
-    let (symphony_jobs, symphony_empty) = compute_symphony_areas(app, sidebar_area);
+    let (symphony_jobs, symphony_empty) = compute_symphony_areas_from_layout(app, &layout);
     if let Some(rect) = symphony_empty {
         render_symphony_empty(app, frame, rect);
     }
     for job in symphony_jobs {
         render_symphony_job(app, frame, &job, symphony_now);
     }
-    for area in runs::areas(app, sidebar_area) {
+    for area in runs::areas_from_layout(app, &layout) {
         runs::render(app, frame, &area, symphony_now);
     }
-    for area in aloops::areas(app, sidebar_area) {
+    for area in aloops::areas_from_layout(app, &layout) {
         aloops::render(app, frame, &area, symphony_now);
     }
-    for (line, rect) in notes::areas(app, sidebar_area) {
+    for (line, rect) in notes::areas_from_layout(app, &layout) {
         notes::render(app, frame, &line, rect);
     }
-    for area in inbox::areas(app, sidebar_area) {
+    for area in inbox::areas_from_layout(app, &layout) {
         inbox::render(app, frame, &area, symphony_now);
     }
     for card in tab_cards {
-        render_tab_card(app, frame, &card, narrow_prefix, &row_entries);
+        render_tab_card(app, frame, &card, narrow_prefix, row_entries);
     }
     for card in agent_cards {
         let Some((entry, depth)) = row_entries.get(card.row_idx).and_then(|row| match row {
@@ -13596,9 +14187,15 @@ fn render_workspace_list(
         render_agent_card(app, frame, entry, card.rect, depth, narrow_prefix);
     }
     if !app.remote_agent_panel_entries.is_empty() {
-        let body = workspace_list_body_rect(app, list_area, should_show_scrollbar(metrics));
+        let body = layout.body(app, metrics);
         let scroll = workspace_list_scroll_skip(app, &metrics);
-        for row_area in remote_agent_row_areas_from_rows(app, &row_entries, body, scroll) {
+        for row_area in remote_agent_row_areas_from_rows(
+            app,
+            row_entries,
+            body,
+            scroll,
+            layout.workspace_spacing(),
+        ) {
             let Some(SidebarRow::RemoteAgent {
                 entry,
                 depth,
@@ -13631,9 +14228,15 @@ fn render_workspace_list(
     // The Needs-you strip leads the same row list, so its geometry comes from
     // the same walk as the remote rows above it.
     {
-        let body = workspace_list_body_rect(app, list_area, should_show_scrollbar(metrics));
+        let body = layout.body(app, metrics);
         let scroll = workspace_list_scroll_skip(app, &metrics);
-        for (row_idx, rect) in needs_you_row_areas_from_rows(app, &row_entries, body, scroll) {
+        for (row_idx, rect) in needs_you_row_areas_from_rows(
+            app,
+            row_entries,
+            body,
+            scroll,
+            layout.workspace_spacing(),
+        ) {
             match row_entries.get(row_idx) {
                 Some(SidebarRow::NeedsYou {
                     title,
@@ -13671,7 +14274,7 @@ fn render_workspace_list(
                     };
                     frame.render_widget(
                         Paragraph::new(Span::styled(label, Style::default().fg(p.overlay0))),
-                        rect,
+                        sidebar_row_content_rect(rect),
                     );
                 }
                 Some(SidebarRow::BlockersOtherDevices { count }) => {
@@ -13680,7 +14283,7 @@ fn render_workspace_list(
                             format!(" {count} more on other devices"),
                             Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
                         )),
-                        rect,
+                        sidebar_row_content_rect(rect),
                     );
                 }
                 _ => {}
@@ -13728,15 +14331,23 @@ fn narrow_view_tab_prefix_from_rows(
             let requested_prefix = usize::from(*depth);
             let provider = sidebar_row_provider(app, entry);
             let device = sidebar_machine_label(app, sidebar_machine_host(app, entry));
-            let title = compact_row_title_for_width(
+            let title = compact_row_title_for_app(
+                app,
                 compact_row_title(entry, tab),
                 &provider,
                 device,
                 width,
                 requested_prefix,
             );
-            let prefix =
-                compact_row_widths(title, &provider, device, width, requested_prefix).prefix;
+            let prefix = compact_row_widths(
+                title,
+                &provider,
+                device,
+                width,
+                requested_prefix,
+                sidebar_row_left_padding(app),
+            )
+            .prefix;
             (prefix, requested_prefix)
         })
         .collect::<Vec<_>>();
@@ -13774,19 +14385,15 @@ fn render_tab_card(
         if let Some(ask) = entry.pending_ask.as_deref() {
             let prefix_width = narrow_prefix.unwrap_or_else(|| usize::from(depth) * 3 + 1);
             let subtitle = format!("{}↳ {ask}", " ".repeat(prefix_width));
+            let rect = sidebar_row_content_rect_for_app(app, card.rect);
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    truncate_end(&subtitle, usize::from(card.rect.width)),
+                    truncate_end(&subtitle, usize::from(rect.width)),
                     Style::default()
                         .fg(app.palette.overlay0)
                         .add_modifier(Modifier::DIM),
                 )),
-                Rect::new(
-                    card.rect.x,
-                    card.rect.y.saturating_add(1),
-                    card.rect.width,
-                    1,
-                ),
+                Rect::new(rect.x, card.rect.y.saturating_add(1), rect.width, 1),
             );
         }
     }
@@ -13918,6 +14525,7 @@ pub(crate) fn visible_tab_activity_instants_from(
                 entry,
                 usize::from(card.rect.width),
                 narrow_prefix.unwrap_or_else(|| usize::from(depth) * 3 + 1),
+                sidebar_row_left_padding(app),
             );
             layout.activity_age.and(layout.activity_instant)
         })
@@ -15687,6 +16295,354 @@ fn render_sidebar_toggle(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn sidebar_title_budget_reserves_one_left_padding_cell() {
+        let padded = super::sidebar_row_content_rect(Rect::new(0, 0, 20, 1));
+        assert_eq!(padded.x, 1);
+        assert_eq!(usize::from(padded.width).saturating_sub(8), 11);
+
+        let narrow = super::sidebar_row_content_rect(Rect::new(0, 0, 8, 1));
+        assert_eq!(usize::from(narrow.width).saturating_sub(8), 0);
+    }
+
+    #[test]
+    fn mobile_compact_title_budget_reserves_one_left_padding_cell() {
+        let mut app = AppState::test_new();
+        app.view.layout = crate::app::state::ViewLayout::Mobile;
+        let title = "#1 · 12345678";
+        assert_eq!(
+            super::sidebar_row_content_rect_for_app(&app, Rect::new(0, 0, 18, 1)),
+            Rect::new(1, 0, 17, 1)
+        );
+        assert_eq!(
+            super::compact_row_title_for_app(&app, title, "c", None, 18, 1),
+            "12345678"
+        );
+    }
+
+    #[test]
+    fn workspace_headers_hug_dividers_under_height_pressure() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            crate::workspace::Workspace::test_new("first"),
+            crate::workspace::Workspace::test_new("second"),
+        ];
+        let rows = vec![
+            SidebarRow::Workspace {
+                ws_idx: 0,
+                indented: false,
+                settled_pane_id: None,
+                title: String::new(),
+                count: None,
+                activity_count: None,
+                shelf_counts: None,
+                state_counts: Vec::new(),
+                collapsed_status: None,
+                sort_key: None,
+                sort_mode: SidebarSortMode::Default,
+            },
+            SidebarRow::Tab {
+                entry: Box::new(compact_test_entry("member", Some(Agent::Pi))),
+                depth: 0,
+            },
+            SidebarRow::Divider,
+            SidebarRow::Workspace {
+                ws_idx: 1,
+                indented: false,
+                settled_pane_id: None,
+                title: String::new(),
+                count: None,
+                activity_count: None,
+                shelf_counts: None,
+                state_counts: Vec::new(),
+                collapsed_status: None,
+                sort_key: None,
+                sort_mode: SidebarSortMode::Default,
+            },
+        ];
+        let fitted = workspace_group_spacing(&app, &rows, 5);
+        let dropped = workspace_group_spacing(&app, &rows, 3);
+        assert!(fitted.spacers_fit);
+        assert!(!dropped.spacers_fit);
+        assert_eq!(sidebar_row_gap(&app, &rows, 0, fitted), 0);
+        assert_eq!(sidebar_row_gap(&app, &rows, 2, fitted), 0);
+        assert_eq!(sidebar_row_gap(&app, &rows, 2, dropped), 0);
+        assert_eq!(sidebar_row_gap(&app, &rows, 3, fitted), 0);
+    }
+
+    fn repo_directory_spacing_fixture(sections: bool) -> (AppState, Vec<SidebarRow>) {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = sections;
+        app.sidebar_group_mode = SidebarGroupMode::Repo;
+        let mut workspace = crate::workspace::Workspace::test_new("repo");
+        workspace.repo_binding = Some("owner/herdr".into());
+        workspace.test_add_tab(Some("first"));
+        workspace.test_add_tab(Some("second"));
+        workspace.test_add_tab(Some("third"));
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("owner/herdr".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        for (index, dir) in ["repro-586", "qa-a", "qa-b"].iter().enumerate() {
+            let tab_idx = index + 1;
+            // Sections layout uses the subgroup saved on the tab; the Repo
+            // directory view derives the same labels from the terminal cwd.
+            if sections {
+                app.workspaces[0].tabs[tab_idx].set_subgroup(Some(format!("▫ {dir}")));
+            }
+            let tab = &app.workspaces[0].tabs[tab_idx];
+            let terminal_id = &tab.panes[&tab.root_pane].attached_terminal_id;
+            app.terminals.get_mut(terminal_id).unwrap().cwd =
+                std::path::PathBuf::from(format!("/non-git/{dir}"));
+        }
+        let rows = super::sidebar_rows(&app);
+        (app, rows)
+    }
+
+    #[test]
+    fn repo_directory_groups_have_spacers_and_drop_them_under_height_pressure() {
+        for sections in [false, true] {
+            let (app, rows) = repo_directory_spacing_fixture(sections);
+            let groups: Vec<_> = rows
+                .iter()
+                .enumerate()
+                .filter_map(|(index, row)| match row {
+                    SidebarRow::NestedHeader { title, .. }
+                        if ["▫ repro-586", "▫ qa-a", "▫ qa-b"].contains(&title.as_str()) =>
+                    {
+                        Some(index)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(groups.len(), 3);
+            let (fitted, height) =
+                workspace_group_spacing_and_content_height(&app, &rows, u16::MAX);
+            for (index, _) in rows.iter().enumerate() {
+                let expected = u16::from(groups.contains(&(index + 1)));
+                assert_eq!(
+                    sidebar_row_gap(&app, &rows, index, fitted),
+                    expected,
+                    "row {index}"
+                );
+            }
+            let (dropped, dropped_height) =
+                workspace_group_spacing_and_content_height(&app, &rows, height - 1);
+            assert!(!dropped.spacers_fit);
+            assert_eq!(dropped_height, height - 3);
+            for index in 0..rows.len() {
+                assert_eq!(sidebar_row_gap(&app, &rows, index, dropped), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn repo_directory_groups_keep_desktop_and_mobile_hit_areas_aligned() {
+        for sections in [false, true] {
+            let (mut app, rows) = repo_directory_spacing_fixture(sections);
+            for view in [
+                crate::app::state::ViewLayout::Desktop,
+                crate::app::state::ViewLayout::Mobile,
+            ] {
+                app.view.layout = view;
+                for width in [18, 30] {
+                    let area = Rect::new(0, 0, width, 60);
+                    let layout = SidebarListLayout::from_rows(&app, area, rows.clone());
+                    let tabs = compute_tab_card_areas_from_layout(&app, &layout);
+                    let headers =
+                        compute_sidebar_nested_header_areas_from_layout(&app, area, &layout);
+                    assert_eq!(tabs.len(), 4);
+                    for (tab_idx, title) in [(1, "▫ repro-586"), (2, "▫ qa-a"), (3, "▫ qa-b")]
+                    {
+                        let previous = tabs.iter().find(|tab| tab.tab_idx == tab_idx - 1).unwrap();
+                        let header = headers.iter().find(|header| header.title == title).unwrap();
+                        let tab = tabs.iter().find(|tab| tab.tab_idx == tab_idx).unwrap();
+                        let blank_y = previous.rect.bottom();
+                        assert_eq!(header.rect.y, blank_y + 1);
+                        assert_eq!(tab.rect.y, header.rect.bottom());
+                        assert!(!tabs
+                            .iter()
+                            .any(|tab| tab.rect.contains((1, blank_y).into())));
+                        assert!(!headers
+                            .iter()
+                            .any(|header| header.rect.contains((1, blank_y).into())));
+                        assert_eq!(tab.pane_id, app.workspaces[0].tabs[tab_idx].root_pane);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repo_directory_groups_hug_parent_headers_and_exclude_device_headers() {
+        let (mut app, _) = repo_directory_spacing_fixture(true);
+        app.workspaces[0].tabs.remove(0);
+        let rows = super::sidebar_rows(&app);
+        let (spacing, height) = workspace_group_spacing_and_content_height(&app, &rows, u16::MAX);
+        let groups: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                matches!(
+                    row,
+                    SidebarRow::NestedHeader {
+                        sort_key: Some(_),
+                        ..
+                    }
+                )
+                .then_some(index)
+            })
+            .collect();
+        assert_eq!(groups.len(), 3);
+        assert_eq!(sidebar_row_gap(&app, &rows, groups[0] - 1, spacing), 0);
+        assert_eq!(sidebar_row_gap(&app, &rows, groups[1] - 1, spacing), 1);
+        assert_eq!(sidebar_row_gap(&app, &rows, groups[2] - 1, spacing), 1);
+        assert!(workspace_group_spacing(&app, &rows, height).spacers_fit);
+        let (dropped, baseline) =
+            workspace_group_spacing_and_content_height(&app, &rows, height - 1);
+        assert!(!dropped.spacers_fit);
+        assert_eq!(baseline, height - 2);
+        // Device headers use the same variant, but have no group sort metadata.
+        let mut device_rows = rows.clone();
+        if let SidebarRow::NestedHeader { sort_key, .. } = &mut device_rows[groups[1]] {
+            *sort_key = None;
+        }
+        let devices = workspace_group_spacing(&app, &device_rows, u16::MAX);
+        assert_eq!(
+            sidebar_row_gap(&app, &device_rows, groups[1] - 1, devices),
+            0
+        );
+    }
+
+    fn repo_grouped_spacing_fixture() -> (AppState, Vec<SidebarRow>) {
+        let mut app = app_with_agents(&["first", "second", "third", "other"]);
+        app.sidebar_sections_layout = true;
+        app.sidebar_group_mode = SidebarGroupMode::Repo;
+        app.sidebar_spaces.row_gap = 3;
+        for terminal in app.terminals.values_mut() {
+            terminal.set_raw_agent_state_for_test(AgentState::Idle);
+        }
+        let source_rows = sidebar_rows(&app);
+        let mut rows = Vec::new();
+        for ws_idx in 0..4 {
+            if ws_idx == 0 || ws_idx == 3 {
+                rows.push(SidebarRow::NestedHeader {
+                    key: format!("repo:{ws_idx}"),
+                    action_key: None,
+                    sort_key: None,
+                    sort_mode: SidebarSortMode::Default,
+                    title: if ws_idx == 0 { "herdr" } else { "other" }.into(),
+                    count: if ws_idx == 0 { 3 } else { 1 },
+                    activity_count: None,
+                    collapsed: false,
+                    dim: false,
+                    collapsed_project: None,
+                    status: None,
+                    spawn: false,
+                });
+            }
+            let mut workspace = source_rows
+                .iter()
+                .find(|row| matches!(row, SidebarRow::Workspace { ws_idx: index, .. } if *index == ws_idx))
+                .unwrap()
+                .clone();
+            if let SidebarRow::Workspace { indented, .. } = &mut workspace {
+                *indented = true;
+            }
+            rows.push(workspace);
+            rows.push(source_rows
+                .iter()
+                .find(|row| matches!(row, SidebarRow::Tab { entry, .. } if entry.local_target().is_some_and(|target| target.ws_idx == ws_idx)))
+                .unwrap()
+                .clone());
+        }
+        rows.push(SidebarRow::Divider);
+        (app, rows)
+    }
+
+    #[test]
+    fn repo_workspace_gap_counts_only_indented_groups_between_headers() {
+        let (app, rows) = repo_grouped_spacing_fixture();
+        let groups: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| match row {
+                SidebarRow::Workspace {
+                    ws_idx,
+                    indented: true,
+                    ..
+                } => Some((*ws_idx, index)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(groups.len(), 4);
+        let (fitted, content_height) =
+            workspace_group_spacing_and_content_height(&app, &rows, u16::MAX);
+        assert_eq!(fitted.first_group_index, Some(groups[0].1));
+        let baseline_height = content_height - 2;
+        let exact = workspace_group_spacing(&app, &rows, content_height);
+        let (dropped, dropped_height) =
+            workspace_group_spacing_and_content_height(&app, &rows, content_height - 1);
+        assert!(exact.spacers_fit);
+        assert!(!dropped.spacers_fit);
+        assert_eq!(dropped_height, baseline_height);
+        for (index, row) in rows.iter().enumerate() {
+            let expected_gap =
+                u16::from(groups.iter().any(|(ws_idx, group_index)| {
+                    matches!(ws_idx, 1 | 2) && *group_index == index + 1
+                }));
+            assert_eq!(sidebar_row_gap(&app, &rows, index, fitted), expected_gap);
+            assert_eq!(sidebar_row_gap(&app, &rows, index, dropped), 0);
+            if matches!(row, SidebarRow::NestedHeader { .. }) {
+                assert_eq!(expected_gap, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn repo_workspace_gap_keeps_tab_hit_areas_aligned() {
+        let (mut app, rows) = repo_grouped_spacing_fixture();
+        for view_layout in [
+            crate::app::state::ViewLayout::Desktop,
+            crate::app::state::ViewLayout::Mobile,
+        ] {
+            app.view.layout = view_layout;
+            for width in [18, 30] {
+                let area = Rect::new(0, 0, width, 60);
+                let layout = SidebarListLayout::from_rows(&app, area, rows.clone());
+                let tabs = compute_tab_card_areas_from_layout(&app, &layout);
+                let (spaces, _) = compute_sidebar_row_areas_from_layout(&app, area, &layout);
+                assert_eq!(tabs.len(), 4);
+                for ws_idx in [1, 2] {
+                    let previous_tab = tabs.iter().find(|tab| tab.ws_idx == ws_idx - 1).unwrap();
+                    let space = spaces.iter().find(|space| space.ws_idx == ws_idx).unwrap();
+                    let tab = tabs.iter().find(|tab| tab.ws_idx == ws_idx).unwrap();
+                    let spacer_y = previous_tab.rect.bottom();
+                    assert_eq!(space.rect.y, spacer_y + 1);
+                    assert_eq!(tab.rect.y, space.rect.bottom());
+                    assert!(!tabs
+                        .iter()
+                        .any(|tab| tab.rect.contains((1, spacer_y).into())));
+                    let hit = tabs
+                        .iter()
+                        .find(|candidate| candidate.rect.contains((1, tab.rect.y).into()))
+                        .unwrap();
+                    assert_eq!((hit.ws_idx, hit.tab_idx), (ws_idx, 0));
+                    assert_eq!(hit.pane_id, app.workspaces[ws_idx].tabs[0].root_pane);
+                }
+            }
+        }
+    }
+
     fn sidebar_rows(app: &super::AppState) -> Vec<super::SidebarRow> {
         let rows = super::sidebar_rows(app);
         let has_coverage_guard = rows.iter().any(|row| {
@@ -16438,7 +17394,7 @@ pub(crate) mod tests {
         let root_pane = app.workspaces[0].tabs[0].root_pane;
         let split_pane = app.workspaces[0].test_split(Direction::Horizontal);
         app.sidebar_sections_layout = true;
-        set_sections_group_collapsed(&mut app, WORKING_SECTION_TITLE, true);
+        set_sections_group_collapsed(&mut app, WORKING_SECTION_TITLE, false);
         app.ensure_test_terminals();
         for pane_id in [root_pane, split_pane] {
             app.workspaces[0].tabs[0]
@@ -16449,10 +17405,12 @@ pub(crate) mod tests {
         }
 
         let rows = sidebar_rows(&app);
-        let main_key = devices::group_key("main", &app.agent_host_name);
+        let working_key = devices::group_key("working", &app.agent_host_name);
         let header_idx = rows
             .iter()
-            .position(|row| matches!(row, SidebarRow::NestedHeader { key, .. } if key == &main_key))
+            .position(
+                |row| matches!(row, SidebarRow::NestedHeader { key, .. } if key == &working_key),
+            )
             .expect("local device header");
         let header_count = match &rows[header_idx] {
             SidebarRow::NestedHeader { count, .. } => *count,
@@ -16900,7 +17858,8 @@ pub(crate) mod tests {
             })
             .expect("two adjacent remote rows");
 
-        assert_eq!(sidebar_row_gap(&app, &rows, idx), 0);
+        let spacers = workspace_group_spacing(&app, &rows, 10);
+        assert_eq!(sidebar_row_gap(&app, &rows, idx, spacers), 0);
     }
 
     #[test]
@@ -18625,11 +19584,16 @@ pub(crate) mod tests {
             .iter()
             .position(|row| matches!(row, SidebarRow::BlockersOtherDevices { count: 1 }))
             .expect("other-device blocker row");
-        assert!(
-            needs_you_row_areas_from_rows(&app, &local_rows, Rect::new(0, 0, 40, 12), 0,)
-                .iter()
-                .any(|(row_idx, _)| *row_idx == other_devices_row)
-        );
+        let spacing = workspace_group_spacing(&app, &local_rows, 12);
+        assert!(needs_you_row_areas_from_rows(
+            &app,
+            &local_rows,
+            Rect::new(0, 0, 40, 12),
+            0,
+            spacing,
+        )
+        .iter()
+        .any(|(row_idx, _)| *row_idx == other_devices_row));
     }
 
     #[test]
@@ -19344,10 +20308,10 @@ pub(crate) mod tests {
         // indent 1 + dot 2 + title + gap 1 + provider letter + machine label +
         // gap 1 + 3-column right-aligned age.
         for (width, expected) in [
-            (40, " ● mat-310 contract tests      c ub1  3m"),
-            (32, " ● mat-310 contract t… c ub1  3m"),
-            (26, " ● mat-310 cont… c ub1  3m"),
-            (22, " ● mat-310 … c ub1  3m"),
+            (40, "  ● mat-310 contract tests     c ub1  3m"),
+            (32, "  ● mat-310 contract … c ub1  3m"),
+            (26, "  ● mat-310 con… c ub1  3m"),
+            (22, "  ● mat-310… c ub1  3m"),
         ] {
             let row = compact_width_row(width, false);
             assert_eq!(row, expected, "width {width}");
@@ -19356,7 +20320,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn compact_rows_drop_age_then_device_then_provider_and_keep_eight_title_columns() {
+    fn compact_rows_drop_age_then_device_then_provider_and_keep_seven_title_columns() {
         let rows = (8..=22)
             .rev()
             .map(|width| (width, compact_width_row(width, false)))
@@ -19379,7 +20343,7 @@ pub(crate) mod tests {
                 .map_or(body, |(title, _)| title)
                 .trim_end();
             assert!(
-                display_width(title) >= 8.min(usize::from(*width) - 3),
+                display_width(title) >= 7.min(usize::from(*width) - 3),
                 "width {width}: title {title:?} in {row:?}"
             );
         }
@@ -20129,6 +21093,21 @@ pub(crate) mod tests {
         assert!(row.contains("(2)"), "member count missing: {row:?}");
         assert!(row.contains("ub3"), "owner token missing: {row:?}");
         assert!(row.contains("⧖"), "stale marker missing: {row:?}");
+    }
+
+    #[test]
+    fn fresh_pod_group_header_uses_regular_weight() {
+        let app = AppState::test_new();
+        let area = Rect::new(0, 0, 32, 1);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_pod_header_row(&app, frame, area, "Deployment", 2, "ub2", true, false);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let title_x = find_symbol_x(buffer, 0, area.width, "D");
+        assert!(!buffer[(title_x, 0)].modifier.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -20910,7 +21889,7 @@ pub(crate) mod tests {
 
         let buffer = terminal.backend().buffer();
         let dot = buffer
-            .cell((card.rect.x + 1, card.rect.y))
+            .cell((card.rect.x + 2, card.rect.y))
             .expect("tab row dot");
         assert_eq!(dot.symbol(), "●");
         assert_ne!(dot.fg, app.palette.peach);
@@ -21219,7 +22198,7 @@ pub(crate) mod tests {
         assert_eq!(flagged_title_start, title_start,);
         assert_eq!(
             buffer
-                .cell((card.rect.x + 1, card.rect.y))
+                .cell((card.rect.x + 2, card.rect.y))
                 .expect("unflagged dot cell")
                 .symbol(),
             "●"
@@ -22601,7 +23580,7 @@ row_gap = 1
         app.reconcile_sidebar_presentation();
 
         let width = 60;
-        let height = 12;
+        let height = 30;
         let area = Rect::new(0, 0, width, height);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
@@ -22764,7 +23743,7 @@ row_gap = 1
         let workspace_style = buffer[(workspace_x, workspace_row)].style();
         // ac2: active titles are visibly darker than the prior One Light text.
         assert_eq!(workspace_style.fg, Some(Color::Rgb(37, 38, 44)));
-        assert!(workspace_style.add_modifier.contains(Modifier::BOLD));
+        assert!(!workspace_style.add_modifier.contains(Modifier::BOLD));
         assert!(!workspace_style.add_modifier.contains(Modifier::DIM));
         // Sidebar rows sit on the palette's own background, never the
         // terminal's: a row must stay readable under a mismatched theme.
@@ -22807,8 +23786,9 @@ row_gap = 1
         let mut busy = Terminal::new(TestBackend::new(50, 12)).unwrap();
         busy.draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
-        let busy_text = row_text(busy.backend().buffer(), tab_row, 49);
+        let tab_rect = compute_tab_card_areas(&app, area)[0].rect;
+        let tab_row = tab_rect.y;
+        let busy_text = row_text(busy.backend().buffer(), tab_row, tab_rect.right());
         assert!(busy_text.contains("●"), "{busy_text:?}");
         assert!(
             !busy_text.contains("42s"),
@@ -22844,7 +23824,9 @@ row_gap = 1
         let mut idle = Terminal::new(TestBackend::new(50, 12)).unwrap();
         idle.draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let idle_text = row_text(idle.backend().buffer(), tab_row, 49);
+        let tab_rect = compute_tab_card_areas(&app, area)[0].rect;
+        let tab_row = tab_rect.y;
+        let idle_text = row_text(idle.backend().buffer(), tab_row, tab_rect.right());
         assert!(idle_text.contains("●"), "{idle_text:?}");
         assert!(
             idle_text.contains('✓'),
@@ -22916,8 +23898,8 @@ row_gap = 1
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
-        let rendered = row_text(terminal.backend().buffer(), tab_row, 49);
+        let tab_rect = compute_tab_card_areas(&app, area)[0].rect;
+        let rendered = row_text(terminal.backend().buffer(), tab_rect.y, tab_rect.right());
 
         assert!(rendered.contains("Review release"), "{rendered:?}");
         assert!(rendered.ends_with("1m"), "{rendered:?}");
@@ -22972,7 +23954,7 @@ row_gap = 1
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let card = &compute_tab_card_areas(&app, area)[0];
-        let rendered = row_text(terminal.backend().buffer(), card.rect.y, 49);
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, card.rect.right());
 
         assert!(rendered.ends_with("5m"), "{rendered:?}");
         assert!(!rendered.contains(" · one"), "{rendered:?}");
@@ -23721,7 +24703,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         let active = buffer[(find_symbol_x(buffer, first_row, 25, "o"), first_row)].style();
         // ac2: One Light selected titles darken from #383a42 to #25262c.
         assert_eq!(active.fg, Some(Color::Rgb(37, 38, 44)));
-        assert!(active.add_modifier.contains(Modifier::BOLD));
+        assert!(!active.add_modifier.contains(Modifier::BOLD));
         assert!(!active.add_modifier.contains(Modifier::DIM));
         assert_eq!(active.bg, Some(app.palette.sidebar_background()));
 
@@ -23983,9 +24965,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let metrics = workspace_list_scroll_metrics(&app, workspace_area);
         let (cards, _) = compute_workspace_list_areas(&app, area);
 
-        // The search and View header rows leave two list rows here; legacy
-        // space-row configuration still cannot turn either card multiline.
-        assert_eq!(metrics.viewport_rows, 2);
+        // The search and View header rows leave room for both cards and their
+        // one-row group spacer; legacy row configuration cannot turn cards
+        // multiline.
+        assert_eq!(metrics.viewport_rows, 3);
         assert_eq!(cards.len(), 2);
         assert_eq!(cards[0].ws_idx, 0);
         assert_eq!(cards[0].rect.height, 1);
@@ -24076,7 +25059,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .expect("sidebar should render");
 
-        let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
+        // Group spacers can make this short sidebar scroll. Inspect the card's
+        // measured edge so the scrollbar is not mistaken for row content.
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, card.rect.right());
         assert!(rendered.contains("Review blocked thread"), "{rendered:?}");
         assert!(rendered.ends_with('—'), "{rendered:?}");
         assert!(!rendered.contains(" · ws0"), "{rendered:?}");
@@ -24403,11 +25388,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             );
             marker_columns.push(rendered.find('●').expect("working marker"));
         }
-        assert_eq!(marker_columns, vec![0, 0, 0, 0]);
+        assert_eq!(marker_columns, vec![1, 1, 1, 1]);
 
-        let short_github = compact_row_title_for_width("#1 · fix", "c", None, 10, 1);
+        let short_github =
+            compact_row_title_for_width_with_padding("#1 · fix", "c", None, 10, 1, 1);
         assert_eq!(short_github, "fix");
-        assert_eq!(compact_row_widths(short_github, "c", None, 10, 1).prefix, 1);
+        assert_eq!(
+            compact_row_widths(short_github, "c", None, 10, 1, 1).prefix,
+            1
+        );
 
         assert_eq!(
             narrow_view_tab_prefix_from_rows(&app, &rows, 43),
@@ -24465,7 +25454,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             assert!(!row.contains("SCA-3165 ·"), "{row:?}");
             assert!(!row.contains("#159 ·"), "{row:?}");
             assert!(row.contains("samp"), "{row:?}");
-            assert_eq!(row.chars().position(|c| c == '●'), Some(1), "{row:?}");
+            assert_eq!(row.chars().position(|c| c == '●'), Some(2), "{row:?}");
         }
     }
 
@@ -25210,6 +26199,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 app.sidebar_width = width;
                 app.nerd_font = true;
                 app.set_sidebar_group_mode(SidebarGroupMode::Spaces);
+                set_sections_group_collapsed(&mut app, WORKING_SECTION_TITLE, false);
                 expand_section_for_all_views(&mut app, SNOOZED_SECTION_TITLE);
                 set_sections_group_collapsed(&mut app, SNOOZED_SECTION_TITLE, false);
                 app.view.layout = if mobile {
@@ -25935,7 +26925,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .filter(|&(_, row)| matches!(row, SidebarRow::Agent { .. } | SidebarRow::Tab { .. }))
             .map(|(row_idx, _)| {
                 let y = ws_area.y + (row_idx - scroll) as u16;
-                (ws_area.x..ws_area.x + ws_area.width)
+                let content =
+                    super::sidebar_row_content_rect(Rect::new(ws_area.x, y, ws_area.width, 1));
+                (content.x..content.right())
                     .map(|x| buffer[(x, y)].style())
                     .collect::<Vec<_>>()
             })
@@ -25951,7 +26943,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(app.is_active_pane(0, 1, second_pane));
         assert!(!app.is_active_pane(0, 0, first_pane));
 
-        let area = Rect::new(0, 0, 4, 14);
+        let area = Rect::new(0, 0, 5, 14);
         let rows = collapsed_agent_row_styles(&app, area, 3);
 
         let highlighted: Vec<_> = rows
@@ -25967,11 +26959,24 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             1,
             "only the focused agent pane should be highlighted, across the whole row"
         );
-        assert_eq!(highlighted[0][0].fg, Some(app.palette.text));
+        assert!(
+            highlighted[0]
+                .iter()
+                .any(|style| style.fg == Some(app.palette.text)),
+            "focused row content styles: {:#?}",
+            highlighted[0]
+        );
 
         let muted = rows
             .iter()
-            .filter(|cells| cells[0].fg == Some(app.palette.overlay0))
+            .filter(|cells| {
+                !cells
+                    .iter()
+                    .all(|style| style.bg == Some(app.palette.active_row_bg))
+                    && cells
+                        .iter()
+                        .any(|style| style.fg == Some(app.palette.overlay0))
+            })
             .count();
         assert_eq!(
             muted, 2,
@@ -26013,7 +27018,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let rows = collapsed_agent_row_styles(&app, area, 3);
 
         for cells in rows {
-            assert_eq!(cells[0].fg, Some(app.palette.overlay0));
+            assert!(cells
+                .iter()
+                .any(|style| style.fg == Some(app.palette.overlay0)));
             for style in cells {
                 assert_ne!(style.bg, Some(app.palette.active_row_bg));
             }
@@ -26058,12 +27065,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let first_row = row_y(0);
         let tenth_row = row_y(9);
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(workspace_area.x, first_row)].symbol(), "1");
-        assert_eq!(buffer[(workspace_area.x + 1, first_row)].symbol(), " ");
+        assert_eq!(buffer[(workspace_area.x, first_row)].symbol(), " ");
+        assert_eq!(buffer[(workspace_area.x + 1, first_row)].symbol(), "1");
         assert_eq!(buffer[(workspace_area.x + 2, first_row)].symbol(), "?");
-        assert_eq!(buffer[(workspace_area.x, tenth_row)].symbol(), "1");
-        assert_eq!(buffer[(workspace_area.x + 1, tenth_row)].symbol(), "0");
-        assert_eq!(buffer[(workspace_area.x + 2, tenth_row)].symbol(), "?");
+        assert_eq!(buffer[(workspace_area.x, tenth_row)].symbol(), " ");
+        assert_eq!(buffer[(workspace_area.x + 1, tenth_row)].symbol(), "?");
+        assert_eq!(buffer[(workspace_area.x + 2, tenth_row)].symbol(), " ");
     }
 
     #[test]
@@ -26843,9 +27850,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         // The ticket's own state is not a live agent state: the header shows
         // the Linear glyph, and the text stays in the dim chrome tone.
         assert!(line.contains("◐ OPS-12 · pixel"), "{line:?}");
-        let glyph = buffer[(dim.rect.x + 3, dim.rect.y)].style();
+        let glyph = buffer[(dim.rect.x + 4, dim.rect.y)].style();
         assert_eq!(glyph.fg, Some(app.palette.work_status_active()));
-        let styled = buffer[(dim.rect.x + 5, dim.rect.y)].style();
+        let styled = buffer[(dim.rect.x + 6, dim.rect.y)].style();
         assert_eq!(styled.fg, Some(app.palette.overlay0));
         for state in [AgentState::Working, AgentState::Blocked, AgentState::Idle] {
             assert_ne!(
@@ -28825,8 +29832,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 let _ = header;
                 assert_eq!(
                     first_non_space(child.rect.y, child.rect.width),
-                    1,
-                    "child keeps its one-column depth indent at width {width}: {child_text:?}"
+                    2,
+                    "child keeps its one-column depth indent after the sidebar gutter at width {width}: {child_text:?}"
                 );
             }
         }
@@ -29128,7 +30135,40 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let title = buffer[(find_symbol_x(buffer, row, area.width, "m"), row)].style();
 
         assert_eq!(title.fg, Some(active_sidebar_title_color(&app.palette)));
-        assert!(title.add_modifier.contains(Modifier::BOLD));
+        assert!(!title.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn nonfocused_agent_row_title_is_regular_weight() {
+        let mut app = AppState::test_new();
+        let mut focused = Workspace::test_new("focused");
+        focused.tabs[0].custom_name = Some("Focused task".into());
+        let mut background = Workspace::test_new("background");
+        background.tabs[0].custom_name = Some("Background task".into());
+        app.workspaces = vec![focused, background];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.set_server_mode(Mode::Terminal);
+        app.reconcile_sidebar_presentation();
+
+        let area = Rect::new(0, 0, 60, 12);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let tabs = compute_tab_card_areas(&app, area);
+        let focused_row = tabs.iter().find(|tab| tab.ws_idx == 0).unwrap().rect.y;
+        let background_row = tabs.iter().find(|tab| tab.ws_idx == 1).unwrap().rect.y;
+
+        let focused_x = find_symbol_x(buffer, focused_row, area.width, "F");
+        let background_x = find_symbol_x(buffer, background_row, area.width, "B");
+        assert!(buffer[(focused_x, focused_row)]
+            .modifier
+            .contains(Modifier::BOLD));
+        assert!(!buffer[(background_x, background_row)]
+            .modifier
+            .contains(Modifier::BOLD));
     }
 
     #[test]
@@ -29460,8 +30500,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             terminal
                 .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
                 .unwrap();
-            let row = compute_tab_card_areas(&app, area)[0].rect.y;
-            let rendered = row_text(terminal.backend().buffer(), row, area.width - 1);
+            let rect = compute_tab_card_areas(&app, area)[0].rect;
+            let rendered = row_text(terminal.backend().buffer(), rect.y, rect.right());
 
             assert!(rendered.contains("●"), "{width}: {rendered:?}");
             assert!(has_tag(&rendered, "x"), "{width}: {rendered:?}");
@@ -29678,7 +30718,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn space_row_gap_separates_flattened_groups() {
+    fn flattened_workspace_headers_hug_without_content_rows() {
         let mut app = AppState::test_new();
         app.workspaces = vec![
             workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
@@ -29691,23 +30731,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let (spacious, _) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 30));
         assert_eq!(spacious.len(), 2);
-        assert_eq!(
-            spacious[1].rect.y,
-            spacious[0].rect.y + spacious[0].rect.height + 2
-        );
+        assert_eq!(spacious[1].rect.y, spacious[0].rect.bottom());
         let spacious_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 6));
-        assert_eq!(spacious_metrics.viewport_rows, 2);
 
         app.sidebar_spaces.row_gap = 0;
         let (packed, _) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 30));
-        assert!(packed
-            .windows(2)
-            .all(|pair| pair[1].rect.y == pair[0].rect.y + pair[0].rect.height));
+        assert_eq!(packed[1].rect.y, packed[0].rect.bottom());
         let packed_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 6));
-        assert_eq!(
-            packed_metrics.viewport_rows,
-            spacious_metrics.viewport_rows + 2
-        );
+        assert_eq!(packed_metrics.viewport_rows, spacious_metrics.viewport_rows);
         assert_eq!(
             spacious_metrics.max_offset_from_bottom,
             packed_metrics.max_offset_from_bottom
@@ -29739,7 +30770,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn packed_workspace_drag_indicator_overlays_an_internal_boundary() {
+    fn workspace_drag_indicator_targets_the_packed_group_boundary() {
         let mut app = AppState::test_new();
         app.workspaces = vec![
             Workspace::test_new("a"),
@@ -29758,7 +30789,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             crate::app::state::WorkspaceDropTarget::Before(2),
         )
         .unwrap();
-        assert_eq!(indicator_row, app.view.workspace_card_areas[1].rect.y);
+        assert_eq!(indicator_row, app.view.workspace_card_areas[2].rect.y - 1);
         app.drag = Some(crate::app::state::DragState {
             target: crate::app::state::DragTarget::WorkspaceReorder {
                 source_id: 0,
@@ -29846,12 +30877,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.active = None;
         app.set_server_mode(Mode::Terminal);
 
-        // Search adds one header row without changing the three-row viewport
-        // this metric contract exercises.
+        // Height pressure drops workspace spacers before display rows, so all
+        // four available body rows remain usable.
         let ws_area = Rect::new(0, 0, 30, 6);
         let metrics = workspace_list_scroll_metrics(&app, ws_area);
 
-        assert_eq!(metrics.viewport_rows, 3);
+        assert_eq!(metrics.viewport_rows, 4);
         // Three display rows plus the always-visible Snoozed/Settled shelves
         // and their divider, plus the Notes header.
         assert_eq!(metrics.max_offset_from_bottom, 7);
@@ -30226,11 +31257,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let area = Rect::new(0, 0, 48, 24);
         let metrics = workspace_list_scroll_metrics(&app, area);
         let sidebar_area = Rect::new(area.x, area.y, area.width.saturating_add(1), area.height);
+        let body =
+            workspace_list_body_rect(&app, workspace_list_rect_for_app(&app, sidebar_area), false);
+        let spacing = workspace_group_spacing(&app, &rows, body.height);
         let divider_areas = compute_sidebar_divider_areas(
             &app,
             workspace_list_rect_for_app(&app, sidebar_area),
             &rows,
             metrics,
+            spacing,
         );
         assert_eq!(
             divider_areas.len(),
@@ -30673,7 +31708,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         compute_sidebar_nested_header_areas(app, app.view.sidebar_rect)
             .into_iter()
             .map(|header| {
-                let glyph_x = header.rect.x + if header.dim { 3 } else { 4 };
+                let glyph_x =
+                    super::sidebar_row_content_rect(header.rect).x + if header.dim { 3 } else { 4 };
                 (
                     row_text(&buffer, header.rect.y, header.rect.width),
                     buffer[(glyph_x, header.rect.y)].style().fg,
@@ -30918,7 +31954,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .iter()
             .find(|(line, _)| line.contains("OPS-3"))
             .unwrap_or_else(|| panic!("ticket header in {headers:?}"));
-        assert!(header.0.starts_with("   ◐ OPS-3 · pixel"), "{:?}", header.0);
+        assert!(
+            header.0.starts_with("    ◐ OPS-3 · pixel"),
+            "{:?}",
+            header.0
+        );
         assert!(header.0.ends_with("… + …"), "{:?}", header.0);
         assert!(
             crate::ui::text::display_width(&header.0) <= 26,
@@ -31912,28 +32952,36 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
     #[test]
     fn hover_targets_anchor_on_the_agent_dot_a_row_actually_drew() {
-        let app = app_with_agents(&["alpha"]);
+        let mut app = app_with_agents(&["alpha"]);
         let area = Rect::new(0, 0, 32, 20);
-        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
-        terminal
-            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
-            .unwrap();
+        for layout in [
+            crate::app::state::ViewLayout::Desktop,
+            crate::app::state::ViewLayout::Mobile,
+        ] {
+            app.view.layout = layout;
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
 
-        let card = compute_tab_card_areas(&app, area)[0].clone();
-        let target = compute_sidebar_hover_targets(&app, area)
-            .into_iter()
-            .find(|target| target.rect.y == card.rect.y)
-            .expect("dot target on the agent row");
+            let card = compute_tab_card_areas(&app, area)[0].clone();
+            let target = compute_sidebar_hover_targets(&app, area)
+                .into_iter()
+                .find(|target| target.rect.y == card.rect.y)
+                .expect("dot target on the agent row");
 
-        assert_eq!(target.label, "Working");
-        assert_eq!(target.rect.height, 1);
-        // The anchor sits on the dot the row drew, not on its left edge.
-        let rendered = row_text(terminal.backend().buffer(), card.rect.y, card.rect.width);
-        assert_eq!(
-            rendered.chars().nth(usize::from(target.rect.x)),
-            Some('\u{25cf}'),
-            "{rendered:?}"
-        );
+            assert_eq!(target.label, "Working", "{layout:?}");
+            assert_eq!(target.rect.height, 1, "{layout:?}");
+            // The anchor sits on the cell the row drew its dot in, read by
+            // screen cell so wide glyphs earlier in the row cannot shift it.
+            assert_eq!(
+                buffer[(target.rect.x, card.rect.y)].symbol(),
+                "\u{25cf}",
+                "{layout:?}: {:?}",
+                row_text(buffer, card.rect.y, card.rect.width)
+            );
+        }
     }
 
     #[test]
@@ -33568,6 +34616,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             AgentState::Idle,
         ];
         let mut expected_tabs = Vec::new();
+        let mut expected_main_tabs = Vec::new();
         let mut settled_tabs = Vec::new();
         let mut working_tabs = 0;
         let observed_at = std::time::Instant::now();
@@ -33578,13 +34627,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 let pane_id = tab.root_pane;
                 let pane = tab.panes.get_mut(&pane_id).expect("root pane");
                 pane.seen = true;
+                let state = states[state_index];
                 if (ws_idx, tab_idx) == (2, 1) {
                     pane.settled_at = Some(1_725_000_000);
                     settled_tabs.push((ws_idx, tab_idx));
-                } else {
+                } else if state != AgentState::Working {
                     expected_tabs.push((ws_idx, tab_idx));
+                    expected_main_tabs.push((ws_idx, tab_idx));
                 }
-                let state = states[state_index];
                 working_tabs += usize::from(state == AgentState::Working);
                 let terminal = app
                     .terminals
@@ -33613,7 +34663,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             })
             .collect::<Vec<_>>();
         workspace_headers.sort_unstable();
-        assert_eq!(workspace_headers, [0, 1, 2]);
+        assert_eq!(workspace_headers, [0, 1]);
 
         let mut actual_tabs = rows
             .iter()
@@ -33628,8 +34678,24 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         expected_tabs.sort_unstable();
         assert_eq!(
             actual_tabs, expected_tabs,
-            "every active local tab must appear once in the default tree"
+            "every active local tab must appear once across the default tree and Working shelf"
         );
+        let mut actual_main_tabs = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
+                    if !entry.working_shelf =>
+                {
+                    entry
+                        .local_target()
+                        .map(|target| (target.ws_idx, target.tab_idx))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        actual_main_tabs.sort_unstable();
+        expected_main_tabs.sort_unstable();
+        assert_eq!(actual_main_tabs, expected_main_tabs);
         assert_eq!(
             rows.iter().find_map(|row| match row {
                 SidebarRow::NestedHeader { key, count, .. } if key == "device:main/ub2" => {
@@ -33637,8 +34703,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 }
                 _ => None,
             }),
-            Some(expected_tabs.len()),
-            "the main device count must exclude tabs moved into Settled"
+            Some(expected_main_tabs.len()),
+            "the main device count must exclude tabs moved to other shelves"
         );
 
         let section = |title| {
@@ -33688,6 +34754,60 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn collapsed_working_shelf_hides_working_tabs_from_the_device_tree() {
+        let mut app = sort_app(&[
+            sort_tab("build", "owner/herdr", AgentState::Working, 1),
+            sort_tab("read", "owner/herdr", AgentState::Idle, 2),
+        ]);
+        app.sidebar_sections_layout = true;
+
+        let rows = sidebar_rows(&app);
+
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: WORKING_SECTION_TITLE,
+                count: 1,
+                collapsed: true,
+                ..
+            }
+        )));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. }
+                if entry.state == AgentState::Idle && !entry.working_shelf
+        )));
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
+                if entry.state == AgentState::Working && !entry.working_shelf
+        )));
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
+                if entry.state == AgentState::Working && entry.working_shelf
+        )));
+    }
+
+    #[test]
+    fn focusing_working_pane_targets_collapsed_working_header() {
+        let mut app = sort_app(&[sort_tab("build", "owner/herdr", AgentState::Working, 1)]);
+        app.sidebar_sections_layout = true;
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .next()
+            .expect("working entry");
+
+        assert_eq!(
+            collapsed_sidebar_placement(&app, &entry, "main"),
+            Some((
+                WORKING_SECTION_TITLE.to_string(),
+                WORKING_SECTION_TITLE.to_string()
+            ))
+        );
     }
 
     #[test]
@@ -34021,7 +35141,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             rows.iter()
                 .filter(|row| matches!(row, SidebarRow::Tab { .. }))
                 .count(),
-            3
+            2
         );
         assert!(rows.iter().any(|row| matches!(
             row,
@@ -34336,7 +35456,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             rows.iter()
                 .filter(|row| matches!(row, SidebarRow::Tab { .. }))
                 .count(),
-            2
+            1
         );
     }
 
@@ -34393,13 +35513,27 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 row,
                 SidebarRow::NestedHeader {
                     key,
-                    count: 2,
+                    count: 1,
                     activity_count: Some((1, 2)),
                     ..
                 } if key.starts_with("remote-space:ub2:")
             )),
             "nested keys: {nested_keys:?}"
         );
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: WORKING_SECTION_TITLE,
+                count: 1,
+                collapsed: true,
+                ..
+            }
+        )));
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::RemoteAgent { entry, .. }
+                if entry.entry.state == AgentState::Working
+        )));
         let area = Rect::new(0, 0, 42, 32);
         let mut rendered = Terminal::new(TestBackend::new(area.width, area.height))
             .expect("remote focus sidebar terminal");
@@ -34466,12 +35600,49 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             terminal
                 .draw(|frame| render_section_header(&app, frame, &header, 16, &[], collapsed))
                 .unwrap();
-            row_text(terminal.backend().buffer(), 0, area.width)
+            let buffer = terminal.backend().buffer();
+            let title_x = find_symbol_x(buffer, 0, area.width, "W");
+            (
+                row_text(buffer, 0, area.width),
+                buffer[(title_x, 0)].modifier.contains(Modifier::BOLD),
+            )
         };
 
-        assert!(render(true).contains("▸ Working (16)"));
-        assert!(render(false).contains("▾ Working"));
-        assert!(!render(false).contains("(16)"));
+        let collapsed = render(true);
+        assert!(collapsed.0.contains("▸ Working (16)"));
+        assert!(collapsed.1, "section titles stay bold");
+        let expanded = render(false);
+        assert!(expanded.0.contains("▾ Working"));
+        assert!(!expanded.0.contains("(16)"));
+        assert!(expanded.1, "section titles stay bold");
+    }
+
+    #[test]
+    fn nested_group_headers_render_without_bold() {
+        let app = AppState::test_new();
+        let area = Rect::new(0, 0, 30, 1);
+        let header = NestedHeaderArea {
+            key: "device:local".into(),
+            action_key: None,
+            sort_key: None,
+            sort_mode: SidebarSortMode::Default,
+            title: "Work group".into(),
+            count: 0,
+            activity_count: None,
+            collapsed: false,
+            dim: false,
+            collapsed_project: None,
+            status: None,
+            spawn: false,
+            rect: area,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_nested_header(&app, frame, &header))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let title_x = find_symbol_x(buffer, 0, area.width, "W");
+        assert!(!buffer[(title_x, 0)].modifier.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -34564,10 +35735,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let mut app = app_with_agents(&["working device row"]);
         app.sidebar_sections_layout = true;
+        app.toggle_sidebar_group(WORKING_SECTION_TITLE);
         let device_key = sidebar_rows(&app)
             .iter()
             .find_map(|row| match row {
-                SidebarRow::NestedHeader { key, .. } if key.starts_with("device:main/") => {
+                SidebarRow::NestedHeader { key, .. } if key.starts_with("device:working/") => {
                     Some(key.clone())
                 }
                 _ => None,
@@ -34616,8 +35788,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .unwrap();
         let buffer = terminal.backend().buffer();
 
-        assert_eq!(buffer[(0, 0)].symbol(), "▎");
-        assert_eq!(buffer[(0, 0)].fg, app.palette.accent);
+        assert_eq!(buffer[(1, 0)].symbol(), "▎");
+        assert_eq!(buffer[(1, 0)].fg, app.palette.accent);
         assert!((0..30).all(|x| buffer[(x, 0)].bg == app.palette.surface1));
     }
 
@@ -34973,7 +36145,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn main_device_count_excludes_agents_moved_to_lifecycle_shelves() {
+    fn working_agents_are_excluded_from_main_device_count() {
         let mut app = app_with_agents(&["active", "settled"]);
         app.sidebar_sections_layout = true;
         let settled = app.workspaces[1].tabs[0].root_pane;
@@ -34985,7 +36157,16 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             SidebarRow::NestedHeader { key, count, .. } if key == &main_key => Some(*count),
             _ => None,
         });
-        assert_eq!(main_count, Some(1));
+        assert_eq!(main_count, None);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: WORKING_SECTION_TITLE,
+                count: 1,
+                collapsed: true,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -35294,6 +36475,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                                 sidebar_machine_label(&app, host),
                                 usize::from(width),
                                 NEEDS_YOU_REQUESTED_PREFIX_WIDTH,
+                                1,
                             ));
                             render_needs_you_row(
                                 &app,

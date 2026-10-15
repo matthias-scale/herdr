@@ -405,6 +405,7 @@ pub(crate) fn visible_tab_activity_instants_from(
                 entry,
                 usize::from(content.width),
                 display_width(&indent),
+                0,
             );
             layout.activity_age.and(layout.activity_instant)
         })
@@ -2887,10 +2888,18 @@ mod tests {
                 .expect("workspace row")
                 .start as u16
             + 1;
-        let row_col = content.x + 1;
+        let row_col = content.x + 2;
         assert_ne!(
             terminal.backend().buffer()[(row_col, tab_row)].symbol(),
             " "
+        );
+        assert_eq!(
+            mobile_switcher_target_at(&app, content.x + 1, tab_row),
+            Some(MobileSwitcherTarget::SidebarTab {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id,
+            })
         );
         assert_eq!(
             mobile_switcher_target_at(&app, row_col, tab_row),
