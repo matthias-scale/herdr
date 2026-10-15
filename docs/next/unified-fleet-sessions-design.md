@@ -42,13 +42,16 @@ accepts WAN latency on that hop), process migration between servers.
   once per host per tick. Local hosts read the API socket directly.
 - Pane open: direct terminal attach over SSH per click (`herdr agent attach` semantics);
   a second click refocuses an already attached pane (`focus_attached_fleet_host_pane`).
-- Server API already exposes `events.subscribe` with `pane.agent_status_changed`,
-  `workspace.created`, and `session.snapshot` resync when a subscriber falls behind
-  (`src/api/subscriptions.rs`, `src/api/schema.rs`). Fleet status does not use it.
+- Remote agent streams: alongside the poller, `supervise_remote_agent_streams`
+  (`src/fleet.rs`) runs one long-lived `ssh` process per remote host that subscribes
+  to `FleetAgentsChanged` and, when the server supports it, `SessionChanged`, seeding
+  session inventory from the stream. A dropped stream retries after 3 s, 10 s or 30 s
+  depending on the failure. The 5 s poll keeps running as well.
 - `herdr --remote` keeps a private per-attach SSH control socket; saved fleet hosts do
   not.
 
-The architecture is right. The data path is polling plus per-open dialling.
+The architecture is right. The data path is one cold `ssh` per poll request, a
+separate `ssh` per event stream, and per-open dialling.
 
 ## Design
 
@@ -68,16 +71,17 @@ that host — inventory, event subscription, pane attach, dispatch — goes thro
 - Windows clients fall back to the current per-exec path (Windows OpenSSH has no
   control sockets); behaviour there is unchanged.
 
-### 2. Push status instead of polling
+### 2. Event stream over the warm channel; poll as fallback
 
-Over the warm channel, the client opens one long-lived `events.subscribe` stream per
-host for `pane.agent_status_changed`, `workspace.*` and pane lifecycle events, seeded by
-one `session.snapshot`. Events are applied to the same in-memory agent model the local
-socket feeds. The existing poll is demoted to a slow fallback (60 s) that resyncs only
-when the stream is absent or reports it fell behind.
+The per-host event stream already exists (see "What exists"). This step moves it onto
+the warm channel instead of its own `ssh` process, aligns its reconnect with the
+supervisor's backoff (250 ms → 10 s instead of fixed 3/10/30 s retries), and demotes the
+5 s poll to a slow fallback (60 s) that runs only while the stream is absent or reports
+it fell behind. It also checks that the stream's subscriptions cover every state the
+sidebar shows, adding pane lifecycle coverage only if a gap is found.
 
-This is a client change only; the server API exists. Freshness becomes event latency
-plus one warm round trip, roughly 5–20 ms.
+This is a client change only; the server API exists. Freshness stays at event latency
+plus one warm round trip, roughly 5–20 ms, and stops depending on a cold reconnect.
 
 ### 3. Pane open path
 
@@ -103,7 +107,7 @@ name, to keep rows single-line at the current sidebar width.
 
 | Action | Local today | Remote today | Remote after | Within 2× |
 | --- | --- | --- | --- | --- |
-| Status change visible | ~50 ms | 0–5 000 ms + 240 ms | ~5–20 ms | yes |
+| Status change visible | ~50 ms | stream event when connected; 0–5 000 ms + 240 ms poll, or 3–30 s while reconnecting | ~5–20 ms; reconnect 1–3 s | yes |
 | Open pane, first time | ~30 ms | ~400–700 ms | ~30–60 ms | yes |
 | Open pane, already attached | ~30 ms | ~30 ms | ~30 ms | yes (already) |
 | Keystroke echo | < 1 ms | ~1–2 ms | ~1–2 ms | yes (unchanged) |
@@ -118,7 +122,8 @@ warm-channel measurement.
 
 1. Connection supervisor + warm channel, used first by the existing poller (no behaviour
    change, handshake disappears). Measurable on its own: poll tick cost 240 ms → < 10 ms.
-2. Event subscription over the channel; poll demoted to fallback.
+2. Existing event stream moved onto the channel with supervisor backoff; poll demoted to
+   a 60 s fallback.
 3. Attach over the channel; snapshot cache; `wan` flag and pre-warm.
 4. Sidebar regrouping and host badge/filter.
 5. Config migration note: recommend Tailscale names for `target`; no breaking change.
