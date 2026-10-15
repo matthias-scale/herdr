@@ -31,7 +31,8 @@ pub(crate) struct PickerGeometry {
 
 pub(crate) fn geometry(home: &HomeState, area: Rect, anchor: Rect) -> PickerGeometry {
     let account_rows = home.account_picker.rows.len().clamp(1, 8) as u16;
-    let model_rows = home.filtered_account_models().len().clamp(1, 8) as u16;
+    // Reserve the same model viewport for every selected account and search query.
+    let model_rows = 8;
     let rail_width = home
         .account_picker
         .rows
@@ -40,13 +41,7 @@ pub(crate) fn geometry(home: &HomeState, area: Rect, anchor: Rect) -> PickerGeom
         .max()
         .unwrap_or(24)
         .clamp(24, 36);
-    let model_width = home
-        .model_options()
-        .iter()
-        .map(|model| model.short_name().chars().count() as u16 + 4)
-        .max()
-        .unwrap_or(24)
-        .clamp(24, 40);
+    let model_width = 40;
     let width = area.width.min((rail_width + model_width + 2).clamp(64, 88));
     let body_height = if width >= 64 {
         account_rows.max(model_rows + 1)
@@ -452,6 +447,63 @@ mod tests {
     use super::*;
     use crate::app::home::HomePicker;
     use ratatui::{backend::TestBackend, Terminal};
+
+    fn home_with_codex_models(count: usize, name_len: usize) -> HomeState {
+        let mut codex = crate::app::home_catalog::HomeCatalog::fallback()
+            .provider(crate::detect::Agent::Codex)
+            .expect("Codex catalog")
+            .clone();
+        codex.models = (0..count)
+            .map(|index| crate::app::home_catalog::HomeModelCatalogEntry {
+                id: format!("model-{index}"),
+                display_name: format!("{}-{index}", "m".repeat(name_len)),
+                efforts: Vec::new(),
+                supports_large_context: false,
+            })
+            .collect();
+        let mut home =
+            HomeState::with_catalog(crate::app::home_catalog::HomeCatalog::with_codex(codex));
+        home.set_agent(crate::detect::Agent::Codex);
+        home.open_account_picker(HomePicker::Agent);
+        home
+    }
+
+    #[test]
+    fn account_picker_geometry_stays_fixed_across_selected_provider_catalogs() {
+        let claude = HomeState::default();
+        let codex = home_with_codex_models(12, 45);
+        let area = Rect::new(0, 0, 110, 40);
+        let anchor = Rect::new(40, 8, 12, 1);
+        let claude_geometry = geometry(&claude, area, anchor);
+        let codex_geometry = geometry(&codex, area, anchor);
+        assert_eq!(claude_geometry.popup, codex_geometry.popup);
+        assert_eq!(claude_geometry.accounts, codex_geometry.accounts);
+        assert_eq!(claude_geometry.models, codex_geometry.models);
+    }
+
+    #[test]
+    fn account_picker_geometry_stays_fixed_when_anchored_above_trigger() {
+        let claude = HomeState::default();
+        let codex = home_with_codex_models(12, 45);
+        let area = Rect::new(0, 0, 110, 40);
+        let anchor = Rect::new(40, 30, 12, 1);
+        let claude_geometry = geometry(&claude, area, anchor);
+        let codex_geometry = geometry(&codex, area, anchor);
+        assert_eq!(claude_geometry.popup, codex_geometry.popup);
+        assert!(claude_geometry.popup.bottom() <= anchor.y);
+    }
+
+    #[test]
+    fn account_picker_geometry_stays_clamped_in_narrow_terminal() {
+        let home = home_with_codex_models(12, 45);
+        let area = Rect::new(3, 2, 40, 12);
+        let anchor = Rect::new(30, 10, 8, 1);
+        let g = geometry(&home, area, anchor);
+        assert!(g.popup.right() <= area.right());
+        assert!(g.popup.bottom() <= area.bottom());
+        assert_eq!(g.accounts.x, g.models.x);
+    }
+
     #[test]
     fn account_picker_selected_labels_share_sidebar_tokens_and_short_lane_identity() {
         use crate::app::launch_profiles::LaunchProfile;
