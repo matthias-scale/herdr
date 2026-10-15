@@ -621,6 +621,37 @@ fn picker_row_label(label: &str, width: usize) -> String {
     }
 }
 
+fn styled_chip_line(
+    app: &AppState,
+    home: &HomeState,
+    focus: HomeFocus,
+    label: &str,
+    width: usize,
+    base: Style,
+) -> Line<'static> {
+    let shown = picker_row_label(label, width);
+    match focus {
+        HomeFocus::Agent => super::account_picker::selected_label_line(app, home, &shown, base),
+        HomeFocus::Model => {
+            let (model, suffix) = shown
+                .strip_suffix(" ▾")
+                .map(|model| (model, " ▾"))
+                .unwrap_or((&shown, ""));
+            Line::from(vec![
+                Span::styled(
+                    model.to_string(),
+                    base.fg(super::icons::agent_color(
+                        home.profile().agent,
+                        &app.palette,
+                    )),
+                ),
+                Span::styled(suffix.to_string(), base),
+            ])
+        }
+        _ => Line::from(Span::styled(shown, base)),
+    }
+}
+
 fn chip_rects(app: &AppState, home: &HomeState, composer: ComposerBands) -> Vec<(HomeFocus, Rect)> {
     let area = composer.chips;
     let specs = chip_specs(app, home, composer);
@@ -1753,7 +1784,15 @@ pub(super) fn render_home(
                 Style::default().fg(app.palette.subtext0)
             };
             frame.render_widget(
-                Paragraph::new(picker_row_label(&label, rect.width as usize)).style(style),
+                Paragraph::new(styled_chip_line(
+                    app,
+                    home,
+                    focus,
+                    &label,
+                    rect.width as usize,
+                    style,
+                ))
+                .style(style),
                 rect,
             );
         }
@@ -1930,59 +1969,88 @@ mod tests {
     #[test]
     fn account_picker_selected_home_chip_icon_identity_and_exact_hit_width() {
         use crate::provider_usage::{ProviderAccountUsage, QuotaProvider};
-        for nerd_font in [false, true] {
-            for (width, height) in [(100, 30), (52, 36)] {
-                let mut app = AppState::test_new();
-                app.nerd_font = nerd_font;
-                app.provider_usage.accounts.push(ProviderAccountUsage {
-                    provider: QuotaProvider::Claude,
-                    profile_id: "scalablehq".into(),
-                    label: "SHQ".into(),
-                    usage: Default::default(),
-                });
-                let mut home = HomeState::default();
-                home.refresh_account_rows(&app.provider_usage);
-                home.select_account_row(1);
-                app.home = Some(home);
-                let home = app.home.as_ref().expect("home");
-                let area = Rect::new(0, 0, width, height);
-                let composer = home_bands(&app, &[], area).composer.expect("composer");
-                let expected = format!(
-                    "{} ▾",
-                    super::super::account_picker::selected_label(&app, home)
-                );
-                let specs = chip_specs(&app, home, composer);
-                assert_eq!(
-                    specs
+        for theme in ["catppuccin", "catppuccin-latte"] {
+            for nerd_font in [false, true] {
+                for (width, height) in [(100, 30), (52, 36)] {
+                    let mut app = AppState::test_new();
+                    app.nerd_font = nerd_font;
+                    app.palette = crate::app::state::Palette::from_name(theme).expect("theme");
+                    app.provider_usage.accounts.push(ProviderAccountUsage {
+                        provider: QuotaProvider::Claude,
+                        profile_id: "scalablehq".into(),
+                        label: "SHQ".into(),
+                        usage: Default::default(),
+                    });
+                    let mut home = HomeState::default();
+                    home.refresh_account_rows(&app.provider_usage);
+                    home.select_account_row(1);
+                    app.home = Some(home);
+                    let home = app.home.as_ref().expect("home");
+                    let area = Rect::new(0, 0, width, height);
+                    let composer = home_bands(&app, &[], area).composer.expect("composer");
+                    let expected = format!(
+                        "{} ▾",
+                        super::super::account_picker::selected_label(&app, home)
+                    );
+                    let specs = chip_specs(&app, home, composer);
+                    assert_eq!(
+                        specs
+                            .iter()
+                            .find(|(focus, _)| *focus == HomeFocus::Agent)
+                            .expect("chip")
+                            .1,
+                        expected
+                    );
+                    let rect = composer_field_rect(&app, home, composer, HomeFocus::Agent)
+                        .expect("trigger");
+                    let hits = home_hit_areas(&app, &[], area);
+                    assert!(hits
                         .iter()
-                        .find(|(focus, _)| *focus == HomeFocus::Agent)
-                        .expect("chip")
-                        .1,
-                    expected
-                );
-                let rect =
-                    composer_field_rect(&app, home, composer, HomeFocus::Agent).expect("trigger");
-                let hits = home_hit_areas(&app, &[], area);
-                assert!(hits
-                    .iter()
-                    .any(|hit| hit.target == HomeHitTarget::Agent && hit.rect == rect));
-                let buffer = draw_home(&app, &[], area);
-                let rendered: String = (rect.x..rect.right())
-                    .map(|x| buffer[(x, rect.y)].symbol())
-                    .collect();
-                assert!(rendered.contains("SHQ"), "{rendered:?}");
-                let token = if nerd_font {
-                    super::super::icons::agent_icon(crate::detect::Agent::Claude)
-                } else {
-                    super::super::icons::agent_letter_tag(crate::detect::Agent::Claude)
+                        .any(|hit| hit.target == HomeHitTarget::Agent && hit.rect == rect));
+                    let buffer = draw_home(&app, &[], area);
+                    let rendered: String = (rect.x..rect.right())
+                        .map(|x| buffer[(x, rect.y)].symbol())
+                        .collect();
+                    assert!(rendered.contains("SHQ"), "{rendered:?}");
+                    let token = if nerd_font {
+                        super::super::icons::agent_icon(crate::detect::Agent::Claude)
+                    } else {
+                        super::super::icons::agent_letter_tag(crate::detect::Agent::Claude)
+                    }
+                    .expect("provider token");
+                    assert!(rendered.contains(token), "{rendered:?}");
+                    let composer = home_bands(&app, &[], area).composer.expect("composer");
+                    let chips = chip_rects(&app, home, composer);
+                    let agent_rect = chips
+                        .iter()
+                        .find_map(|(focus, rect)| (*focus == HomeFocus::Agent).then_some(*rect))
+                        .expect("agent chip");
+                    let model_rect = chips
+                        .iter()
+                        .find_map(|(focus, rect)| (*focus == HomeFocus::Model).then_some(*rect))
+                        .expect("model chip");
+                    assert_eq!(
+                        buffer[(agent_rect.x, agent_rect.y)].fg,
+                        super::super::icons::agent_color(
+                            crate::detect::Agent::Claude,
+                            &app.palette
+                        ),
+                        "provider icon color on {theme}"
+                    );
+                    assert_eq!(
+                        buffer[(model_rect.x, model_rect.y)].fg,
+                        super::super::icons::agent_color(
+                            crate::detect::Agent::Claude,
+                            &app.palette
+                        ),
+                        "model label color on {theme}"
+                    );
+                    assert!(!rendered.to_ascii_lowercase().contains("claude"));
+                    assert_eq!(
+                        home.account_selection.as_ref().expect("selection").account,
+                        "scalablehq"
+                    );
                 }
-                .expect("provider token");
-                assert!(rendered.contains(token), "{rendered:?}");
-                assert!(!rendered.to_ascii_lowercase().contains("claude"));
-                assert_eq!(
-                    home.account_selection.as_ref().expect("selection").account,
-                    "scalablehq"
-                );
             }
         }
     }

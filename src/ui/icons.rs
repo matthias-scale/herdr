@@ -4,6 +4,33 @@ use ratatui::style::Color;
 
 use crate::{app::state::Palette, detect::Agent, provider_usage::QuotaProvider};
 
+pub(crate) fn provider_color(provider: QuotaProvider, p: &Palette) -> Color {
+    match provider {
+        QuotaProvider::Claude => claude_color(p),
+        QuotaProvider::Codex => codex_color(p),
+        QuotaProvider::Kimi => p.mauve,
+        QuotaProvider::Agy => p.teal,
+        QuotaProvider::OpenCode => p.blue,
+    }
+}
+
+pub(crate) fn quota_provider_for_agent(agent: Agent) -> Option<QuotaProvider> {
+    match agent {
+        Agent::Claude => Some(QuotaProvider::Claude),
+        Agent::Codex => Some(QuotaProvider::Codex),
+        Agent::Kimi => Some(QuotaProvider::Kimi),
+        Agent::Antigravity => Some(QuotaProvider::Agy),
+        Agent::OpenCode => Some(QuotaProvider::OpenCode),
+        _ => None,
+    }
+}
+
+pub(crate) fn agent_color(agent: Agent, p: &Palette) -> Color {
+    quota_provider_for_agent(agent)
+        .map(|provider| provider_color(provider, p))
+        .unwrap_or(p.text)
+}
+
 /// Claude's brand orange, one step brighter on dark themes.
 pub(crate) fn claude_color(p: &Palette) -> Color {
     if is_dark(p) {

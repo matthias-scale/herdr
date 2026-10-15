@@ -267,16 +267,23 @@ fn render_field(
     } else {
         value.to_string()
     };
-    frame.render_widget(
-        Paragraph::new(content)
-            .style(
-                Style::default()
-                    .fg(app.palette.text)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .block(block),
-        rect,
-    );
+    let value_style = Style::default()
+        .fg(app.palette.text)
+        .add_modifier(Modifier::BOLD);
+    let line = match field {
+        SpawnDockField::Profile => {
+            super::account_picker::selected_label_line(app, &dock.home, &content, value_style)
+        }
+        SpawnDockField::Model => Line::from(Span::styled(
+            content,
+            value_style.fg(super::icons::agent_color(
+                dock.home.profile().agent,
+                &app.palette,
+            )),
+        )),
+        _ => Line::from(Span::styled(content, value_style)),
+    };
+    frame.render_widget(Paragraph::new(line).style(value_style).block(block), rect);
 }
 
 fn render_prompt(app: &AppState, dock: &SpawnDockState, rect: Rect, frame: &mut Frame) {
@@ -538,14 +545,32 @@ mod tests {
                     .draw(|frame| render(&app, frame, area))
                     .expect("render");
                 let inner = Block::default().borders(Borders::ALL).inner(rect);
+                let buffer = terminal.backend().buffer();
                 let rendered: String = (inner.x..inner.right())
-                    .map(|x| terminal.backend().buffer()[(x, inner.y)].symbol())
+                    .map(|x| buffer[(x, inner.y)].symbol())
                     .collect();
                 assert!(
                     rendered.contains(&expected),
                     "{rendered:?} must show {expected}"
                 );
                 assert!(!rendered.to_ascii_lowercase().contains("claude"));
+                assert_eq!(
+                    buffer[(inner.x, inner.y)].fg,
+                    super::super::icons::agent_color(crate::detect::Agent::Claude, &app.palette),
+                    "spawn profile icon color"
+                );
+                let dock_fields = field_rects(Rect::new(
+                    area.x,
+                    area.bottom().saturating_sub(DOCK_HEIGHT).saturating_add(1),
+                    area.width,
+                    3,
+                ));
+                let model_inner = Block::default().borders(Borders::ALL).inner(dock_fields[3]);
+                assert_eq!(
+                    buffer[(model_inner.x, model_inner.y)].fg,
+                    super::super::icons::agent_color(crate::detect::Agent::Claude, &app.palette),
+                    "spawn model label color"
+                );
                 assert_eq!(
                     hit_test(&app, rect.x, rect.y),
                     Some(HitTarget::Field(SpawnDockField::Profile))

@@ -41,33 +41,13 @@ fn provider_name(provider: QuotaProvider) -> &'static str {
         QuotaProvider::OpenCode => "OpenCode",
     }
 }
-fn provider_color(provider: QuotaProvider, app: &AppState) -> Color {
-    match provider {
-        QuotaProvider::Claude => super::icons::claude_color(&app.palette),
-        QuotaProvider::Codex => super::icons::codex_color(&app.palette),
-        QuotaProvider::Kimi => app.palette.mauve,
-        QuotaProvider::Agy => app.palette.teal,
-        QuotaProvider::OpenCode => app.palette.blue,
-    }
-}
-fn quota_provider_for_agent(agent: crate::detect::Agent) -> Option<QuotaProvider> {
-    use crate::detect::Agent;
-    match agent {
-        Agent::Claude => Some(QuotaProvider::Claude),
-        Agent::Codex => Some(QuotaProvider::Codex),
-        Agent::Kimi => Some(QuotaProvider::Kimi),
-        Agent::Antigravity => Some(QuotaProvider::Agy),
-        Agent::OpenCode => Some(QuotaProvider::OpenCode),
-        _ => None,
-    }
-}
 type ActiveAccounts<'a> = BTreeMap<QuotaProvider, BTreeSet<(Option<&'a str>, bool)>>;
 fn accounts_in_use(app: &AppState) -> ActiveAccounts<'_> {
     let mut active = ActiveAccounts::new();
     for terminal in app.terminals.values() {
         if let Some(provider) = terminal
             .effective_known_agent()
-            .and_then(quota_provider_for_agent)
+            .and_then(super::icons::quota_provider_for_agent)
         {
             let profile = terminal.metadata_tokens.get("profile");
             active.entry(provider).or_default().insert((
@@ -77,7 +57,11 @@ fn accounts_in_use(app: &AppState) -> ActiveAccounts<'_> {
         }
     }
     for remote in &app.remote_agent_panel_entries {
-        if let Some(provider) = remote.entry.agent.and_then(quota_provider_for_agent) {
+        if let Some(provider) = remote
+            .entry
+            .agent
+            .and_then(super::icons::quota_provider_for_agent)
+        {
             let profile = remote.entry.tokens.get("profile");
             active.entry(provider).or_default().insert((
                 profile
@@ -437,7 +421,7 @@ pub(crate) fn title_tooltip(app: &AppState) -> String {
             for terminal in app.terminals.values() {
                 if terminal
                     .effective_known_agent()
-                    .and_then(quota_provider_for_agent)
+                    .and_then(super::icons::quota_provider_for_agent)
                     != Some(provider)
                 {
                     continue;
@@ -472,7 +456,12 @@ pub(crate) fn title_tooltip(app: &AppState) -> String {
                 }
             }
             for remote in &app.remote_agent_panel_entries {
-                if remote.entry.agent.and_then(quota_provider_for_agent) != Some(provider) {
+                if remote
+                    .entry
+                    .agent
+                    .and_then(super::icons::quota_provider_for_agent)
+                    != Some(provider)
+                {
                     continue;
                 }
                 let profile = remote
@@ -554,7 +543,7 @@ fn account_row(
     let mut spans = vec![
         Span::styled(
             lead,
-            Style::default().fg(provider_color(account.provider, app)),
+            Style::default().fg(super::icons::provider_color(account.provider, &app.palette)),
         ),
         Span::styled(identity, Style::default().fg(app.palette.subtext0)),
     ];

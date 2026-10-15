@@ -7,7 +7,8 @@ use crate::app::{
 };
 use ratatui::{
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
@@ -208,17 +209,60 @@ fn provider_token(app: &AppState, agent: crate::detect::Agent) -> &'static str {
     .unwrap_or("?")
 }
 
+fn row_agent(
+    home: &HomeState,
+    row: &crate::app::account_picker::AccountRow,
+) -> crate::detect::Agent {
+    home.profiles()
+        .iter()
+        .find(|profile| profile.id == row.profile)
+        .map(|profile| profile.agent)
+        .unwrap_or(home.agent)
+}
+
+fn styled_token_line(label: &str, token: &str, color: Color, base: Style) -> Line<'static> {
+    let Some(start) = label.find(token) else {
+        return Line::from(Span::styled(label.to_string(), base));
+    };
+    let end = start + token.len();
+    let mut spans = Vec::with_capacity(3);
+    if start > 0 {
+        spans.push(Span::styled(label[..start].to_string(), base));
+    }
+    spans.push(Span::styled(token.to_string(), base.fg(color)));
+    if end < label.len() {
+        spans.push(Span::styled(label[end..].to_string(), base));
+    }
+    Line::from(spans)
+}
+
+pub(crate) fn selected_label_line(
+    app: &AppState,
+    home: &HomeState,
+    label: &str,
+    base: Style,
+) -> Line<'static> {
+    let agent = home
+        .account_picker
+        .rows
+        .iter()
+        .find(|row| row.profile == home.profile_id() && row.selection == home.account_selection)
+        .map(|row| row_agent(home, row))
+        .unwrap_or(home.profile().agent);
+    styled_token_line(
+        label,
+        provider_token(app, agent),
+        super::icons::agent_color(agent, &app.palette),
+        base,
+    )
+}
+
 fn row_label(
     app: &AppState,
     home: &HomeState,
     row: &crate::app::account_picker::AccountRow,
 ) -> String {
-    let agent = home
-        .profiles()
-        .iter()
-        .find(|profile| profile.id == row.profile)
-        .map(|profile| profile.agent)
-        .unwrap_or(home.agent);
+    let agent = row_agent(home, row);
     format!("{} {}", provider_token(app, agent), row.label)
 }
 
@@ -302,11 +346,14 @@ pub(crate) fn render(
             .map(|account| &account.usage);
         let unavailable = home.account_row_unavailable(row);
         let quota = compact_quota(usage, unavailable);
+        let token = provider_token(app, row_agent(home, row));
         let label = format!("{prefix}{}", row_label(app, home, row));
         let label_width = g
             .accounts
             .width
             .saturating_sub(super::text::display_width(&quota) as u16 + 1);
+        let shown = truncate_end(&label, label_width.into());
+        let full = format!("{shown} {quota}");
         render_row(
             app,
             frame,
@@ -316,7 +363,12 @@ pub(crate) fn render(
                 g.accounts.width,
                 1,
             ),
-            &format!("{} {quota}", truncate_end(&label, label_width.into())),
+            styled_token_line(
+                &full,
+                token,
+                super::icons::agent_color(row_agent(home, row), &app.palette),
+                Style::default().fg(app.palette.text),
+            ),
             active,
             home.account_picker.focus == PickerFocus::Accounts,
         );
@@ -355,11 +407,24 @@ pub(crate) fn render(
         let active = start + offset == home.account_picker.model_cursor;
         let model = &home.model_options()[*index];
         let marker = if model.id == home.model { "* " } else { "  " };
+        let label = format!("{marker}{}", model.short_name());
+        let shown = truncate_end(&label, g.models.width.into());
+        let model_start = marker.len().min(shown.len());
+        let line = Line::from(vec![
+            Span::raw(shown[..model_start].to_string()),
+            Span::styled(
+                shown[model_start..].to_string(),
+                Style::default().fg(super::icons::agent_color(
+                    home.profile().agent,
+                    &app.palette,
+                )),
+            ),
+        ]);
         render_row(
             app,
             frame,
             Rect::new(g.models.x, g.models.y + offset as u16, g.models.width, 1),
-            &format!("{marker}{}", model.short_name()),
+            line,
             active,
             home.account_picker.focus == PickerFocus::Models,
         );
@@ -428,7 +493,7 @@ fn render_row(
     app: &AppState,
     frame: &mut Frame,
     rect: Rect,
-    label: &str,
+    label: Line<'static>,
     active: bool,
     focused: bool,
 ) {
@@ -438,7 +503,7 @@ fn render_row(
         app.palette.panel_bg
     });
     frame.render_widget(
-        Paragraph::new(truncate_end(label, rect.width.into())).style(if active && focused {
+        Paragraph::new(label).style(if active && focused {
             style.add_modifier(Modifier::BOLD)
         } else {
             style
@@ -567,6 +632,71 @@ mod tests {
                 !rail.contains("Claude /")
                     && !rail.contains("% left")
                     && !rail.contains("unavailable")
+            );
+        }
+    }
+
+    #[test]
+    fn account_picker_brand_colors_match_provider_and_keep_selected_background() {
+        for theme in ["catppuccin-latte", "catppuccin"] {
+            let mut app = AppState::test_new();
+            app.nerd_font = true;
+            app.palette = crate::app::state::Palette::from_name(theme).expect("theme");
+            let mut home = HomeState::default();
+            home.refresh_account_rows(&app.provider_usage);
+            home.open_account_picker(HomePicker::Model);
+            let area = Rect::new(0, 0, 100, 40);
+            let anchor = Rect::new(12, 5, 10, 1);
+            let g = geometry(&home, area, anchor);
+            let mut terminal = Terminal::new(TestBackend::new(100, 40)).expect("terminal");
+            terminal
+                .draw(|frame| render(&app, &home, frame, area, anchor))
+                .expect("render");
+            let buffer = terminal.backend().buffer();
+
+            let claude_row = home
+                .account_picker
+                .rows
+                .iter()
+                .position(|row| row.profile == "claude")
+                .expect("Claude account row");
+            let codex_row = home
+                .account_picker
+                .rows
+                .iter()
+                .position(|row| row.profile == "codex")
+                .expect("Codex account row");
+            let claude_icon =
+                super::super::icons::agent_icon(crate::detect::Agent::Claude).expect("Claude icon");
+            let codex_icon =
+                super::super::icons::agent_icon(crate::detect::Agent::Codex).expect("Codex icon");
+            assert_eq!(
+                buffer[(g.accounts.x + 2, g.accounts.y + claude_row as u16)].symbol(),
+                claude_icon
+            );
+            assert_eq!(
+                buffer[(g.accounts.x + 2, g.accounts.y + codex_row as u16)].symbol(),
+                codex_icon
+            );
+            assert_eq!(
+                buffer[(g.accounts.x + 2, g.accounts.y + claude_row as u16)].fg,
+                super::super::icons::agent_color(crate::detect::Agent::Claude, &app.palette),
+                "Claude provider icon color on {theme}"
+            );
+            assert_eq!(
+                buffer[(g.accounts.x + 2, g.accounts.y + codex_row as u16)].fg,
+                app.palette.text,
+                "Codex remains monochrome on {theme}"
+            );
+            assert_eq!(
+                buffer[(g.accounts.x, g.accounts.y)].bg,
+                app.palette.selection_bg,
+                "selected row background on {theme}"
+            );
+            assert_eq!(
+                buffer[(g.models.x + 2, g.models.y)].fg,
+                super::super::icons::agent_color(crate::detect::Agent::Claude, &app.palette),
+                "Claude model name color on {theme}"
             );
         }
     }
