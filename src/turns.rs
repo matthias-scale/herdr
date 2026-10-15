@@ -18,32 +18,72 @@ pub(crate) struct Closing {
     pub needs_you: usize,
     pub item_kinds: Vec<String>,
     pub parse_ok: bool,
+    #[serde(skip)]
+    state: String,
+}
+
+#[derive(Deserialize)]
+struct ParsedClosing {
+    needs_you: usize,
+    item_kinds: Vec<String>,
+    parse_ok: bool,
+    state: String,
 }
 
 /// Uses the same bundled parser as the closing-block integration, off the UI thread.
 fn parse_closing(text: &str) -> Closing {
-    let program = concat!(
-        include_str!("integration/assets/closing-block/closing_block.py"),
-        "\nimport json, sys\nb = parse(sys.stdin.read())\n",
-        "print(json.dumps({'needs_you': b.declared_blocking if b.declared_blocking is not None else b.blocking, 'item_kinds': [i.label for i in b.items], 'parse_ok': b.parse_status == 'ok'}))\n"
+    let program = format!(
+        concat!(
+            "import json, sys, types\n",
+            "record = types.ModuleType('closing_block_record')\n",
+            "exec(compile({record_source:?}, '<closing_block_record>', 'exec'), record.__dict__)\n",
+            "sys.modules['closing_block_record'] = record\n",
+            "parser = types.ModuleType('closing_block')\n",
+            "sys.modules['closing_block'] = parser\n",
+            "exec(compile({parser_source:?}, '<closing_block>', 'exec'), parser.__dict__)\n",
+            "b = parser.parse(sys.stdin.read())\n",
+            "print(json.dumps({{'needs_you': b.blocking, 'item_kinds': [i.label for i in b.items], 'parse_ok': b.parse_status == 'ok', 'state': b.herdr_state}}))\n"
+        ),
+        record_source = include_str!("integration/assets/closing-block/closing_block_record.py"),
+        parser_source = include_str!("integration/assets/closing-block/closing_block.py"),
     );
     let result = (|| -> io::Result<Closing> {
         let mut child = Command::new("python3")
-            .args(["-c", program])
+            .args(["-c", &program])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()?;
         if let Some(mut input) = child.stdin.take() {
             input.write_all(text.as_bytes())?;
         }
         let output = child.wait_with_output()?;
         if !output.status.success() {
-            return Err(io::Error::other("closing parser failed"));
+            return Err(io::Error::other(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
         }
-        serde_json::from_slice(&output.stdout).map_err(io::Error::other)
+        let parsed: ParsedClosing =
+            serde_json::from_slice(&output.stdout).map_err(io::Error::other)?;
+        Ok(Closing {
+            needs_you: parsed.needs_you,
+            item_kinds: parsed.item_kinds,
+            parse_ok: parsed.parse_ok,
+            state: parsed.state,
+        })
     })();
-    result.unwrap_or_default()
+    match result {
+        Ok(closing) => closing,
+        Err(error) => {
+            #[cfg(test)]
+            panic!("failed to parse closing record from transcript: {error}");
+            #[cfg(not(test))]
+            {
+                tracing::warn!(%error, "failed to parse closing record from transcript");
+                Closing::default()
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -268,7 +308,7 @@ impl Turn {
             return Some(AgentState::Blocked);
         }
         if self.settled {
-            return Some(AgentState::Idle);
+            return self.state_at_settle;
         }
         let quiet = self
             .last_observed
@@ -278,20 +318,22 @@ impl Turn {
             && (self.final_reply && self.pending_tools.is_empty() || !self.ask_tools.is_empty())
         {
             let closing = parse_closing(&self.text);
-            self.blocked = !self.ask_tools.is_empty() || closing.needs_you > 0;
+            self.blocked = !self.ask_tools.is_empty() || closing.state == "blocked";
+            let state = if !self.ask_tools.is_empty() {
+                AgentState::Blocked
+            } else {
+                match closing.state.as_str() {
+                    "blocked" => AgentState::Blocked,
+                    "working" => AgentState::Working,
+                    "idle" => AgentState::Idle,
+                    _ => AgentState::Unknown,
+                }
+            };
             self.closing = Some(closing);
             self.settled = true;
             self.settled_at = Some(now);
-            self.state_at_settle = Some(if self.blocked {
-                AgentState::Blocked
-            } else {
-                AgentState::Idle
-            });
-            return Some(if self.blocked {
-                AgentState::Blocked
-            } else {
-                AgentState::Idle
-            });
+            self.state_at_settle = Some(state);
+            return Some(state);
         }
         Some(AgentState::Working)
     }
@@ -302,9 +344,15 @@ impl Turn {
             "record": "settle", "turn_start": self.start.and_then(crate::agent_state::format_rfc3339),
             "turn_end": self.last_at.and_then(crate::agent_state::format_rfc3339),
             "settled_at": self.settled_at.and_then(crate::agent_state::format_rfc3339),
-            "detected_kind": if self.blocked { "ask" } else { "done" },
+            "detected_kind": match self.state_at_settle.unwrap_or(AgentState::Unknown) {
+                AgentState::Blocked => "ask",
+                AgentState::Idle => "done",
+                AgentState::Working | AgentState::Unknown => "unknown",
+            },
             "signal_source": "transcript", "closing_block": self.closing,
-            "state_at_settle": if self.blocked { "blocked" } else { "idle" },
+            "state_at_settle": crate::detect::manifest::agent_state_label(
+                self.state_at_settle.unwrap_or(AgentState::Unknown)
+            ),
             "background_outstanding": self.background_outstanding,
             "stop_hook_rejections": self.stop_rejections,
             "closing_tail": redact_tail(&bounded_tail(&self.text)),
@@ -529,6 +577,26 @@ mod tests {
         turn.state(BASE + Duration::from_secs(second))
     }
     #[test]
+    fn finished_turn_state_comes_only_from_a_valid_closing_record() {
+        let cases = [
+            (
+                "**Needs you: nothing.**\n<!-- closing-state {\"v\":3,\"state\":\"blocked\",\"completion\":\"incomplete\",\"items\":[{\"n\":1,\"kind\":\"Approve\",\"text\":\"Continue?\",\"options\":[]}],\"decisions\":[],\"workers\":[],\"wait\":null,\"now\":{\"kind\":\"waiting_on_you\"}} -->",
+                AgentState::Blocked,
+            ),
+            ("**Needs you (1)**\n1. **Approve** — Continue?", AgentState::Unknown),
+            (
+                "**Needs you (2)**\n**Now:** waiting on you\n<!-- closing-state {\"v\":3,\"state\":\"idle\",\"completion\":\"complete\",\"items\":[],\"decisions\":[],\"workers\":[],\"wait\":null,\"now\":{\"kind\":\"done_here\"}} -->",
+                AgentState::Idle,
+            ),
+        ];
+        for (reply, expected) in cases {
+            let mut turn = Turn::default();
+            feed(&mut turn, user("work"), 0);
+            feed(&mut turn, final_reply(reply), 1);
+            assert_eq!(state(&mut turn, 4), Some(expected), "{reply}");
+        }
+    }
+    #[test]
     fn local_commands_leave_a_new_session_idle() {
         let mut turn = Turn::default();
         feed(&mut turn, user("<command-name>/clear</command-name>"), 0);
@@ -542,7 +610,7 @@ mod tests {
     }
     #[test]
     fn codex_completion_uses_quiet_window_and_closing_latch() {
-        for (text, expected) in [("Done", AgentState::Idle), ("**Needs you (1):**\n1. **Decide** Pick.\n   a) A\n   b) B\nReply 1a / 1b. Silence holds.", AgentState::Blocked)] {
+        for (text, expected) in [("Done", AgentState::Unknown), ("**Needs you (1):**\n1. **Decide** Pick.\n   a) A\n   b) B\nReply 1a / 1b. Silence holds.", AgentState::Unknown)] {
             let mut turn = Turn::default();
             feed(&mut turn, json!({"type":"event_msg","payload":{"type":"user_message","message":"work"}}), 0);
             feed(&mut turn, json!({"type":"event_msg","payload":{"type":"task_complete","last_agent_message":text}}), 1);
@@ -551,25 +619,25 @@ mod tests {
             assert_eq!(state(&mut turn, 60), Some(expected));
             feed(&mut turn, json!({"type":"event_msg","payload":{"type":"user_message","message":"1a"}}), 61);
             assert_eq!(state(&mut turn, 62), Some(AgentState::Working));
-            assert_eq!(turn.next_action.as_ref().unwrap()["state_at_settle"], if expected == AgentState::Blocked { "blocked" } else { "idle" });
+            assert_eq!(turn.next_action.as_ref().unwrap()["state_at_settle"], "unknown");
         }
     }
     #[test]
-    fn plain_done_settles_once_after_three_seconds() {
+    fn finished_reply_without_a_record_settles_unknown_once_after_three_seconds() {
         let mut turn = Turn::default();
         feed(&mut turn, user("hello"), 0);
         feed(&mut turn, final_reply("Done."), 1);
         assert_eq!(state(&mut turn, 3), Some(AgentState::Working));
-        assert_eq!(state(&mut turn, 4), Some(AgentState::Idle));
+        assert_eq!(state(&mut turn, 4), Some(AgentState::Unknown));
         let at = turn.settled_at;
-        assert_eq!(state(&mut turn, 90), Some(AgentState::Idle));
+        assert_eq!(state(&mut turn, 90), Some(AgentState::Unknown));
         assert_eq!(at, turn.settled_at);
     }
     #[test]
     fn closing_ask_latches_across_spinner_and_releases_on_prompt() {
         let mut turn = Turn::default();
         feed(&mut turn, user("plan"), 0);
-        feed(&mut turn, final_reply("**Needs you (1)**\n1. **Decide** Choose one.\nReply 1a / 1b. Silence holds.\n**Now:** Waiting."), 1);
+        feed(&mut turn, final_reply("**Needs you: nothing.**\n<!-- closing-state {\"v\":3,\"state\":\"blocked\",\"completion\":\"incomplete\",\"items\":[{\"n\":1,\"kind\":\"Decide\",\"text\":\"Choose one.\",\"options\":[]}],\"decisions\":[],\"workers\":[],\"wait\":null,\"now\":{\"kind\":\"waiting_on_you\"}} -->"), 1);
         assert_eq!(state(&mut turn, 4), Some(AgentState::Blocked));
         feed(
             &mut turn,
@@ -592,7 +660,7 @@ mod tests {
         assert_eq!(state(&mut turn, 9), Some(AgentState::Working));
         assert!(turn.record().is_none());
         feed(&mut turn, final_reply("Actually done"), 10);
-        assert_eq!(state(&mut turn, 13), Some(AgentState::Idle));
+        assert_eq!(state(&mut turn, 13), Some(AgentState::Unknown));
         assert_eq!(turn.record().unwrap()["stop_hook_rejections"], 1);
     }
     #[test]
@@ -612,8 +680,8 @@ mod tests {
     #[test]
     fn final_reply_settles_with_background_task_and_notification_reopens_turn() {
         for (reply, expected) in [
-            ("Done.\n**Needs you:** nothing.\n**Now:** Done here", AgentState::Idle),
-            ("**Needs you (1):**\n1. **Choose** Pick one.\n   a) A\n   b) B\nReply 1a / 1b. Silence holds.", AgentState::Blocked),
+            ("Done.\n<!-- closing-state {\"v\":3,\"state\":\"idle\",\"completion\":\"complete\",\"items\":[],\"decisions\":[],\"workers\":[],\"wait\":null,\"now\":{\"kind\":\"done_here\"}} -->", AgentState::Idle),
+            ("**Needs you: nothing.**\n<!-- closing-state {\"v\":3,\"state\":\"blocked\",\"completion\":\"incomplete\",\"items\":[{\"n\":1,\"kind\":\"Decide\",\"text\":\"Pick one.\",\"options\":[{\"letter\":\"a\",\"text\":\"A\"},{\"letter\":\"b\",\"text\":\"B\"}]}],\"decisions\":[],\"workers\":[],\"wait\":null,\"now\":{\"kind\":\"waiting_on_you\"}} -->", AgentState::Blocked),
         ] {
             let mut turn = Turn::default();
             feed(&mut turn, user("work"), 0);
@@ -640,7 +708,7 @@ mod tests {
                 assert_eq!(state(&mut turn, 10), Some(AgentState::Working));
                 assert_eq!(turn.background_outstanding, 0);
                 feed(&mut turn, final_reply("Finished."), 11);
-                assert_eq!(state(&mut turn, 14), Some(AgentState::Idle));
+                assert_eq!(state(&mut turn, 14), Some(AgentState::Unknown));
             } else {
                 assert_eq!(state(&mut turn, 10), Some(AgentState::Blocked));
                 assert_eq!(turn.background_outstanding, 0);
@@ -663,7 +731,7 @@ mod tests {
             2,
         );
         feed(&mut turn, final_reply("Done."), 3);
-        assert_eq!(state(&mut turn, 9), Some(AgentState::Idle));
+        assert_eq!(state(&mut turn, 9), Some(AgentState::Unknown));
         assert_eq!(turn.background_outstanding, 0);
     }
 
@@ -692,7 +760,7 @@ mod tests {
         );
         feed(&mut turn, final_reply("Done"), 11);
         // Outstanding background work is recorded, but does not keep a replied turn Working.
-        assert_eq!(state(&mut turn, 20), Some(AgentState::Idle));
+        assert_eq!(state(&mut turn, 20), Some(AgentState::Unknown));
         assert_eq!(turn.background_outstanding, 1);
     }
 
@@ -704,7 +772,7 @@ mod tests {
         let mut side = user("worker");
         side["isSidechain"] = true.into();
         feed(&mut turn, side, 3);
-        assert_eq!(state(&mut turn, 4), Some(AgentState::Idle));
+        assert_eq!(state(&mut turn, 4), Some(AgentState::Unknown));
         turn = Turn::default();
         assert_eq!(state(&mut turn, 100), Some(AgentState::Idle));
         assert!(turn.last_at.is_none());

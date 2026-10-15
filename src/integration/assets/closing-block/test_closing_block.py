@@ -3101,7 +3101,7 @@ class BundleInstallerTests(unittest.TestCase):
                 (self.target / name).read_bytes(),
                 (self.source / name).read_bytes(),
             )
-            self.assertEqual(result["files"][name]["version"], 6)
+            self.assertEqual(result["files"][name]["version"], 7)
             self.assertRegex(result["files"][name]["sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(
             (self.target / "codex-notify-chain.sh").read_text(encoding="utf-8"),
@@ -3536,6 +3536,11 @@ class ClosingBlockRecordTests(unittest.TestCase):
         import json
         return "Visible prose.\n\n**Now:** waiting on you\n```closing-state\n" + json.dumps(record) + "\n```\n"
 
+    @staticmethod
+    def comment(record):
+        import json
+        return "Visible prose.\n<!-- closing-state " + json.dumps(record, separators=(",", ":")) + " -->\n"
+
     def test_record_drives_items_defaults_decisions_and_lifecycle(self):
         record = {"v": 3, "state": "unknown", "completion": "incomplete", "items": [
             {"n": 1, "kind": "Approve", "text": "Merge PR", "options": [
@@ -3562,7 +3567,57 @@ class ClosingBlockRecordTests(unittest.TestCase):
         self.assertFalse(block.workers_unknown)
         legacy = closing_block.parse("**Needs you: nothing.**\n**Now:** Done here\n")
         self.assertEqual(legacy.agents, [])
-        self.assertEqual(legacy.completion, "complete")
+        self.assertEqual(legacy.completion, "missing")
+        self.assertEqual(legacy.herdr_state, "unknown")
+
+    def test_comment_record_is_extracted_and_drives_state(self):
+        record = {"v": 3, "state": "blocked", "completion": "incomplete", "items": [
+            {"n": 1, "kind": "Approve", "text": "Continue?", "options": []}],
+            "decisions": [], "workers": [], "wait": None, "now": {"kind": "waiting_on_you"}}
+        block = closing_block.parse(self.comment(record))
+        self.assertEqual(block.source, "record")
+        self.assertEqual(block.parse_status, "ok")
+        self.assertEqual(block.herdr_state, "blocked")
+        self.assertEqual(block.blocking, 1)
+
+    def test_comment_record_items_override_prose_saying_nothing(self):
+        record = {"v": 3, "state": "blocked", "completion": "incomplete", "items": [
+            {"n": 1, "kind": "Decide", "text": "Choose", "options": []}],
+            "decisions": [], "workers": [], "wait": None, "now": {"kind": "stopped"}}
+        text = "**Needs you: nothing.**\n**Now:** Done here\n" + self.comment(record)
+        block = closing_block.parse(text)
+        self.assertEqual(block.herdr_state, "blocked")
+        self.assertEqual(block.blocking, 1)
+
+    def test_prose_needs_you_without_a_record_is_unknown(self):
+        block = closing_block.parse("**Needs you (1)**\n1. **Approve** — Continue?\n")
+        self.assertEqual(block.parse_status, "missing")
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.herdr_state, "unknown")
+        outcome = herdr_status.report(
+            agent="claude",
+            blocking=block.blocking,
+            agents=block.agents_running,
+            gates=block.wire_gates(),
+            items=block.wire_items(),
+            completion=block.completion,
+            parse_status=block.parse_status,
+            state=block.herdr_state,
+            closing_source=block.source,
+        )
+        self.assertEqual(outcome["payload"]["state"], "unknown")
+        self.assertEqual(outcome["payload"]["blocking"], 0)
+        self.assertNotIn("gates", outcome["payload"])
+
+    def test_done_record_is_complete_and_settle_ready(self):
+        import json
+        record = {"v": 3, "state": "idle", "completion": "complete", "items": [],
+            "decisions": [], "workers": [], "wait": None, "now": {"kind": "done_here"}}
+        text = "**Needs you (2)**\n**Now:** waiting on you\n<!-- closing-state " + json.dumps(record) + " -->"
+        block = closing_block.parse(text)
+        self.assertEqual(block.herdr_state, "idle")
+        self.assertEqual(block.completion, "complete")
+        self.assertTrue(closing_block.settle_ready(text))
 
     def test_invalid_record_is_malformed_and_uses_visible_prose(self):
         import json
@@ -3571,7 +3626,8 @@ class ClosingBlockRecordTests(unittest.TestCase):
         block = closing_block.parse(text)
         self.assertEqual(block.parse_status, "malformed")
         self.assertTrue(block.record_errors)
-        self.assertEqual(block.blocking, 1)
+        self.assertEqual(block.blocking, 0)
+        self.assertEqual(block.herdr_state, "unknown")
 
     def test_stop_hook_obeys_newer_invalid_cap_lint_result(self):
         import hashlib, json, os, tempfile

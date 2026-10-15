@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# HERDR_INTEGRATION_VERSION=6
+# HERDR_INTEGRATION_VERSION=7
 """Claude Code `Stop` hook -> herdr turn-end status.
 
 Installed *beside* herdr's managed `herdr-agent-state.sh`, which herdr overwrites
