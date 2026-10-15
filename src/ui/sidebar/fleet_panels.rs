@@ -113,9 +113,17 @@ struct Account {
     source_time: i64,
     hosts: Vec<String>,
     fresh: bool,
+    eligible: bool,
     host_states: Vec<String>,
     five_source: Option<(QuotaWindow, String, i64)>,
     weekly_source: Option<(QuotaWindow, String, i64)>,
+}
+
+fn account_data_time(usage: &AccountUsage, sampled_unix: i64) -> i64 {
+    usage
+        .last_refresh_unix
+        .filter(|time| *time > 0)
+        .map_or(sampled_unix, |time| time.min(sampled_unix))
 }
 
 /// Only a provider-reported email is a cross-machine account identity. A
@@ -187,16 +195,23 @@ fn accounts(app: &AppState, now: i64) -> Vec<Account> {
         sources.push(&local);
     }
     for observation in sources {
-        let source_fresh = valid_age(now, observation.sampled_unix)
+        let host_fresh = valid_age(now, observation.sampled_unix)
             && (observation.host == app.agent_host_name || host_reachable(app, &observation.host));
         for item in &observation.usage.accounts {
+            let data_time = account_data_time(&item.usage, observation.sampled_unix);
+            let source_fresh = host_fresh && valid_age(now, data_time);
+            let new_valid = host_fresh
+                && account_has_valid_quota(&item.usage)
+                && !item.usage.stale
+                && item.usage.unavailable.is_none();
             let key = account_key(&observation.host, item);
             let entry = by_identity.entry(key).or_insert_with(|| Account {
                 account: item.clone(),
                 source_host: observation.host.clone(),
-                source_time: observation.sampled_unix,
+                source_time: data_time,
                 hosts: Vec::new(),
                 fresh: source_fresh,
+                eligible: new_valid,
                 host_states: Vec::new(),
                 five_source: None,
                 weekly_source: None,
@@ -218,14 +233,7 @@ fn accounts(app: &AppState, now: i64) -> Vec<Account> {
             entry
                 .host_states
                 .push(format!("{}: {auth}", observation.host));
-            let old_valid = entry.fresh
-                && account_has_valid_quota(&entry.account.usage)
-                && !entry.account.usage.stale
-                && entry.account.usage.unavailable.is_none();
-            let new_valid = source_fresh
-                && account_has_valid_quota(&item.usage)
-                && !item.usage.stale
-                && item.usage.unavailable.is_none();
+            let old_valid = entry.eligible;
             if new_valid {
                 for (window, selected) in [
                     (item.usage.five_hour, &mut entry.five_source),
@@ -234,25 +242,29 @@ fn accounts(app: &AppState, now: i64) -> Vec<Account> {
                     if let Some(window) = window {
                         if selected
                             .as_ref()
-                            .is_none_or(|(_, _, sampled)| observation.sampled_unix > *sampled)
+                            .is_none_or(|(_, _, selected_time)| data_time > *selected_time)
                         {
-                            *selected =
-                                Some((window, observation.host.clone(), observation.sampled_unix));
+                            *selected = Some((window, observation.host.clone(), data_time));
                         }
                     }
                 }
             }
             if (new_valid && !old_valid)
-                || (new_valid == old_valid && observation.sampled_unix > entry.source_time)
+                || (new_valid == old_valid && data_time > entry.source_time)
             {
                 entry.account = item.clone();
                 entry.source_host = observation.host.clone();
-                entry.source_time = observation.sampled_unix;
+                entry.source_time = data_time;
                 entry.fresh = source_fresh;
+                entry.eligible = new_valid;
             }
         }
     }
     for entry in by_identity.values_mut() {
+        entry.fresh &= [&entry.five_source, &entry.weekly_source]
+            .into_iter()
+            .flatten()
+            .all(|(_, _, data_time)| valid_age(now, *data_time));
         if let Some((window, _, _)) = &entry.five_source {
             entry.account.usage.five_hour = Some(*window);
         }
@@ -394,8 +406,8 @@ fn account_tip(account: &Account, now: i64) -> String {
         if let Some(window) = window {
             let provenance = source.as_ref().map_or_else(
                 || account.source_host.clone(),
-                |(_, host, sampled)| {
-                    format!("{host}, sampled {}s ago", now.saturating_sub(*sampled))
+                |(_, host, data_time)| {
+                    format!("{host}, data age {}s", now.saturating_sub(*data_time))
                 },
             );
             lines.push(format!(
@@ -424,7 +436,7 @@ fn account_tip(account: &Account, now: i64) -> String {
     }
     lines.push("Plan: not reported".into());
     lines.push(format!(
-        "Source: {} · sampled {}s ago · {}",
+        "Source: {} · data age {}s · {}",
         account.source_host,
         now.saturating_sub(account.source_time),
         if usage.stale || !account.fresh {
@@ -462,7 +474,7 @@ fn login_rows(app: &AppState, now: i64) -> Vec<Row> {
             if expired == 0 && exhausted == 0 {
                 continue;
             }
-            let stop = expired > 0 && ready == 0 && exhausted == 0;
+            let stop = expired > 0 && ready == 0;
             let mark = if stop {
                 "⛔"
             } else if expired > 0 {
@@ -1225,8 +1237,47 @@ mod tests {
         let tip = account_tip(&merged[0], now);
         assert!(tip.contains("5h: 84% used"));
         assert!(tip.contains("weekly: 22% used"));
-        assert!(tip.contains("ub1, sampled 20s ago"));
-        assert!(tip.contains("ub2, sampled 10s ago"));
+        assert!(tip.contains("ub1, data age 20s"));
+        assert!(tip.contains("ub2, data age 10s"));
+    }
+
+    #[test]
+    fn shared_account_prefers_the_newest_provider_record_over_poll_order() {
+        let now = 1_000_000;
+        let mut app = AppState::test_new();
+        app.status_now_unix = Some(now);
+        for name in ["ub1", "ub2"] {
+            app.fleet_snapshot
+                .hosts
+                .push(host(name, HostState::Reachable));
+        }
+        for (host_name, poll_age, record_age, used) in
+            [("ub1", 10, 600, 91), ("ub2", 5, 3 * 86_400, 20)]
+        {
+            let usage = AccountUsage {
+                email: Some("shared@example.test".into()),
+                last_refresh_unix: Some(now - record_age),
+                seven_day: Some(QuotaWindow {
+                    used_percent: used,
+                    resets_at: Some(now + 86_400),
+                }),
+                ..Default::default()
+            };
+            app.fleet_snapshot.observations.push(observation(
+                host_name,
+                now - poll_age,
+                vec![account(QuotaProvider::Codex, host_name, usage)],
+            ));
+        }
+        let merged = accounts(&app, now);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].account.usage.seven_day.unwrap().used_percent, 91);
+        assert_eq!(merged[0].source_host, "ub1");
+        assert_eq!(merged[0].source_time, now - 600);
+        assert!(!merged[0].fresh, "a 10-minute-old record is not live");
+        let tip = account_tip(&merged[0], now);
+        assert!(tip.contains("ub1, data age 600s"));
+        assert!(tip.contains("stale/unreachable"));
     }
 
     #[test]
@@ -1365,6 +1416,46 @@ mod tests {
         let limited = &app.fleet_snapshot.observations[0].usage.accounts[3].usage;
         assert_eq!(account_quota_unblocks_at(limited), Some(now + 8_000));
         assert!(!account_ready(limited));
+    }
+
+    #[test]
+    fn expired_login_with_only_exhausted_fallback_requires_login() {
+        let now = 1_000_000;
+        let mut app = AppState::test_new();
+        app.status_now_unix = Some(now);
+        app.fleet_snapshot
+            .hosts
+            .push(host("ub2", HostState::Reachable));
+        app.fleet_snapshot.observations.push(observation(
+            "ub2",
+            now,
+            vec![
+                account(
+                    QuotaProvider::Claude,
+                    "expired",
+                    AccountUsage {
+                        unavailable: Some(UsageUnavailable::AuthExpired),
+                        ..Default::default()
+                    },
+                ),
+                account(
+                    QuotaProvider::Claude,
+                    "exhausted",
+                    AccountUsage {
+                        five_hour: Some(QuotaWindow {
+                            used_percent: 100,
+                            resets_at: Some(now + 3_600),
+                        }),
+                        ..Default::default()
+                    },
+                ),
+            ],
+        ));
+        let notices = login_rows(&app, now);
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].text.contains("⛔ ub2"));
+        assert_eq!(notices[0].spans[1].1, app.palette.red);
+        assert!(notices[0].tooltip.contains("Login required"));
     }
 
     #[test]
