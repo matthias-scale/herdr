@@ -5267,7 +5267,7 @@ mod tests {
         .expect("spawn isolated test shell");
         let shell_pid = runtime.child_pid().expect("live shell pid");
         let cwd = runtime.cwd().expect("live shell cwd");
-        app.terminal_runtimes.insert(terminal_id, runtime);
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
 
         let runtime = app.lookup_runtime_sender(workspace_idx, pane_id).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -5289,33 +5289,70 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
 
-        let wrong_pid = runtime.try_send_bytes_if_observation_with_guard(
-            &observation.token,
-            Bytes::from_static(b"must-not-send"),
-            || shell_process_matches(shell_pid.saturating_add(1), &cwd),
-        );
-        assert_eq!(wrong_pid, ConditionalInputResult::ConditionMismatch);
+        let workspace_id = app.public_workspace_id(workspace_idx);
+        let params = |shell_pid, cwd: &std::path::Path, observation_token: &str, text: &str| {
+            PaneSendTextIfShellParams {
+                pane_id: public_pane_id.clone(),
+                text: text.into(),
+                workspace_id: workspace_id.clone(),
+                terminal_id: terminal_id.to_string(),
+                shell_pid,
+                cwd: cwd.display().to_string(),
+                condition: crate::api::schema::PaneSendTextCondition::DetectionSnapshotUnchanged,
+                observation_token: observation_token.into(),
+            }
+        };
+        let assert_mismatch = |app: &mut App, params| {
+            let response = app.handle_pane_send_text_if_shell("real-shell".into(), params);
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            assert_eq!(
+                success.result,
+                ResponseResult::PaneTextSend {
+                    outcome: crate::api::schema::PaneSendTextIfOutcome::ConditionMismatch
+                }
+            );
+        };
 
-        let wrong_cwd = runtime.try_send_bytes_if_observation_with_guard(
-            &observation.token,
-            Bytes::from_static(b"must-not-send"),
-            || shell_process_matches(shell_pid, std::path::Path::new("/not-the-pane-cwd")),
+        assert_mismatch(
+            &mut app,
+            params(
+                shell_pid.saturating_add(1),
+                &cwd,
+                &observation.token,
+                "must-not-send",
+            ),
         );
-        assert_eq!(wrong_cwd, ConditionalInputResult::ConditionMismatch);
+        assert_mismatch(
+            &mut app,
+            params(
+                shell_pid,
+                std::path::Path::new("/not-the-pane-cwd"),
+                &observation.token,
+                "must-not-send",
+            ),
+        );
 
-        let sent = runtime.try_send_bytes_if_observation_with_guard(
-            &observation.token,
-            Bytes::from_static(b"codex resume isolated-test"),
-            || shell_process_matches(shell_pid, &cwd),
+        let response = app.handle_pane_send_text_if_shell(
+            "real-shell".into(),
+            params(
+                shell_pid,
+                &cwd,
+                &observation.token,
+                "codex resume isolated-test",
+            ),
         );
-        assert_eq!(sent, ConditionalInputResult::Sent);
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            success.result,
+            ResponseResult::PaneTextSend {
+                outcome: crate::api::schema::PaneSendTextIfOutcome::Sent
+            }
+        );
 
-        let stale = runtime.try_send_bytes_if_observation_with_guard(
-            &observation.token,
-            Bytes::from_static(b"must-not-send"),
-            || shell_process_matches(shell_pid, &cwd),
+        assert_mismatch(
+            &mut app,
+            params(shell_pid, &cwd, &observation.token, "must-not-send"),
         );
-        assert_eq!(stale, ConditionalInputResult::ConditionMismatch);
         crate::app::api::test_support::shutdown_test_runtimes(&mut app);
     }
 
