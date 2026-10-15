@@ -84,6 +84,8 @@ static CLOSING_RECORD: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("static regex")
 });
+static CLOSING_TICKET: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Z][A-Z0-9]+-[0-9]+$").expect("static regex"));
 
 fn divider(line: &str) -> bool {
     let s = line.trim();
@@ -275,6 +277,14 @@ fn closing_record(text: &str) -> Option<serde_json::Value> {
     let items = record["items"].as_array()?;
     let decisions = record["decisions"].as_array()?;
     let workers = record["workers"].as_array()?;
+    for value in ["goal", "verified_when"] {
+        if object
+            .get(value)
+            .is_some_and(|v| !v.is_null() && !v.is_string())
+        {
+            return None;
+        }
+    }
     for item in items {
         let item = item.as_object()?;
         if !["n", "kind", "text", "options"]
@@ -302,28 +312,135 @@ fn closing_record(text: &str) -> Option<serde_json::Value> {
             )
             || item["text"].as_str().is_none_or(str::is_empty)
             || item["options"].as_array().is_none()
+            || !valid_options(item["options"].as_array()?)
         {
             return None;
+        }
+        if ["plain", "exception", "shadow"].iter().any(|key| {
+            item.get(*key)
+                .is_some_and(|v| !v.is_null() && !v.is_string())
+        }) || item
+            .get("default")
+            .is_some_and(|v| !v.is_null() && !valid_letter(v))
+            || item.get("default_at").is_some_and(|v| {
+                !v.is_null()
+                    && v.as_str().is_none_or(|s| {
+                        time::OffsetDateTime::parse(
+                            s,
+                            &time::format_description::well_known::Rfc3339,
+                        )
+                        .is_err()
+                    })
+            })
+        {
+            return None;
+        }
+        if let Some(refs) = item.get("refs") {
+            let refs = refs.as_object()?;
+            if refs
+                .keys()
+                .any(|key| !["pr", "ticket", "url"].contains(&key.as_str()))
+            {
+                return None;
+            }
+            if let Some(tickets) = refs.get("ticket") {
+                if !tickets
+                    .as_array()?
+                    .iter()
+                    .all(|v| v.as_str().is_some_and(|s| CLOSING_TICKET.is_match(s)))
+                {
+                    return None;
+                }
+            }
+            if let Some(urls) = refs.get("url") {
+                if !urls.as_array()?.iter().all(serde_json::Value::is_string) {
+                    return None;
+                }
+            }
+            if let Some(prs) = refs.get("pr") {
+                for pr in prs.as_array()? {
+                    let pr = pr.as_object()?;
+                    if pr
+                        .keys()
+                        .any(|key| !["repo", "number", "url"].contains(&key.as_str()))
+                        || pr.get("repo")?.as_str().is_none()
+                        || pr.get("number")?.as_i64().is_none()
+                        || pr.get("url").is_some_and(|v| !v.is_string())
+                    {
+                        return None;
+                    }
+                }
+            }
         }
     }
     for decision in decisions {
         let decision = decision.as_object()?;
-        if decision.get("n")?.as_u64().is_none_or(|n| n == 0)
+        if decision.keys().any(|key| {
+            ![
+                "n",
+                "text",
+                "action",
+                "revert",
+                "recommendation",
+                "reversible",
+                "decided_at",
+            ]
+            .contains(&key.as_str())
+        }) || decision.get("n")?.as_u64().is_none_or(|n| n == 0)
             || decision.get("text")?.as_str().is_none()
+            || ["action", "revert", "recommendation", "decided_at"]
+                .iter()
+                .any(|key| {
+                    decision
+                        .get(*key)
+                        .is_some_and(|v| !v.is_null() && !v.is_string())
+                })
+            || decision.get("reversible").is_some_and(|v| !v.is_boolean())
         {
             return None;
         }
     }
     for worker in workers {
         let worker = worker.as_object()?;
-        if worker.get("name")?.as_str().is_none() || worker.get("activity")?.as_str().is_none() {
+        if worker
+            .keys()
+            .any(|key| !["name", "activity", "run_id", "agent"].contains(&key.as_str()))
+            || worker.get("name")?.as_str().is_none()
+            || worker.get("activity")?.as_str().is_none()
+            || ["run_id", "agent"].iter().any(|key| {
+                worker
+                    .get(*key)
+                    .is_some_and(|v| !v.is_null() && !v.is_string())
+            })
+        {
             return None;
         }
     }
     if let Some(wait) = record["wait"].as_object() {
+        if wait
+            .keys()
+            .any(|key| !["event", "wakeup_id", "eta_s"].contains(&key.as_str()))
+        {
+            return None;
+        }
         wait.get("event")?.as_str()?;
+        if wait
+            .get("wakeup_id")
+            .is_some_and(|v| !v.is_null() && !v.is_string())
+            || wait
+                .get("eta_s")
+                .is_some_and(|v| !v.is_null() && v.as_i64().is_none())
+        {
+            return None;
+        }
     } else if !record["wait"].is_null() {
         return None;
+    }
+    if let Some(verified) = record.get("verified") {
+        let verified = verified.as_object()?;
+        if verified.len() != 1 || verified.get("text")?.as_str().is_none_or(str::is_empty) {
+            return None;
+        }
     }
     let now = record["now"].as_object()?;
     if now
@@ -340,6 +457,31 @@ fn closing_record(text: &str) -> Option<serde_json::Value> {
         return None;
     }
     Some(record)
+}
+
+fn valid_letter(value: &serde_json::Value) -> bool {
+    value
+        .as_str()
+        .is_some_and(|s| s.len() == 1 && s.as_bytes()[0].is_ascii_lowercase())
+}
+
+fn valid_options(options: &[serde_json::Value]) -> bool {
+    options.iter().all(|option| {
+        let Some(object) = option.as_object() else {
+            return false;
+        };
+        !object
+            .keys()
+            .any(|key| !["letter", "text", "recommended"].contains(&key.as_str()))
+            && object.get("letter").is_some_and(valid_letter)
+            && object
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|s| !s.is_empty())
+            && object
+                .get("recommended")
+                .is_none_or(serde_json::Value::is_boolean)
+    })
 }
 
 pub(crate) fn finished_reply(text: &str) -> bool {
@@ -847,6 +989,20 @@ mod tests {
         assert!(!closing_block_waiting(
             "**Needs you (1)**\n1. Approve Continue?"
         ));
+    }
+
+    #[test]
+    fn malformed_closing_options_are_never_waiting_or_continuable() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../integration/assets/closing-block/malformed-options.json"
+        ))
+        .expect("fixture JSON");
+        for case in cases.as_array().expect("fixture list") {
+            let record = serde_json::json!({"v":3,"state":"working","completion":"incomplete","items":[{"n":1,"kind":"Approve","text":"Continue?","options":[case["option"].clone()]}],"decisions":[],"workers":[{"name":"worker","activity":"working"}],"wait":null,"now":{"kind":"worker"}});
+            let text = format!("<!-- closing-state {} -->", record);
+            assert!(!closing_block_waiting(&text), "{}", case["name"]);
+            assert!(!expected_to_continue(&text), "{}", case["name"]);
+        }
     }
 
     #[test]

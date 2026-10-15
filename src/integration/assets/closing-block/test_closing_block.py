@@ -8,6 +8,7 @@ from unittest import mock
 sys.path.insert(0, __import__("os").path.dirname(__file__))
 
 import closing_block
+import closing_block_record
 import herdr_status
 
 
@@ -3623,6 +3624,17 @@ class SectionWordFallbackTests(unittest.TestCase):
 
 
 class ClosingBlockRecordTests(unittest.TestCase):
+    def test_shared_malformed_options_are_rejected_by_record_validator(self):
+        import json
+        from pathlib import Path
+        cases = json.loads((Path(__file__).parent / "malformed-options.json").read_text(encoding="utf-8"))
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                record = {"v": 3, "state": "blocked", "completion": "incomplete",
+                          "items": [{"n": 1, "kind": "Approve", "text": "Continue?", "options": [case["option"]]}],
+                          "decisions": [], "workers": [], "wait": None, "now": {"kind": "waiting_on_you"}}
+                self.assertTrue(closing_block_record.validate(record))
+
     @staticmethod
     def trailer(record):
         import json
