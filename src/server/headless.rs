@@ -8780,6 +8780,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn headless_focus_room_prefix_capture_works_over_drawer() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("focus-room")];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        let mut config = crate::config::Config::default();
+        config.keys.capture = crate::config::BindingConfig::one("prefix+t");
+        server.app.state.keybinds = config.keybinds();
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
+        server.app.state.focus_room.active = true;
+        server.app.state.focus_room_ui.drawer =
+            Some(crate::app::focus_room::FocusRoomDrawerState {
+                pane_id: None,
+                agent_ref: None,
+                title: "agent".into(),
+                agent_label: "agent".into(),
+                host: "local".into(),
+                remote: false,
+                lines: Vec::new(),
+                input: String::new(),
+                cursor: 0,
+                output_revision: 0,
+                refreshed_at: None,
+            });
+
+        server.route_full_app_human_events(
+            1,
+            vec![
+                crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('b'),
+                    KeyModifiers::CONTROL,
+                )),
+                crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('t'),
+                    KeyModifiers::empty(),
+                )),
+            ],
+            false,
+        );
+
+        assert!(server.app.state.capture.is_some());
+        assert!(server.app.state.focus_room_ui.drawer.is_some());
+    }
+
+    #[tokio::test]
     async fn headless_focus_room_prefix_o_opens_leave_dialog_without_pty_input() {
         let mut server = test_headless_server();
         let mut input_rx = install_focused_test_runtime(&mut server, b"");
