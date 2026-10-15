@@ -2714,7 +2714,7 @@ pub(crate) fn remote_agent_device_groups(app: &AppState) -> RemoteAgentDeviceGro
 }
 
 fn all_agent_navigation_entries(app: &AppState) -> Vec<AgentPanelEntry> {
-    let mut entries = all_agent_panel_entries(app);
+    let mut entries = sidebar_thread_entries(app);
     entries.extend(
         app.remote_agent_panel_entries
             .iter()
@@ -3176,17 +3176,40 @@ fn collect_sidebar_thread_entries_with_coverage(
     if let Some(coverage) = coverage.as_deref_mut() {
         coverage.bind_entries_with_fallbacks(app, &entries);
     }
-    // Fleet tabs belong to the Fleet section only, never to local rows.
+    // Evaluate detection once per tab. Sidebar projection, hit testing, and
+    // navigation all consume this list, so filtered panes cannot leave gaps.
+    let mut checked_tab = None;
+    let mut tab_has_agent = false;
     entries.retain(|entry| {
-        let hidden = entry
-            .local_target()
-            .is_some_and(|target| app.hidden_fleet_workspace(target.ws_idx));
-        if hidden {
+        let target = entry.local_target();
+        let tab_key = target.map(|target| (target.ws_idx, target.tab_idx));
+        if tab_key != checked_tab {
+            checked_tab = tab_key;
+            tab_has_agent = target
+                .and_then(|target| app.workspaces.get(target.ws_idx)?.tabs.get(target.tab_idx))
+                .is_some_and(|tab| {
+                    tab.panes.values().any(|pane| {
+                        app.terminals
+                            .get(&pane.attached_terminal_id)
+                            .is_some_and(|terminal| terminal.detected_agent.is_some())
+                    })
+                });
+        }
+        // Fleet tabs belong to the Fleet section only, never to local rows.
+        let hidden_reason =
+            if target.is_some_and(|target| app.hidden_fleet_workspace(target.ws_idx)) {
+                Some("fleet_workspace")
+            } else if tab_has_agent && !entry.has_agent {
+                Some("agentless_terminal_in_agent_tab")
+            } else {
+                None
+            };
+        if let Some(reason) = hidden_reason {
             if let Some(coverage) = coverage.as_deref_mut() {
-                coverage.mark_dropped(entry, "fleet_workspace");
+                coverage.mark_dropped(entry, reason);
             }
         }
-        !hidden
+        hidden_reason.is_none()
     });
     let mut previous_tab = None;
     for entry in &mut entries {
@@ -19836,6 +19859,86 @@ pub(crate) mod tests {
         // the legacy projection path that derives attention from those facts.
         entry.attention_tier = None;
         entry
+    }
+
+    #[test]
+    fn sidebar_thread_entries_hide_agentless_panes_only_in_tabs_with_agents() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("sidebar panes");
+        let one_shell = workspace.test_split(Direction::Horizontal);
+        let two_shell = workspace.test_split(Direction::Vertical);
+        let two_shell_tab = workspace.test_add_tab(Some("two shells"));
+        workspace.active_tab = two_shell_tab;
+        let _two_shell_agent = workspace.test_split(Direction::Horizontal);
+        let two_shell_plain = workspace.test_split(Direction::Vertical);
+        let shells_only_tab = workspace.test_add_tab(Some("shells only"));
+        workspace.active_tab = shells_only_tab;
+        let shells_only_plain = workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+
+        for (tab_idx, pane_id) in [
+            (0, app.workspaces[0].tabs[0].root_pane),
+            (
+                two_shell_tab,
+                app.workspaces[0].tabs[two_shell_tab].root_pane,
+            ),
+        ] {
+            let terminal_id = app.workspaces[0].tabs[tab_idx].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals
+                .get_mut(&terminal_id)
+                .expect("agent terminal")
+                .detected_agent = Some(Agent::Claude);
+        }
+
+        let entries = sidebar_thread_entries(&app);
+        let targets = entries
+            .iter()
+            .filter_map(AgentPanelEntry::local_target)
+            .collect::<Vec<_>>();
+        assert!(!targets
+            .iter()
+            .any(|target| target.tab_idx == 0 && target.pane_id == one_shell));
+        assert!(!targets
+            .iter()
+            .any(|target| target.tab_idx == 0 && target.pane_id == two_shell));
+        assert!(!targets
+            .iter()
+            .any(|target| target.tab_idx == two_shell_tab && target.pane_id == two_shell_plain));
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.tab_idx == shells_only_tab
+                    && target.pane_id == shells_only_plain)
+        );
+        assert_sidebar_coverage_complete(&app);
+
+        for tab_idx in [0, two_shell_tab] {
+            let pane_id = app.workspaces[0].tabs[tab_idx].root_pane;
+            let terminal_id = app.workspaces[0].tabs[tab_idx].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals
+                .get_mut(&terminal_id)
+                .expect("agent terminal")
+                .detected_agent = None;
+        }
+        let entries = sidebar_thread_entries(&app);
+        let targets = entries
+            .iter()
+            .filter_map(AgentPanelEntry::local_target)
+            .collect::<Vec<_>>();
+        assert!(targets
+            .iter()
+            .any(|target| target.tab_idx == 0 && target.pane_id == one_shell));
+        assert!(targets
+            .iter()
+            .any(|target| target.tab_idx == 0 && target.pane_id == two_shell));
+        assert!(targets
+            .iter()
+            .any(|target| target.tab_idx == two_shell_tab && target.pane_id == two_shell_plain));
     }
 
     /// Renders one depth-1 Claude row on `ub1`, viewed from `ub2`, at `width`.
