@@ -257,8 +257,6 @@ pub enum Method {
     PaneSendText(PaneSendTextParams),
     #[serde(rename = "pane.send_text_if")]
     PaneSendTextIf(PaneSendTextIfParams),
-    #[serde(rename = "pane.send_text_if_shell")]
-    PaneSendTextIfShell(PaneSendTextIfShellParams),
     #[serde(rename = "pane.send_keys")]
     PaneSendKeys(PaneSendKeysParams),
     #[serde(rename = "pane.send_input")]
