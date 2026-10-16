@@ -1474,8 +1474,8 @@ mod tests {
         assert_eq!(&response[..bytes_read], b"terminal-response");
         assert_eq!(runner.input_delivery_seq.load(Ordering::Acquire), 0);
 
-        peer.shutdown(Shutdown::Read)
-            .expect("peer read shutdown rejects next write");
+        // Closing the peer makes the write fail on both macOS and Linux.
+        drop(peer);
         runner
             .user_writes
             .lock()
@@ -1512,8 +1512,8 @@ mod tests {
         assert_eq!(runner.current_write_offset, partial_offset);
         assert_eq!(runner.input_delivery_seq.load(Ordering::Acquire), 1);
 
-        peer.shutdown(Shutdown::Read)
-            .expect("peer read shutdown makes the retry fail");
+        // A read-half shutdown can still accept a small write on macOS.
+        drop(peer);
         runner.flush_pending_writes_once();
         assert_eq!(runner.input_delivery_seq.load(Ordering::Acquire), 1);
         assert_eq!(runner.pending_user_input.load(Ordering::Acquire), 0);
