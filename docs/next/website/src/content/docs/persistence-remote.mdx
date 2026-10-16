@@ -113,16 +113,19 @@ surface. Herdr refreshes their reachability, version, and agent inventory in the
 background. Select a reachable remote host to open `herdr --remote` in a new
 local pane.
 
-On Unix, remote inventory reads and event subscriptions share a warm SSH
-connection. Live subscriptions deliver agent and session changes immediately;
+On Unix clients, Herdr supervises one warm OpenSSH ControlMaster connection per
+fleet host. Inventory reads, event subscriptions, and remote pane attaches share
+that connection. Windows clients keep the per-exec SSH path.
+Live subscriptions deliver agent and session changes immediately;
 inventory polling slows to a 60-second safety net. If a stream disconnects,
-reads return to `refresh_interval_ms`. Reconnect attempts back off from 250 ms
-to 10 seconds. A subscription that falls behind resubscribes immediately and
-reloads `session.snapshot` when session events are supported. Agent-only
+reads return to the fallback poll interval, `refresh_interval_ms` (5000 ms by
+default). Reconnect attempts back off from 250 ms to 10 seconds. A subscription
+that falls behind resubscribes immediately and reloads `session.snapshot` when session events are supported. Agent-only
 subscriptions keep polling at `refresh_interval_ms` until fresh agent inventory
 arrives. Older servers without event support continue using polling. Local host
 polling is unchanged.
 
+{/* fleet-tailscale-example */}
 ```toml
 [remote.fleet]
 self_name = "laptop"
@@ -132,9 +135,28 @@ heartbeat_stale_ms = 1800000
 
 [[remote.fleet.hosts]]
 name = "workbox"
-target = "workbox"
+target = "workbox.tailnet.ts.net"
 session = "agents"
+wan = true
 ```
+{/* /fleet-tailscale-example */}
+
+For hosts reached from home and while travelling, use a Tailscale MagicDNS name
+as `target`: either a full name such as `workbox.tailnet.ts.net` or the short
+MagicDNS name `workbox`. Replace the example with your host's actual name.
+Tailscale must already be set up, and normal SSH authentication still applies.
+Mark hosts reached over the internet or Tailscale relays with `wan = true`.
+
+On Unix clients, `wan = true` keeps read-only observer streams open for panes in
+the active remote workspace plus the ten most recently focused panes. It defaults
+to `false`. Recent terminal frames stay in a bounded in-memory snapshot cache,
+never on disk. When a cached frame is available, clicking a pane paints it at
+once. The live control connection still opens on click; it is not pre-opened.
+The first live frame replaces the cached view, and input stays disabled until
+that live frame arrives. Observer streams do not take input or resize ownership.
+
+Remote pane attaches reuse the warm channel and check binary compatibility once
+per connection. A reconnect invalidates that check.
 
 `self_name` identifies agents owned by this server. It defaults to the local
 fleet host name, then the system hostname when no local host is configured.
@@ -150,6 +172,13 @@ direct terminal attach over SSH rather than a nested Herdr session on the remote
 host. An agent that is already attached is focused rather than dialled again, so
 repeated clicks return to the same pane. The Hosts dock still opens the whole
 remote session.
+
+**Migrating an existing fleet config.**
+
+Existing configs need no change. Adding `wan = true` for a high-latency host and
+switching `target` from a LAN SSH alias to a MagicDNS name are optional. Keep any
+SSH user, port, or identity settings available for the new target in your SSH
+config.
 
 ## Direct terminal attach
 

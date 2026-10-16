@@ -103,6 +103,25 @@ Default agent rows show a `machine` token when multiple machines are present. Ex
 
 Workspace, tab, pane IDs, and agent names are scoped to one server. Two machines may both contain `w1:p1` or an agent named `reviewer`. Selecting a machine in the UI does not retarget CLI commands running in an existing pane: they still use that pane's inherited session and socket. For remote automation, use `herdr --machine <label-or-id> agent list`, then pass the same prefix when controlling those remote IDs. The CLI uses the saved profile's SSH target and session directly; it does not need an open TUI. Without `--machine`, existing session/socket routing is unchanged. See [CLI reference](/docs/cli-reference/#saved-ssh-machines) for supported commands, update requirements, and remote path rules.
 
+
+**Fleet hosts.**
+
+Fleet hosts configured with `[[remote.fleet.hosts]]` also appear in the Hosts dock
+and sidebar. On Unix clients, inventory, live events, and pane attaches share one
+supervised warm SSH connection per host. Live events reduce inventory polling to
+a 60-second safety net; disconnected hosts use `refresh_interval_ms`.
+Windows clients keep the per-exec SSH path.
+
+For a target that works at home and while travelling, use your host's Tailscale
+MagicDNS name, such as `workbox.tailnet.ts.net` or `workbox`. Tailscale and normal
+SSH access must already work. Set `wan = true` for hosts reached over the internet
+or Tailscale relays. This keeps read-only pane observers warm on Unix clients;
+the live control connection still opens when you click a pane.
+
+See [Fleet hosts in the dock](/docs/persistence-remote/#fleet-hosts-in-the-dock)
+for the config example, snapshot cache, and migration note. Saved machine
+profiles and fleet host entries are configured separately.
+
 ## Updates and saved data
 
 Saved profiles contain only an opaque ID, label, SSH target, explicit remote session, and enabled state. Herdr does not store passwords, private keys, agent tickets, or SSH control sockets in the catalog. Authentication stays with OpenSSH.
