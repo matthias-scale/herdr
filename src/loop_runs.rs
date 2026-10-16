@@ -1262,11 +1262,11 @@ not-json
         let path = dir.join("run-receipts.jsonl");
         fs::write(&path, b"initial\n").expect("write watcher receipt fixture");
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
-        let watch = watch_receipts(Some(path.clone()), event_tx.clone());
-        assert!(watch.watcher.is_some());
         event_tx
             .try_send(AppEvent::LoopRunHistoryChanged)
             .expect("fill bounded app event channel");
+        let watch = watch_receipts(Some(path.clone()), event_tx.clone());
+        assert!(watch.watcher.is_some());
         queue_receipt_change(&event_tx, &watch.health);
         assert!(watch.health.take_fallback_request());
         assert!(matches!(

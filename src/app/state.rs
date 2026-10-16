@@ -3666,6 +3666,8 @@ pub(crate) struct AgentPressState {
 
 pub(crate) struct RemoteAgentPressState {
     pub agent_ref: crate::api::schema::AgentRef,
+    pub start_col: u16,
+    pub start_row: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
