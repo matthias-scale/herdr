@@ -1578,7 +1578,6 @@ impl AppState {
                 | crate::ui::SidebarRow::SymphonyJob { .. }
                 | crate::ui::SidebarRow::SymphonyEmpty
                 | crate::ui::SidebarRow::Divider
-                | crate::ui::SidebarRow::ShelfDivider
                 | crate::ui::SidebarRow::AloopLoop { .. }
                 | crate::ui::SidebarRow::AloopRemoteLoop { .. }
                 | crate::ui::SidebarRow::AloopRunLine { .. }
@@ -1624,7 +1623,6 @@ impl AppState {
                 | crate::ui::SidebarRow::SymphonyJob { .. }
                 | crate::ui::SidebarRow::SymphonyEmpty
                 | crate::ui::SidebarRow::Divider
-                | crate::ui::SidebarRow::ShelfDivider
                 | crate::ui::SidebarRow::AloopLoop { .. }
                 | crate::ui::SidebarRow::AloopRemoteLoop { .. }
                 | crate::ui::SidebarRow::AloopRunLine { .. }
@@ -3925,9 +3923,7 @@ mod tests {
                 crate::ui::SidebarRow::SectionHeader { title, .. } => {
                     format!("section:{title}")
                 }
-                crate::ui::SidebarRow::Divider | crate::ui::SidebarRow::ShelfDivider => {
-                    "divider".to_string()
-                }
+                crate::ui::SidebarRow::Divider => "divider".to_string(),
                 crate::ui::SidebarRow::NeedsYou { title, .. } => format!("needs-you:{title}"),
                 crate::ui::SidebarRow::NeedsYouMore { .. } => "needs-you-more".to_string(),
 

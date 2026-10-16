@@ -242,7 +242,6 @@ fn mobile_switcher_target_for_row(
         | SidebarRow::PodHeader { .. }
         | SidebarRow::PodMember { .. }
         | SidebarRow::Divider
-        | SidebarRow::ShelfDivider
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
         | SidebarRow::AloopLoop { .. }
@@ -289,7 +288,6 @@ fn mobile_sidebar_row_height(app: &AppState, row: &SidebarRow) -> usize {
         SidebarRow::Workspace { .. }
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::Divider
-        | SidebarRow::ShelfDivider
         | SidebarRow::NeedsYouMore { .. }
         | SidebarRow::NestedHeader { .. }
         | SidebarRow::SymphonyJob { .. }
@@ -1245,7 +1243,7 @@ fn render_mobile_switcher_content(
                     );
                 }
             }
-            SidebarRow::Divider | SidebarRow::ShelfDivider => {
+            SidebarRow::Divider => {
                 render_one_line_item(
                     frame,
                     viewport,
@@ -1254,23 +1252,8 @@ fn render_mobile_switcher_content(
                     app.mobile_switcher_scroll,
                     p.panel_bg,
                     Line::from(Span::styled(
-                        if matches!(row, SidebarRow::ShelfDivider) {
-                            if app.nerd_font {
-                                "┄"
-                            } else {
-                                "-"
-                            }
-                        } else {
-                            "─"
-                        }
-                        .repeat(usize::from(content.width)),
-                        if matches!(row, SidebarRow::ShelfDivider) {
-                            Style::default()
-                                .fg(p.surface_dim)
-                                .add_modifier(Modifier::DIM)
-                        } else {
-                            Style::default().fg(p.surface_dim)
-                        },
+                        "─".repeat(usize::from(content.width)),
+                        Style::default().fg(p.surface_dim),
                     )),
                 );
             }
