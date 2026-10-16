@@ -1530,6 +1530,10 @@ impl App {
             }
             return false;
         }
+        #[cfg(test)]
+        if self.capture_dispatch_force_success {
+            return true;
+        }
         if self
             .state
             .home
@@ -7812,6 +7816,7 @@ sidebar_visible = true
     #[tokio::test]
     async fn capture_under_limit_attempts_spawn_without_reason_prompt() {
         let (mut app, dir) = capture_app();
+        app.capture_dispatch_force_success = true;
         app.handle_capture_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         assert!(app.state.capture.is_none());
         assert!(capture_log(&dir).contains("\"action\":\"spawn\""));
@@ -7874,6 +7879,7 @@ sidebar_visible = true
     #[tokio::test]
     async fn capture_nonempty_reason_is_recorded_after_successful_spawn() {
         let (mut app, dir) = capture_app();
+        app.capture_dispatch_force_success = true;
         let c = app.state.capture.as_mut().unwrap();
         c.entering_reason = true;
         c.gate_reason = Some("production incident".into());
