@@ -407,7 +407,34 @@ fn empty_shell_prompt_eligible(
 }
 
 fn prompt_only_text(text: &str) -> bool {
-    text.lines().filter(|line| !line.trim().is_empty()).count() == 1
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let Some(line) = lines.next() else {
+        return false;
+    };
+    if lines.next().is_some() {
+        return false;
+    }
+
+    let prompt = line.trim();
+    if prompt.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let Some(marker) = prompt.chars().last() else {
+        return false;
+    };
+    if !matches!(marker, '$' | '#' | '%' | '>' | '❯') {
+        return false;
+    }
+
+    let Some(context) = prompt.strip_suffix(marker) else {
+        return false;
+    };
+    !context.is_empty()
+        && ((context.contains('@') && context.contains(':'))
+            || context.starts_with("~/")
+            || context.starts_with("./")
+            || context.starts_with("../")
+            || context.starts_with('/'))
 }
 
 pub(crate) fn pane_is_done(
@@ -717,6 +744,17 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn scheduled_auto_close_keeps_output_and_prompt_on_one_line() {
+        let (mut app, pane_id) =
+            auto_close_test_app(&["/bin/sh", "-c", "read _"], b"command outputuser@host:~$ ").await;
+
+        run_auto_close_scheduler_tick(&mut app);
+
+        assert!(auto_close_test_pane_exists(&app, pane_id));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn scheduled_auto_close_keeps_unreadable_process_tree() {
         let (mut app, pane_id) =
             auto_close_test_app(&["/bin/sh", "-c", "read _"], b"user@host:~$ ").await;
@@ -816,6 +854,15 @@ mod tests {
             false,
             "user@host:~$ "
         ));
+    }
+
+    #[test]
+    fn prompt_only_text_requires_one_unambiguous_prompt_line() {
+        assert!(prompt_only_text("user@host:~$ "));
+        assert!(!prompt_only_text("command outputuser@host:~$ "));
+        assert!(!prompt_only_text("output\nuser@host:~$ "));
+        assert!(!prompt_only_text("unexpected text"));
+        assert!(!prompt_only_text("ambiguous$"));
     }
 
     #[test]
