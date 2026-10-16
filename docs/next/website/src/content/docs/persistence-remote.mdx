@@ -113,6 +113,14 @@ surface. Herdr refreshes their reachability, version, and agent inventory in the
 background. Select a reachable remote host to open `herdr --remote` in a new
 local pane.
 
+On Unix, remote inventory reads and event subscriptions share a warm SSH
+connection. Live subscriptions deliver agent and session changes immediately;
+inventory polling slows to a 60-second safety net. If a stream disconnects,
+reads return to `refresh_interval_ms`. Reconnect attempts back off from 250 ms
+to 10 seconds. A subscription that falls behind resubscribes immediately and
+reloads `session.snapshot`, without waiting for a poll. Older servers without
+event support continue using polling. Local host polling is unchanged.
+
 ```toml
 [remote.fleet]
 self_name = "laptop"

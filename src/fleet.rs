@@ -17,6 +17,82 @@ use crate::api::client::{ApiClient, ConnectionTarget};
 use crate::api::schema::{AgentInfo, AgentStatus, EmptyParams, Method, Request, ResponseResult};
 use crate::config::{FleetConfig, FleetHostConfig};
 
+/// Shared by the SSH master and its event subscription supervisor.
+#[derive(Default)]
+struct RetryBackoff(u32);
+
+impl RetryBackoff {
+    fn next_delay(&mut self) -> Duration {
+        let delay = Duration::from_millis(250)
+            .saturating_mul(1_u32.checked_shl(self.0).unwrap_or(u32::MAX))
+            .min(Duration::from_secs(10));
+        self.0 = self.0.saturating_add(1);
+        delay
+    }
+}
+
+fn inventory_poll_due(
+    local: bool,
+    live: bool,
+    elapsed: Option<Duration>,
+    interval: Duration,
+) -> bool {
+    let interval = if !local && live {
+        Duration::from_secs(60)
+    } else {
+        interval
+    };
+    elapsed.is_none_or(|elapsed| elapsed >= interval)
+}
+
+/// Cache complete evidence so skipped reads preserve host and producer state.
+struct ScheduledHostReader {
+    poller: FleetPollerHandle,
+    interval: Duration,
+    cache: std::sync::Mutex<HashMap<String, (Instant, HostEvidence)>>,
+}
+
+impl HostReader for ScheduledHostReader {
+    fn fetch_local(
+        &self,
+        host: FleetHostConfig,
+        timeout: Duration,
+        producers: bool,
+    ) -> HostEvidence {
+        SystemHostReader.fetch_local(host, timeout, producers)
+    }
+
+    fn fetch_remote(
+        &self,
+        host: FleetHostConfig,
+        timeout: Duration,
+        producers: bool,
+    ) -> HostEvidence {
+        let now = Instant::now();
+        if let Some((last, evidence)) = self
+            .cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&host.name)
+        {
+            if !inventory_poll_due(
+                false,
+                self.poller.agent_stream_is_live(&host.name),
+                Some(now.saturating_duration_since(*last)),
+                self.interval,
+            ) {
+                return evidence.clone();
+            }
+        }
+        let evidence = SystemHostReader.fetch_remote(host, timeout, producers);
+        self.cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(evidence.host.name.clone(), (now, evidence.clone()));
+        evidence
+    }
+}
+
 const REMOTE_RUNS_MARKER: &[u8] = b"\x1eHERDR_FLEET_RUNS_V1\x1e\n";
 const REMOTE_RUN_RECORD_MARKER: &[u8] = b"\x1eHERDR_FLEET_RUN_V1:";
 const REMOTE_HOST_MARKER: &[u8] = b"\x1eHERDR_FLEET_HOST_V1\x1e\n";
@@ -468,6 +544,16 @@ impl Snapshot {
                     .filter(|entry| entry.source == EvidenceSource::Herdr)
                     .cloned(),
             );
+            // Cached fallback evidence must not roll back the session model
+            // received through session.changed or the resubscription seed.
+            if let Some(live) = &existing.sessions {
+                if let Some(incoming) = &mut incoming.sessions {
+                    incoming.snapshot = live.snapshot.clone();
+                    incoming.sections = live.sections.clone();
+                } else {
+                    incoming.sessions = Some(live.clone());
+                }
+            }
             incoming.state = existing.state;
             incoming.error = existing.error.clone();
         }
@@ -1938,17 +2024,12 @@ impl HostSnapshot {
     }
 }
 
-pub(crate) fn poll(fleet: &FleetConfig) -> Snapshot {
-    poll_without_generation(fleet)
+#[cfg(test)]
+fn poll(fleet: &FleetConfig) -> Snapshot {
+    poll_with_reader(fleet, &SystemHostReader)
 }
 
-fn poll_with_generation(fleet: &FleetConfig, config_generation: u64) -> Snapshot {
-    let mut snapshot = poll(fleet);
-    snapshot.config_generation = config_generation;
-    snapshot
-}
-
-fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
+fn poll_with_reader(fleet: &FleetConfig, reader: &impl HostReader) -> Snapshot {
     let mut polling_fleet = fleet.clone();
     let self_name = polling_fleet.resolved_self_name();
     // Skip the synthetic local host when a configured host already carries the
@@ -1970,7 +2051,7 @@ fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
     }
     match select_hosts(&polling_fleet, None) {
         Ok(hosts) => collect_snapshot_with_implicit_local(
-            &SystemHostReader,
+            reader,
             &hosts,
             &polling_fleet,
             implicit_local.then(|| polling_fleet.resolved_self_name()),
@@ -2310,9 +2391,26 @@ pub(crate) fn start_poller(
     std::thread::spawn(move || {
         #[cfg(unix)]
         let _channels = channel::Cleanup;
+        let mut reader = ScheduledHostReader {
+            poller: Arc::clone(&poller_config_for_thread),
+            interval: Duration::ZERO,
+            cache: std::sync::Mutex::default(),
+        };
+        let mut generation = None;
         loop {
             let state = poller_config_for_thread.snapshot();
-            let snapshot = poll_with_generation(&state.fleet, state.generation);
+            if generation != Some(state.generation) {
+                reader
+                    .cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear();
+                generation = Some(state.generation);
+            }
+            reader.interval =
+                Duration::from_millis(state.fleet.refresh_interval_ms.max(MIN_REFRESH_INTERVAL_MS));
+            let mut snapshot = poll_with_reader(&state.fleet, &reader);
+            snapshot.config_generation = state.generation;
             match event_tx.try_send(crate::events::AppEvent::FleetRefreshed { snapshot }) {
                 Ok(()) => {}
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
@@ -2401,6 +2499,7 @@ fn run_remote_agent_stream_worker(
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
     stop: Arc<AtomicBool>,
 ) {
+    let mut retry = RetryBackoff::default();
     while !stop.load(Ordering::Acquire) && !event_tx.is_closed() {
         let (agent_events, session_events) = match remote_host_event_capabilities(&host, timeout) {
             Ok(capabilities) if capabilities.0 || capabilities.1 => capabilities,
@@ -2410,7 +2509,7 @@ fn run_remote_agent_stream_worker(
             }
             Err(error) => {
                 tracing::debug!(host = %host.name, %error, "remote fleet event stream probe failed");
-                wait_for_stream_retry(&stop, Duration::from_secs(10));
+                wait_for_stream_retry(&stop, retry.next_delay());
                 continue;
             }
         };
@@ -2424,15 +2523,19 @@ fn run_remote_agent_stream_worker(
             &stop,
             agent_events,
             session_events,
+            &mut retry,
         );
         poller.set_agent_stream_live(&host.name, config_generation, false);
         if stop.load(Ordering::Acquire) || event_tx.is_closed() {
             break;
         }
+        if matches!(result, Ok(true)) {
+            continue; // events_lost: resubscribe immediately and seed from session.snapshot.
+        }
         if let Err(error) = result {
             tracing::debug!(host = %host.name, %error, "remote fleet event stream disconnected; polling remains active");
         }
-        wait_for_stream_retry(&stop, Duration::from_secs(3));
+        wait_for_stream_retry(&stop, retry.next_delay());
     }
     poller.set_agent_stream_live(&host.name, config_generation, false);
 }
@@ -2468,84 +2571,36 @@ fn run_remote_agent_stream(
     stop: &AtomicBool,
     agent_events: bool,
     session_events: bool,
-) -> Result<(), String> {
+    retry: &mut RetryBackoff,
+) -> Result<bool, String> {
     let (mut child, lines, reader) =
         spawn_remote_host_stream(host, timeout, agent_events, session_events)?;
-    let mut started = false;
-    let stream_result = 'stream: loop {
+    let mut consumer = RemoteStreamConsumer {
+        host,
+        config_generation,
+        poller,
+        event_tx,
+        agent_events,
+        session_events,
+        started: false,
+        retry,
+    };
+    let stream_result = loop {
         if stop.load(Ordering::Acquire) || event_tx.is_closed() {
-            break Ok(());
+            break Ok(false);
         }
         match lines.recv_timeout(Duration::from_millis(100)) {
-            Ok(Ok(line)) => match parse_remote_agent_stream_line(&line) {
-                Ok(RemoteAgentStreamMessage::Started) => {
-                    started = true;
-                    if agent_events {
-                        poller.set_agent_stream_live(&host.name, config_generation, true);
-                    }
-                    if session_events {
-                        let seed = fetch_remote_session_inventory(host, timeout)
-                            .map_err(|error| {
-                                format!("cannot fetch initial session inventory: {error}")
-                            })
-                            .and_then(|(snapshot, _)| {
-                                send_remote_session_inventory_update(
-                                    host,
-                                    config_generation,
-                                    event_tx,
-                                    snapshot,
-                                )
-                            });
-                        if let Err(error) = seed {
-                            if error == "remote fleet event receiver closed" {
-                                break 'stream Ok(());
-                            }
-                            break 'stream Err(error);
-                        }
-                    }
-                }
-                Ok(RemoteAgentStreamMessage::AgentsChanged(agents)) if started => {
-                    let event = crate::events::AppEvent::FleetAgentInventoryChanged {
-                        host: host.clone(),
-                        config_generation,
-                        agents,
-                    };
-                    match event_tx.try_send(event) {
-                        Ok(()) => {}
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                            break 'stream Ok(())
-                        }
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            tracing::warn!(host = %host.name, "dropped remote fleet agent update because the event queue is full");
-                            break 'stream Err("remote fleet event queue is full".into());
-                        }
-                    }
-                }
-                Ok(RemoteAgentStreamMessage::AgentsChanged(_)) => {
-                    break Err("remote fleet stream sent inventory before its handshake".into());
-                }
-                Ok(RemoteAgentStreamMessage::SessionChanged(snapshot)) if started => {
-                    if let Err(error) = send_remote_session_inventory_update(
-                        host,
-                        config_generation,
-                        event_tx,
-                        *snapshot,
-                    ) {
-                        if error == "remote fleet event receiver closed" {
-                            break 'stream Ok(());
-                        }
-                        break 'stream Err(error);
-                    }
-                }
-                Ok(RemoteAgentStreamMessage::SessionChanged(_)) => {
-                    break Err("remote session stream sent inventory before its handshake".into());
-                }
+            Ok(Ok(line)) => match consumer.consume(&line, || {
+                fetch_remote_session_inventory(host, timeout).map(|(snapshot, _)| snapshot)
+            }) {
+                Ok(true) => break Ok(true),
+                Ok(false) => {}
                 Err(error) => break Err(error),
             },
             Ok(Err(error)) => break Err(format!("cannot read remote fleet stream: {error}")),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break Ok(()),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break Ok(false),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => match child.try_wait() {
-                Ok(Some(_)) => break Ok(()),
+                Ok(Some(_)) => break Ok(false),
                 Ok(None) => {}
                 Err(error) => break Err(error.to_string()),
             },
@@ -2557,11 +2612,83 @@ fn run_remote_agent_stream(
     // only exits once its send fails.
     drop(lines);
     let _ = reader.join();
-    stream_result?;
+    let lost = stream_result?;
+    if lost {
+        return Ok(true);
+    }
     if stop.load(Ordering::Acquire) || event_tx.is_closed() {
-        Ok(())
+        Ok(false)
     } else {
         Err("remote fleet event stream closed".into())
+    }
+}
+
+struct RemoteStreamConsumer<'a> {
+    host: &'a FleetHostConfig,
+    config_generation: u64,
+    poller: &'a FleetPollerHandle,
+    event_tx: &'a tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    agent_events: bool,
+    session_events: bool,
+    started: bool,
+    retry: &'a mut RetryBackoff,
+}
+
+impl RemoteStreamConsumer<'_> {
+    /// True requests an immediate fresh subscription. Its Started response seeds
+    /// session.snapshot before any queued session events are consumed.
+    fn consume(
+        &mut self,
+        line: &str,
+        seed: impl FnOnce() -> Result<crate::api::schema::SessionSnapshot, String>,
+    ) -> Result<bool, String> {
+        match parse_remote_agent_stream_line(line)? {
+            RemoteAgentStreamMessage::Started => {
+                *self.retry = RetryBackoff::default();
+                if self.session_events {
+                    let snapshot = seed()?;
+                    send_remote_session_inventory_update(
+                        self.host,
+                        self.config_generation,
+                        self.event_tx,
+                        snapshot,
+                    )?;
+                }
+                self.started = true;
+                if self.agent_events {
+                    self.poller.set_agent_stream_live(
+                        &self.host.name,
+                        self.config_generation,
+                        true,
+                    );
+                }
+            }
+            RemoteAgentStreamMessage::EventsLost => {
+                self.started = false;
+                self.poller
+                    .set_agent_stream_live(&self.host.name, self.config_generation, false);
+                return Ok(true);
+            }
+            RemoteAgentStreamMessage::AgentsChanged(agents) if self.started => {
+                self.event_tx
+                    .try_send(crate::events::AppEvent::FleetAgentInventoryChanged {
+                        host: self.host.clone(),
+                        config_generation: self.config_generation,
+                        agents,
+                    })
+                    .map_err(|error| format!("cannot enqueue remote fleet event: {error}"))?;
+            }
+            RemoteAgentStreamMessage::SessionChanged(snapshot) if self.started => {
+                send_remote_session_inventory_update(
+                    self.host,
+                    self.config_generation,
+                    self.event_tx,
+                    *snapshot,
+                )?;
+            }
+            _ => return Err("remote fleet stream sent inventory before its handshake".into()),
+        }
+        Ok(false)
     }
 }
 
@@ -2589,12 +2716,16 @@ fn send_remote_session_inventory_update(
 
 enum RemoteAgentStreamMessage {
     Started,
+    EventsLost,
     AgentsChanged(Vec<AgentInfo>),
     SessionChanged(Box<crate::api::schema::SessionSnapshot>),
 }
 
 fn parse_remote_agent_stream_line(line: &str) -> Result<RemoteAgentStreamMessage, String> {
     if let Ok(error) = serde_json::from_str::<crate::api::schema::ErrorResponse>(line) {
+        if error.error.code == "events_lost" {
+            return Ok(RemoteAgentStreamMessage::EventsLost);
+        }
         return Err(format!("{}: {}", error.error.code, error.error.message));
     }
     if let Ok(success) = serde_json::from_str::<crate::api::schema::SuccessResponse>(line) {
@@ -2655,18 +2786,24 @@ fn spawn_remote_host_stream(
         "set -u\n{socket}{session}printf '%s\\n' {} | herdr api relay --stream\n",
         shell_quote(&request_json)
     );
-    let connect_timeout = timeout.as_secs().max(1).to_string();
-    let mut command = crate::noninteractive_process::command("ssh");
+    #[cfg(unix)]
+    let mut command = channel::for_host(&route.target)?.command(timeout)?;
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = crate::noninteractive_process::command("ssh");
+        command
+            .args(["-o", "BatchMode=yes", "-o"])
+            .arg(format!("ConnectTimeout={}", timeout.as_secs().max(1)))
+            .args([
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=3",
+            ])
+            .arg(&route.target);
+        command
+    };
     command
-        .args(["-o", "BatchMode=yes", "-o"])
-        .arg(format!("ConnectTimeout={connect_timeout}"))
-        .args([
-            "-o",
-            "ServerAliveInterval=15",
-            "-o",
-            "ServerAliveCountMax=3",
-        ])
-        .arg(&route.target)
         .args(["sh", "-s"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -5314,7 +5451,7 @@ mod tests {
         };
         let invalid_config = app_config_with_fleet(invalid.clone());
         let mut app = app_with_retained_deleted_group(&invalid_config, &path);
-        let unusable = poll_without_generation(&invalid);
+        let unusable = poll(&invalid);
         assert!(unusable.group_catalogs.is_empty());
 
         install_snapshot_and_finish_ledger_write(&mut app, unusable);
@@ -5780,7 +5917,7 @@ mod tests {
 
         let mut unusable_config = fleet.clone();
         unusable_config.timeout_ms = 1;
-        let unusable_poll = poll_without_generation(&unusable_config);
+        let unusable_poll = poll(&unusable_config);
         assert!(unusable_poll.polled);
         assert!(unusable_poll.group_catalogs.is_empty());
         assert!(unusable_poll.hosts.iter().any(|host| {
@@ -8111,6 +8248,175 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
 
         assert!(snapshot.apply_agent_inventory_update(&configured, Vec::new(), 9));
         assert!(snapshot.hosts[0].entries.is_empty());
+    }
+
+    #[test]
+    fn cached_poll_preserves_live_session_snapshot_and_sections() {
+        let (mut current, _) = pane_lifecycle_snapshot(HostState::Reachable);
+        let inventory = HostSessionInventory {
+            snapshot: Some(serde_json::json!({"epoch":"current", "revision":23})),
+            sections: vec![HostSessionSection {
+                name: "main",
+                pane_ids: vec!["new-pane".into()],
+            }],
+            runs: Vec::new(),
+            loops: Vec::new(),
+        };
+        current.hosts[0].sessions = Some(inventory.clone());
+        let mut cached = current.clone();
+        cached.hosts[0].sessions = Some(HostSessionInventory {
+            snapshot: Some(serde_json::json!({"epoch":"old", "revision":1})),
+            sections: Vec::new(),
+            runs: Vec::new(),
+            loops: Vec::new(),
+        });
+        cached.preserve_live_agent_inventory_from(&current, |_| true);
+        assert_eq!(cached.hosts[0].sessions, Some(inventory));
+        let mut disconnected = current.clone();
+        disconnected.hosts[0].sessions = None;
+        disconnected.preserve_live_agent_inventory_from(&current, |_| false);
+        assert!(disconnected.hosts[0].sessions.is_none());
+    }
+
+    #[test]
+    fn stream_poll_schedule_keeps_sixty_second_safety_net() {
+        let interval = Duration::from_secs(5);
+        for elapsed in [0, 5, 59] {
+            assert!(!inventory_poll_due(
+                false,
+                true,
+                Some(Duration::from_secs(elapsed)),
+                interval
+            ));
+        }
+        assert!(inventory_poll_due(
+            false,
+            true,
+            Some(Duration::from_secs(60)),
+            interval
+        ));
+        assert!(inventory_poll_due(false, false, Some(interval), interval));
+        assert!(!inventory_poll_due(
+            false,
+            false,
+            Some(Duration::from_secs(4)),
+            interval
+        ));
+        assert!(inventory_poll_due(true, true, Some(interval), interval));
+        assert!(inventory_poll_due(false, false, None, interval));
+    }
+
+    #[test]
+    fn stream_retry_backoff_caps_and_resets() {
+        let mut retry = RetryBackoff::default();
+        for ms in [250, 500, 1000, 2000, 4000, 8000, 10000, 10000] {
+            assert_eq!(retry.next_delay(), Duration::from_millis(ms));
+        }
+        retry = RetryBackoff::default();
+        assert_eq!(retry.next_delay(), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn stream_status_event_emits_inventory_without_poll() {
+        let host = FleetHostConfig {
+            name: "remote".into(),
+            target: "remote".into(),
+            ..Default::default()
+        };
+        let poller = Arc::new(FleetPollerConfig::new(FleetConfig::default()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut retry = RetryBackoff::default();
+        let mut consumer = RemoteStreamConsumer {
+            host: &host,
+            config_generation: poller.generation(),
+            poller: &poller,
+            event_tx: &tx,
+            agent_events: true,
+            session_events: false,
+            started: false,
+            retry: &mut retry,
+        };
+        consumer
+            .consume(
+                r#"{"id":"stream","result":{"type":"subscription_started"}}"#,
+                || panic!("no session seed"),
+            )
+            .expect("start");
+        let event = crate::api::schema::SubscriptionEventEnvelope {
+            event: crate::api::schema::SubscriptionEventKind::FleetAgentsChanged,
+            data: crate::api::schema::SubscriptionEventData::FleetAgentsChanged(
+                crate::api::schema::FleetAgentsChangedEvent {
+                    agents: vec![agent(AgentStatus::Working, serde_json::json!([]))],
+                },
+            ),
+        };
+        consumer
+            .consume(&serde_json::to_string(&event).expect("event"), || {
+                panic!("no poll")
+            })
+            .expect("consume");
+        let crate::events::AppEvent::FleetAgentInventoryChanged { agents, .. } =
+            rx.try_recv().expect("immediate event")
+        else {
+            panic!("agent inventory");
+        };
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].agent_status, AgentStatus::Working);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn events_lost_resubscribes_and_seeds_session_snapshot() {
+        let host = FleetHostConfig {
+            name: "remote".into(),
+            target: "remote".into(),
+            ..Default::default()
+        };
+        let poller = Arc::new(FleetPollerConfig::new(FleetConfig::default()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut retry = RetryBackoff::default();
+        let mut consumer = RemoteStreamConsumer {
+            host: &host,
+            config_generation: poller.generation(),
+            poller: &poller,
+            event_tx: &tx,
+            agent_events: true,
+            session_events: true,
+            started: true,
+            retry: &mut retry,
+        };
+        poller.set_agent_stream_live(&host.name, poller.generation(), true);
+        assert!(consumer
+            .consume(
+                r#"{"id":"stream","error":{"code":"events_lost","message":"behind"}}"#,
+                || panic!("seed on new handshake")
+            )
+            .expect("lost"));
+        assert!(!poller.agent_stream_is_live(&host.name));
+        let snapshot: crate::api::schema::SessionSnapshot =
+            serde_json::from_value(serde_json::json!({
+                "epoch":"resynced", "revision":23, "version":"0.9.1", "protocol":1,
+                "workspaces":[], "tabs":[], "panes":[], "layouts":[], "agents":[]
+            }))
+            .expect("snapshot");
+        let expected = serde_json::to_value(&snapshot).expect("snapshot value");
+        assert!(!consumer
+            .consume(
+                r#"{"id":"stream","result":{"type":"subscription_started"}}"#,
+                || Ok(snapshot)
+            )
+            .expect("resubscribe"));
+        let crate::events::AppEvent::FleetSessionInventoryChanged { snapshot, .. } =
+            rx.try_recv().expect("seed event")
+        else {
+            panic!("snapshot inventory");
+        };
+        assert_eq!(
+            serde_json::to_value(snapshot).expect("event snapshot"),
+            expected
+        );
+        assert!(poller.agent_stream_is_live(&host.name));
+        assert_eq!(consumer.retry.next_delay(), Duration::from_millis(250));
     }
 
     #[test]

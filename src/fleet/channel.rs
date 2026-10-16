@@ -8,24 +8,18 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const STALE_AFTER: Duration = Duration::from_secs(3);
-const FIRST_RETRY: Duration = Duration::from_millis(250);
-const MAX_RETRY: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 struct Reconnect {
     disconnected_at: Option<Instant>,
     retry_at: Option<Instant>,
-    failures: u32,
+    retry: super::RetryBackoff,
 }
 
 impl Reconnect {
     fn failed(&mut self, now: Instant) {
         self.disconnected_at.get_or_insert(now);
-        let delay = FIRST_RETRY
-            .saturating_mul(1_u32.checked_shl(self.failures).unwrap_or(u32::MAX))
-            .min(MAX_RETRY);
-        self.retry_at = Some(now + delay);
-        self.failures = self.failures.saturating_add(1);
+        self.retry_at = Some(now + self.retry.next_delay());
     }
 
     fn ready(&self, now: Instant) -> bool {
