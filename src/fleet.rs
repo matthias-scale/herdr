@@ -733,8 +733,11 @@ impl Snapshot {
                         .zip(row.agent_info())
                         .is_some_and(|(live, polled)| {
                             live.terminal_id == polled.terminal_id
-                                && (live.state_change_seq, live.revision)
-                                    > (polled.state_change_seq, polled.revision)
+                                && (live.revision > polled.revision
+                                    || (live.revision == polled.revision
+                                        // Zero also means absent/reset lifecycle evidence.
+                                        && polled.state_change_seq != 0
+                                        && live.state_change_seq > polled.state_change_seq))
                         })
                     {
                         *row = (**live).clone();
@@ -8644,6 +8647,29 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
                 .push(FleetRow::test_agent_row("office", "stream-only"));
             incoming.preserve_live_agent_inventory_from(&current, |_| true);
             assert_eq!(incoming.hosts[0].entries, current.hosts[0].entries);
+        }
+    }
+
+    #[test]
+    fn safety_poll_accepts_reset_agent_sequence() {
+        let (current, _) = pane_lifecycle_snapshot(HostState::Reachable);
+        for newer_content in [false, true] {
+            let mut incoming = current.clone();
+            let mut info = incoming.hosts[0].entries[0]
+                .agent_info()
+                .expect("owner")
+                .clone();
+            // Clearing agent authority resets this optional sequence to zero,
+            // while the terminal and its content revision survive.
+            info.state_change_seq = 0;
+            if newer_content {
+                info.revision += 1;
+            }
+            info.agent_status = AgentStatus::Unknown;
+            incoming.hosts[0].entries[0] = FleetRow::test_agent_info_row("office", info);
+            let expected = incoming.hosts[0].entries.clone();
+            incoming.preserve_live_agent_inventory_from(&current, |_| true);
+            assert_eq!(incoming.hosts[0].entries, expected);
         }
     }
 
