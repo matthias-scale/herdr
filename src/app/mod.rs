@@ -1159,6 +1159,14 @@ impl App {
                 config.session.reap_done_after_minutes.saturating_mul(60),
             ),
             reap_done_panes: config.session.reap_done_panes,
+            auto_close_empty_panes: config.session.auto_close_empty_panes,
+            close_empty_panes_after: std::time::Duration::from_secs(
+                config
+                    .session
+                    .close_empty_panes_after_minutes
+                    .saturating_mul(60),
+            ),
+            empty_pane_close_retry_after: None,
             settle_after: std::time::Duration::from_secs(
                 config
                     .session
@@ -2926,6 +2934,14 @@ impl App {
                 config.session.reap_done_after_minutes.saturating_mul(60),
             );
             self.state.reap_done_panes = config.session.reap_done_panes;
+            self.state.auto_close_empty_panes = config.session.auto_close_empty_panes;
+            self.state.close_empty_panes_after = std::time::Duration::from_secs(
+                config
+                    .session
+                    .close_empty_panes_after_minutes
+                    .saturating_mul(60),
+            );
+            self.state.empty_pane_close_retry_after = None;
             self.state.auto_settle_finished = config.session.auto_settle_finished;
             self.state.settle_finished_after = std::time::Duration::from_secs(
                 config

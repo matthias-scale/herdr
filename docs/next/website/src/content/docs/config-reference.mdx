@@ -50,3 +50,8 @@ only when Herdr has a supported native resume plan. Unsettling a pane during its
 grace period continues the live session; after it locks, Enter resumes the stored
 agent session. Set `session.settle_stops_agent` to `false` to keep settled agents
 running after the grace period too.
+
+By default, `session.auto_close_empty_panes` closes idle shell panes that show
+only their prompt after `session.close_empty_panes_after_minutes` (15 minutes).
+Panes with an agent, running child process, or terminal output beyond the prompt
+stay open. Set `session.auto_close_empty_panes` to `false` to disable this.

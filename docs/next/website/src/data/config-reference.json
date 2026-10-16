@@ -2185,6 +2185,18 @@
           "description": "Automatically close eligible Done panes. Set false to disable reaping entirely."
         },
         {
+          "key": "session.auto_close_empty_panes",
+          "type": "boolean",
+          "default": "true",
+          "description": "Automatically close unused shell panes that contain only their prompt."
+        },
+        {
+          "key": "session.close_empty_panes_after_minutes",
+          "type": "integer",
+          "default": "15",
+          "description": "How long an empty shell pane must stay idle before it closes."
+        },
+        {
           "key": "session.settle_after_days",
           "type": "integer",
           "default": "3",

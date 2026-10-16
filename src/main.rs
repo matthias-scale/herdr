@@ -624,6 +624,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # reap_done_after_minutes = 240
 # Set false to disable automatic pane reaping entirely.
 # reap_done_panes = true
+# Automatically close shell panes containing only their prompt after they stay idle.
+# auto_close_empty_panes = true
+# Idle time before an empty shell pane closes. Default: 15 minutes.
+# close_empty_panes_after_minutes = 15
 # Move inactive or completed work into the Settled sidebar section after this many days.
 # settle_after_days = 3
 # Settle a pane when the work it is linked to finishes.
@@ -1299,6 +1303,8 @@ mod tests {
         assert!(DEFAULT_CONFIG.contains("# settle_finished_after_minutes = 10"));
         assert!(DEFAULT_CONFIG.contains("# settle_stops_agent = true"));
         assert!(DEFAULT_CONFIG.contains("# reap_done_panes = true"));
+        assert!(DEFAULT_CONFIG.contains("# auto_close_empty_panes = true"));
+        assert!(DEFAULT_CONFIG.contains("# close_empty_panes_after_minutes = 15"));
         assert!(DEFAULT_CONFIG.contains("[source_control]\n# Merge strategy"));
         assert!(DEFAULT_CONFIG.contains("# merge_method = \"merge\""));
     }

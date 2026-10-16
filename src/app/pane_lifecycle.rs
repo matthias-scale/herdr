@@ -11,6 +11,9 @@ use crate::layout::PaneId;
 
 const REAP_LOG_FILE_NAME: &str = "reap-log.jsonl";
 const STRICT_THRESHOLD_STEP: Duration = Duration::from_nanos(1);
+// Failed eligibility checks retry slowly so headless polling does not rescan
+// terminal history and process trees on every client-accept tick.
+const EMPTY_PANE_CLOSE_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 struct DonePaneTarget {
@@ -179,6 +182,123 @@ impl AppState {
 }
 
 impl App {
+    pub(crate) fn next_empty_pane_close_deadline(&self, now: Instant) -> Option<Instant> {
+        if !self.state.auto_close_empty_panes {
+            return None;
+        }
+        let mut next = None;
+        let mut due = false;
+        for (ws_idx, workspace) in self.state.workspaces.iter().enumerate() {
+            for tab in &workspace.tabs {
+                for (pane_id, pane) in &tab.panes {
+                    let Some(terminal) = self.state.terminals.get(&pane.attached_terminal_id)
+                    else {
+                        continue;
+                    };
+                    let Some(runtime) = self.state.runtime_for_pane_in_workspace(
+                        &self.terminal_runtimes,
+                        ws_idx,
+                        *pane_id,
+                    ) else {
+                        continue;
+                    };
+                    if !empty_shell_process_candidate(terminal, runtime) {
+                        continue;
+                    }
+                    let Some(deadline) = pane
+                        .activity
+                        .deadline_after(self.state.close_empty_panes_after)
+                    else {
+                        continue;
+                    };
+                    if deadline <= now {
+                        due = true;
+                    } else {
+                        next =
+                            Some(next.map_or(deadline, |current: Instant| current.min(deadline)));
+                    }
+                }
+            }
+        }
+        if due {
+            let retry = self
+                .state
+                .empty_pane_close_retry_after
+                .filter(|retry| *retry > now)
+                .unwrap_or(now);
+            Some(next.map_or(retry, |deadline| deadline.min(retry)))
+        } else {
+            next
+        }
+    }
+
+    pub(crate) fn close_due_empty_panes(&mut self, now: Instant) -> bool {
+        if !self.state.auto_close_empty_panes {
+            return false;
+        }
+        let state = &self.state;
+        let runtimes = &self.terminal_runtimes;
+        let mut due = Vec::new();
+        let mut retry_needed = false;
+        for (ws_idx, workspace) in state.workspaces.iter().enumerate() {
+            for tab in &workspace.tabs {
+                for (pane_id, pane) in &tab.panes {
+                    if !pane
+                        .activity
+                        .deadline_after(state.close_empty_panes_after)
+                        .is_some_and(|deadline| now >= deadline)
+                    {
+                        continue;
+                    }
+                    let Some(terminal) = state.terminals.get(&pane.attached_terminal_id) else {
+                        continue;
+                    };
+                    let Some(runtime) =
+                        state.runtime_for_pane_in_workspace(runtimes, ws_idx, *pane_id)
+                    else {
+                        continue;
+                    };
+                    if empty_shell_prompt_only(terminal, runtime) {
+                        due.push(*pane_id);
+                    } else if empty_shell_process_candidate(terminal, runtime) {
+                        retry_needed = true;
+                    }
+                }
+            }
+        }
+
+        let mut closed = false;
+        for pane_id in due {
+            // Revalidate after collecting IDs because an earlier close may have
+            // removed the workspace or changed its pane layout.
+            let Some(ws_idx) = self
+                .state
+                .workspaces
+                .iter()
+                .enumerate()
+                .find(|(_, workspace)| workspace.pane_state(pane_id).is_some())
+                .map(|(ws_idx, _)| ws_idx)
+            else {
+                continue;
+            };
+            let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
+                continue;
+            };
+            let target = PaneTarget {
+                pane_id: public_pane_id,
+            };
+            if let Err(error) = self.close_pane_for_reap("pane_lifecycle.empty".into(), &target) {
+                tracing::warn!(pane = %target.pane_id, %error, "failed to close empty shell pane");
+                retry_needed = true;
+            } else {
+                closed = true;
+            }
+        }
+        self.state.empty_pane_close_retry_after =
+            retry_needed.then(|| now + EMPTY_PANE_CLOSE_RETRY_INTERVAL);
+        closed
+    }
+
     pub(crate) fn reap_due_done_panes(&mut self, now: Instant) -> bool {
         let pane_ids = self.state.due_done_pane_ids(now);
         let mut reaped = false;
@@ -220,6 +340,59 @@ impl App {
         }
         reaped
     }
+}
+
+fn empty_shell_prompt_only(
+    terminal: &crate::terminal::TerminalState,
+    runtime: &crate::terminal::TerminalRuntime,
+) -> bool {
+    if !empty_shell_process_candidate(terminal, runtime) {
+        return false;
+    }
+    let Some(shell_pid) = runtime.child_pid() else {
+        return false;
+    };
+    let snapshot = runtime.recent_text_snapshot(256);
+    empty_shell_prompt_eligible(
+        !runtime.child_has_exited(),
+        runtime.is_suspended(),
+        terminal.effective_agent_label().is_some(),
+        terminal.foreground_process_active()
+            || !crate::platform::descendant_processes(shell_pid).is_empty(),
+        !snapshot.truncated,
+        &snapshot.text,
+    )
+}
+
+fn empty_shell_process_candidate(
+    terminal: &crate::terminal::TerminalState,
+    runtime: &crate::terminal::TerminalRuntime,
+) -> bool {
+    runtime.child_pid().is_some()
+        && !runtime.child_has_exited()
+        && !runtime.is_suspended()
+        && terminal.effective_agent_label().is_none()
+        && !terminal.foreground_process_active()
+}
+
+fn empty_shell_prompt_eligible(
+    shell_alive: bool,
+    suspended: bool,
+    agent_present: bool,
+    child_process_active: bool,
+    snapshot_complete: bool,
+    text: &str,
+) -> bool {
+    shell_alive
+        && !suspended
+        && !agent_present
+        && !child_process_active
+        && snapshot_complete
+        && prompt_only_text(text)
+}
+
+fn prompt_only_text(text: &str) -> bool {
+    text.lines().filter(|line| !line.trim().is_empty()).count() == 1
 }
 
 pub(crate) fn pane_is_done(
@@ -388,6 +561,69 @@ mod tests {
     fn elapsed_test_clock(elapsed: Duration) -> (Instant, Instant) {
         let since = Instant::now();
         (since, since + elapsed)
+    }
+
+    #[test]
+    fn empty_idle_shell_closes_after_configured_timeout() {
+        let now = Instant::now();
+        let activity = crate::activity_age::PaneActivity::new(now);
+        let timeout = Duration::from_secs(15 * 60);
+        assert!(empty_shell_prompt_eligible(
+            true,
+            false,
+            false,
+            false,
+            true,
+            "user@host:~$ "
+        ));
+        let deadline = activity.deadline_after(timeout).expect("activity deadline");
+        assert_eq!(deadline, now + timeout);
+        assert!(now + timeout - Duration::from_nanos(1) < deadline);
+        assert!(now + timeout >= deadline);
+    }
+
+    #[test]
+    fn empty_pane_with_running_child_process_is_kept() {
+        assert!(!empty_shell_prompt_eligible(
+            true,
+            false,
+            false,
+            true,
+            true,
+            "user@host:~$ "
+        ));
+    }
+
+    #[test]
+    fn pane_with_output_beyond_prompt_is_kept() {
+        assert!(!empty_shell_prompt_eligible(
+            true,
+            false,
+            false,
+            false,
+            true,
+            "echo hello\nhello\nuser@host:~$ "
+        ));
+        assert!(!empty_shell_prompt_eligible(
+            true,
+            false,
+            false,
+            false,
+            false,
+            "user@host:~$ "
+        ));
+    }
+
+    #[test]
+    fn agent_prompt_is_kept_even_when_idle() {
+        assert!(!empty_shell_prompt_eligible(
+            true,
+            false,
+            true,
+            false,
+            true,
+            "user@host:~$ "
+        ));
     }
 
     #[test]

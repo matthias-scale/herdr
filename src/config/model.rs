@@ -315,6 +315,11 @@ pub struct SessionConfig {
     /// Automatically close eligible Done panes. Set false to disable reaping.
     /// Default: true.
     pub reap_done_panes: bool,
+    /// Automatically close unused shell panes that contain only their prompt.
+    /// Default: true.
+    pub auto_close_empty_panes: bool,
+    /// How long an empty shell pane must stay idle before it closes. Default: 15.
+    pub close_empty_panes_after_minutes: u64,
     /// Settle panes with no activity after this many days. Default: 3.
     pub settle_after_days: u64,
     /// Settle a pane when the work it is linked to finishes (its pull request
@@ -381,6 +386,8 @@ impl Default for SessionConfig {
             hide_done_after_minutes: 30,
             reap_done_after_minutes: 4 * 60,
             reap_done_panes: true,
+            auto_close_empty_panes: true,
+            close_empty_panes_after_minutes: 15,
             settle_after_days: 3,
             auto_settle_finished: true,
             settle_finished_after_minutes: 10,
@@ -2902,6 +2909,8 @@ new_cwd = "~/Projects"
         assert_eq!(default_config.session.hide_done_after_minutes, 30);
         assert_eq!(default_config.session.reap_done_after_minutes, 240);
         assert!(default_config.session.reap_done_panes);
+        assert!(default_config.session.auto_close_empty_panes);
+        assert_eq!(default_config.session.close_empty_panes_after_minutes, 15);
         assert_eq!(default_config.session.settle_after_days, 3);
         assert_eq!(default_config.session.settle_finished_after_minutes, 10);
         assert!(default_config.session.settle_stops_agent);
@@ -2915,6 +2924,8 @@ resume_agents_on_restore = false
 hide_done_after_minutes = 15
 reap_done_after_minutes = 90
 reap_done_panes = false
+auto_close_empty_panes = false
+close_empty_panes_after_minutes = 25
 settle_after_days = 7
 settle_finished_after_minutes = 20
 settle_stops_agent = false
@@ -2927,6 +2938,8 @@ settled_read_only_after_minutes = 25
         assert_eq!(config.session.hide_done_after_minutes, 15);
         assert_eq!(config.session.reap_done_after_minutes, 90);
         assert!(!config.session.reap_done_panes);
+        assert!(!config.session.auto_close_empty_panes);
+        assert_eq!(config.session.close_empty_panes_after_minutes, 25);
         assert_eq!(config.session.settle_after_days, 7);
         assert_eq!(config.session.settle_finished_after_minutes, 20);
         assert!(!config.session.settle_stops_agent);
