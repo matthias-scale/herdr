@@ -334,12 +334,21 @@ impl AppState {
                                 || self.notepad.agent_tab
                                 || self.notepad.usage_tab
                             {
+                                self.notepad.agent_tab = false;
+                                self.notepad.usage_tab = false;
                                 self.request_notepad(NotepadRequest::Select(index));
                             }
                         }
                         crate::notepad::NotepadTabTarget::Context => {
                             self.set_notepad_focus(true);
-                            if !self.notepad.context_active {
+                            if !self.notepad.context_active
+                                || self.notepad.agent_tab
+                                || self.notepad.usage_tab
+                            {
+                                // These flags belong to the attached client and are
+                                // stored before the deferred Context request runs.
+                                self.notepad.agent_tab = false;
+                                self.notepad.usage_tab = false;
                                 self.request_notepad(NotepadRequest::SelectContext);
                             }
                         }
@@ -837,6 +846,69 @@ mod tests {
         };
         assert!(state.handle_notepad_mouse(&event));
         assert_eq!(state.notepad_request, Some(NotepadRequest::SelectContext));
+    }
+
+    #[test]
+    fn context_click_leaves_client_local_read_only_tabs_before_deferred_selection() {
+        for context_active in [false, true] {
+            for usage_tab in [false, true] {
+                let mut state = state_with_notepad();
+                state.notepad.context_active = context_active;
+                state.view.notepad_rect = Rect::new(0, 10, 20, 5);
+                state.view.notepad_tab_hit_areas = vec![(
+                    crate::notepad::NotepadTabTarget::Context,
+                    Rect::new(2, 10, 7, 1),
+                )];
+                let mut client = crate::notepad::NotepadPresentationState {
+                    usage_tab,
+                    agent_tab: !usage_tab,
+                    ..Default::default()
+                };
+                state.notepad.swap_presentation(&mut client);
+                assert!(state.handle_notepad_mouse(&click_at(3, 10)));
+                assert_eq!(
+                    state.notepad_request.take(),
+                    Some(NotepadRequest::SelectContext)
+                );
+                state.notepad.swap_presentation(&mut client); // Input saves this client's flags.
+                state.notepad.select_context(); // Deferred request runs on shared state.
+                state.notepad.swap_presentation(&mut client); // Next render restores the client.
+                assert_eq!(
+                    state.notepad.active_tab_target(),
+                    Some(crate::notepad::NotepadTabTarget::Context)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn note_click_leaves_client_local_read_only_tabs_before_deferred_selection() {
+        for usage_tab in [false, true] {
+            let mut state = state_with_notepad();
+            state.view.notepad_rect = Rect::new(0, 10, 20, 5);
+            state.view.notepad_tab_hit_areas = vec![(
+                crate::notepad::NotepadTabTarget::Note(1),
+                Rect::new(2, 10, 7, 1),
+            )];
+            let mut client = crate::notepad::NotepadPresentationState {
+                usage_tab,
+                agent_tab: !usage_tab,
+                ..Default::default()
+            };
+            state.notepad.swap_presentation(&mut client);
+            assert!(state.handle_notepad_mouse(&click_at(3, 10)));
+            assert_eq!(
+                state.notepad_request.take(),
+                Some(NotepadRequest::Select(1))
+            );
+            state.notepad.swap_presentation(&mut client);
+            state.notepad.select(1);
+            state.notepad.swap_presentation(&mut client);
+            assert_eq!(
+                state.notepad.active_tab_target(),
+                Some(crate::notepad::NotepadTabTarget::Note(1))
+            );
+        }
     }
 
     #[test]

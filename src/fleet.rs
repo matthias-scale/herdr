@@ -31,6 +31,37 @@ impl RetryBackoff {
     }
 }
 
+/// Read-only streams are opt-in, scoped to the active remote workspace and
+/// the ten most recently focused panes. Inventory excludes removed panes.
+#[cfg(any(unix, test))]
+pub(crate) fn prewarm_selection<'a>(
+    hosts: impl Iterator<Item = &'a FleetHostConfig>,
+    inventory: &[crate::api::schema::AgentRef],
+    active: &[crate::api::schema::AgentRef],
+    recent: &std::collections::VecDeque<crate::api::schema::AgentRef>,
+) -> HashSet<crate::api::schema::AgentRef> {
+    let wan: HashSet<_> = hosts
+        .filter(|host| host.wan && !host.local)
+        .map(|host| host.name.as_str())
+        .collect();
+    inventory
+        .iter()
+        .filter(|agent| {
+            wan.contains(agent.host.as_str())
+                && (active.iter().any(|active| {
+                    active.host == agent.host
+                        && active.agent.split_once(':').is_some_and(|(workspace, _)| {
+                            agent
+                                .agent
+                                .split_once(':')
+                                .is_some_and(|(candidate, _)| workspace == candidate)
+                        })
+                }) || recent.iter().take(10).any(|previous| previous == *agent))
+        })
+        .cloned()
+        .collect()
+}
+
 fn inventory_poll_due(
     local: bool,
     live: bool,
@@ -123,6 +154,14 @@ type ParsedRemoteOutput = (
 pub(crate) fn run_fleet_command(args: &[String]) -> std::io::Result<i32> {
     match args.first().map(String::as_str) {
         Some("status") => fleet_status(&args[1..]),
+        Some("observation") => {
+            let observation = HostObservation::collect();
+            println!(
+                "{}",
+                serde_json::to_string(&observation).map_err(std::io::Error::other)?
+            );
+            Ok(0)
+        }
         Some("help" | "--help" | "-h") => {
             print_fleet_help();
             Ok(0)
@@ -452,7 +491,7 @@ pub(crate) struct HostSessionSection {
     pub(crate) pane_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub(crate) struct Snapshot {
     pub(crate) polled: bool,
     #[serde(skip)]
@@ -472,10 +511,130 @@ pub(crate) struct Snapshot {
     pub(crate) inbox: Option<Arc<crate::inbox::ProducerSnapshot>>,
     pub(crate) configured_hosts: Vec<String>,
     pub(crate) hosts: Vec<HostSnapshot>,
+    /// Read-only host resources and provider quota observations. Older hosts
+    /// simply omit this optional surface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) observations: Vec<HostObservation>,
     /// Complete owner catalogs observed by the periodic fleet poll. Admission
     /// happens once when the refresh reaches the app event loop.
     #[serde(skip)]
     pub(crate) group_catalogs: Vec<GroupCatalog>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct HostObservation {
+    pub(crate) host: String,
+    pub(crate) sampled_unix: i64,
+    pub(crate) metrics: crate::platform::status_metrics::StatusMetrics,
+    pub(crate) usage: crate::provider_usage::ProviderUsageSnapshot,
+}
+
+impl HostObservation {
+    fn collect() -> Self {
+        let mut sampler = crate::platform::status_metrics::StatusMetricSampler::new();
+        // CPU is a delta of two samples. The short delay is bounded and this
+        // command only runs from the fleet background collector.
+        let _ = crate::platform::sample_status_metrics(&mut sampler);
+        std::thread::sleep(Duration::from_millis(100));
+        let metrics = crate::platform::sample_status_metrics(&mut sampler);
+        let sampled_unix = crate::provider_usage::now_unix().unwrap_or_default();
+        let usage = crate::provider_usage::collect_fleet(Some(sampled_unix), Instant::now());
+        Self {
+            host: String::new(),
+            sampled_unix,
+            metrics,
+            usage,
+        }
+    }
+}
+
+/// Fleet observations have their own minute cadence. The ordinary agent poll
+/// can run every five seconds without launching provider helpers each time.
+type ObservationCache = std::sync::Mutex<HashMap<String, (Instant, Option<HostObservation>)>>;
+
+fn collect_observations(hosts: &[FleetHostConfig], timeout: Duration) -> Vec<HostObservation> {
+    static CACHE: std::sync::OnceLock<ObservationCache> = std::sync::OnceLock::new();
+    const INTERVAL: Duration = Duration::from_secs(60);
+    let cache = CACHE.get_or_init(Default::default);
+    let now = Instant::now();
+    let pending = {
+        let guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        hosts
+            .iter()
+            .filter(|host| {
+                guard
+                    .get(&observation_cache_key(host))
+                    .is_none_or(|(sampled, _)| now.duration_since(*sampled) >= INTERVAL)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let mut fresh = Vec::new();
+    // Bounded to four host reads at once. A large inventory must never spawn
+    // one blocking SSH process and thread for every configured machine.
+    for batch in pending.chunks(4) {
+        let batch_result = std::thread::scope(|scope| {
+            let workers = batch
+                .iter()
+                .cloned()
+                .map(|host| {
+                    scope.spawn(move || {
+                        let mut observation = if host.local {
+                            Some(HostObservation::collect())
+                        } else {
+                            run_ssh_with_timeout(
+                                &host.target,
+                                "herdr fleet observation --json",
+                                timeout,
+                            )
+                            .ok()
+                            .and_then(|bytes| {
+                                serde_json::from_slice::<HostObservation>(&bytes).ok()
+                            })
+                        };
+                        if let Some(sample) = observation.as_mut() {
+                            sample.host = host.name.clone();
+                        }
+                        (observation_cache_key(&host), observation)
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .filter_map(|worker| worker.join().ok())
+                .collect::<Vec<_>>()
+        });
+        fresh.extend(batch_result);
+    }
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (key, observation) in fresh {
+        let retained =
+            observation.or_else(|| guard.get(&key).and_then(|(_, previous)| previous.clone()));
+        guard.insert(key, (now, retained));
+    }
+    hosts
+        .iter()
+        .filter_map(|host| {
+            guard
+                .get(&observation_cache_key(host))
+                .and_then(|(_, observation)| observation.clone())
+        })
+        .collect()
+}
+
+fn observation_cache_key(host: &FleetHostConfig) -> String {
+    format!(
+        "{}\0{}\0{}\0{}\0{}",
+        host.name,
+        host.target,
+        host.local,
+        host.session.as_deref().unwrap_or_default(),
+        host.socket.as_deref().unwrap_or_default()
+    )
 }
 
 /// Remote devices that need attention in the status row.
@@ -1817,6 +1976,18 @@ impl Snapshot {
                 .filter(|inbox| inbox.host == fleet.resolved_inbox_host()),
             configured_hosts: fleet.hosts.iter().map(|host| host.name.clone()).collect(),
             hosts,
+            observations: self
+                .observations
+                .iter()
+                .filter(|observation| {
+                    fleet.hosts.iter().any(|host| {
+                        previous_hosts
+                            .get(observation.host.as_str())
+                            .is_some_and(|previous| previous.matches_config(host))
+                    })
+                })
+                .cloned()
+                .collect(),
             group_catalogs,
         }
     }
@@ -2050,12 +2221,19 @@ fn poll_with_reader(fleet: &FleetConfig, reader: &impl HostReader) -> Snapshot {
         );
     }
     match select_hosts(&polling_fleet, None) {
-        Ok(hosts) => collect_snapshot_with_implicit_local(
-            reader,
-            &hosts,
-            &polling_fleet,
-            implicit_local.then(|| polling_fleet.resolved_self_name()),
-        ),
+        Ok(hosts) => {
+            let mut snapshot = collect_snapshot_with_implicit_local(
+                reader,
+                &hosts,
+                &polling_fleet,
+                implicit_local.then(|| polling_fleet.resolved_self_name()),
+            );
+            if !cfg!(test) {
+                snapshot.observations =
+                    collect_observations(&hosts, Duration::from_millis(polling_fleet.timeout_ms));
+            }
+            snapshot
+        }
         Err(error) => {
             let refreshed_at = SystemTime::now();
             Snapshot {
@@ -2099,6 +2277,7 @@ fn poll_with_reader(fleet: &FleetConfig, reader: &impl HostReader) -> Snapshot {
                         entries: Vec::new(),
                     })
                     .collect(),
+                observations: Vec::new(),
                 group_catalogs: Vec::new(),
             }
         }
@@ -3159,6 +3338,7 @@ fn snapshot_from_evidence(
             .map(|host| host.name.clone())
             .collect(),
         hosts,
+        observations: Vec::new(),
         group_catalogs,
     }
 }
@@ -4559,29 +4739,32 @@ fn agent_work(agent: &AgentInfo) -> Option<String> {
 /// `display_title`, so their fallback cannot recover manual pane labels or know
 /// the remote user's home directory. It deliberately treats HOME as unknown.
 fn agent_title(agent: &AgentInfo) -> Option<String> {
+    // The native session name beats prompt-derived and host display titles.
+    if agent.work_context.session_name.is_some() {
+        return agent.work_context.session_name.clone();
+    }
     if agent.display_title.is_some() {
         return agent.display_title.clone();
     }
-    let title = agent.work_context.session_name.clone().or_else(|| {
-        crate::workspace::agent_title_from_terminal_or_work(crate::workspace::AgentTitleContext {
-            terminal_title: agent.terminal_title_stripped.as_deref(),
-            work_title: agent.work_context.work_title.as_deref(),
-            cwd: agent.cwd.as_deref().map(Path::new),
-            home: None,
-            agent_name: agent.name.as_deref(),
-            agent_label: agent.agent.as_deref(),
-            display_agent: agent.display_agent.as_deref(),
-            detected_agent: agent
-                .agent
-                .as_deref()
-                .and_then(crate::detect::parse_agent_label),
-        })
-    });
     let projection = crate::workspace::TabDisplayProjection::Derived {
         agent: None,
         ticket: agent.work_context.primary_ticket().map(str::to_string),
         binding: None,
-        title,
+        title: crate::workspace::agent_title_from_terminal_or_work(
+            crate::workspace::AgentTitleContext {
+                terminal_title: agent.terminal_title_stripped.as_deref(),
+                work_title: agent.work_context.work_title.as_deref(),
+                cwd: agent.cwd.as_deref().map(Path::new),
+                home: None,
+                agent_name: agent.name.as_deref(),
+                agent_label: agent.agent.as_deref(),
+                display_agent: agent.display_agent.as_deref(),
+                detected_agent: agent
+                    .agent
+                    .as_deref()
+                    .and_then(crate::detect::parse_agent_label),
+            },
+        ),
     };
     crate::workspace::session_title(Some(&projection), None)
 }
@@ -4744,13 +4927,16 @@ fn print_table(rows: &[FleetRow]) {
             .or(row.error.as_deref())
             .unwrap_or("-");
         println!(
-            "{:<7} {:<5} {:<20} {:<19} {:<20} {:<25} {:>5}  {}",
-            truncate(&row.host, 7),
-            row.source.table_label(),
-            truncate(identity, 20),
-            truncate(&model, 19),
-            truncate(row.work.as_deref().unwrap_or("-"), 20),
-            truncate(&state, 25),
+            "{} {} {} {} {} {} {:>5}  {}",
+            table_cell(&row.host, 7),
+            table_cell(row.source.table_label(), 5),
+            table_cell(identity, 20),
+            table_cell(&model, 19),
+            table_cell(
+                row.title.as_deref().or(row.work.as_deref()).unwrap_or("-"),
+                20
+            ),
+            table_cell(&state, 25),
             age_label(row.age_s),
             truncate(gate, 70),
         );
@@ -4760,7 +4946,7 @@ fn print_table(rows: &[FleetRow]) {
 fn human_state(state: &str) -> String {
     match state {
         "blocked_liveness_unknown" => "BLOCKED · UNKNOWN".into(),
-        "status_unknown" => "STATUS UNKNOWN".into(),
+        "status_unknown" => "UNKNOWN".into(),
         other => other.to_ascii_uppercase(),
     }
 }
@@ -4774,6 +4960,10 @@ fn truncate(value: &str, width: usize) -> String {
         .take(width.saturating_sub(1))
         .chain(['…'])
         .collect()
+}
+
+fn table_cell(value: &str, width: usize) -> String {
+    format!("{:<width$}", truncate(value, width))
 }
 
 fn age_label(age_s: Option<u64>) -> String {
@@ -5128,6 +5318,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn prewarm_selection_includes_active_workspace_and_last_ten_only_for_wan() {
+        let hosts = [
+            FleetHostConfig {
+                name: "wan".into(),
+                wan: true,
+                ..Default::default()
+            },
+            FleetHostConfig {
+                name: "lan".into(),
+                ..Default::default()
+            },
+        ];
+        let agent = |host: &str, workspace: &str, n| {
+            crate::api::schema::AgentRef::new(host, format!("{workspace}:p{n}")).expect("ref")
+        };
+        let mut inventory: Vec<_> = (0..12).map(|n| agent("wan", "old", n)).collect();
+        inventory.extend([
+            agent("wan", "active", 1),
+            agent("wan", "active", 2),
+            agent("lan", "active", 1),
+        ]);
+        let recent = (0..12).map(|n| agent("wan", "old", n)).collect();
+        let selected = prewarm_selection(
+            hosts.iter(),
+            &inventory,
+            &[agent("wan", "active", 1), agent("lan", "active", 1)],
+            &recent,
+        );
+        assert_eq!(selected.len(), 12);
+        assert!(selected.contains(&agent("wan", "active", 2)));
+        assert!(!selected.contains(&agent("wan", "old", 10)));
+        assert!(selected.iter().all(|agent| agent.host == "wan"));
+        assert!(prewarm_selection(hosts[1..].iter(), &inventory, &[], &recent).is_empty());
+        assert!(prewarm_selection(hosts.iter(), &[], &[], &recent).is_empty());
+    }
+
     fn host(name: &str, local: bool) -> FleetHostConfig {
         FleetHostConfig {
             name: name.to_string(),
@@ -5301,6 +5528,7 @@ mod tests {
                 icon: None,
                 target: target.into(),
                 local: false,
+                wan: false,
                 session: Some("agents".into()),
                 socket: Some("/tmp/herdr.sock".into()),
             }],
@@ -8204,10 +8432,11 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
     }
 
     #[test]
-    fn remote_agent_title_prefers_host_display_title_verbatim() {
+    fn remote_agent_title_prefers_session_name_then_work_title() {
         let agent: AgentInfo = serde_json::from_value(serde_json::json!({
             "terminal_id": "term-1",
             "work_context": {
+                "session_name": "native session",
                 "ticket_ids": ["SCA-1"],
                 "work_title": "collector fallback"
             },
@@ -8226,7 +8455,36 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
         .expect("valid agent info");
 
         let row = FleetRow::from_agent("ub1", false, agent, 0).expect("valid fleet row");
-        assert_eq!(row.title.as_deref(), Some("SCA-9: exact host title"));
+        assert_eq!(row.title.as_deref(), Some("native session"));
+        assert_eq!(row.work.as_deref(), Some("SCA-1"));
+
+        let agent: AgentInfo = serde_json::from_value(serde_json::json!({
+            "terminal_id": "term-1",
+            "work_context": {
+                "ticket_ids": ["SCA-1"],
+                "work_title": "collector fallback"
+            },
+            "name": "cl-ceea66cc",
+            "agent": "codex",
+            "display_title": "runtime title",
+            "agent_status": "working",
+            "workspace_id": "w23",
+            "tab_id": "t1",
+            "pane_id": "w23:p1E",
+            "focused": false,
+            "revision": 1
+        }))
+        .expect("valid agent info");
+        let row = FleetRow::from_agent("ub1", false, agent, 0).expect("valid fleet row");
+        assert_eq!(row.title.as_deref(), Some("runtime title"));
+        assert_eq!(row.work.as_deref(), Some("SCA-1"));
+    }
+
+    #[test]
+    fn fleet_table_cells_are_fixed_width_and_unknown_state_is_one_token() {
+        assert_eq!(table_cell("a long session name", 8), "a long …");
+        assert_eq!(table_cell("idle", 8), "idle    ");
+        assert_eq!(human_state("status_unknown"), "UNKNOWN");
     }
 
     #[test]

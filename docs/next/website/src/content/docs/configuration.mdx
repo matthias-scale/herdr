@@ -310,7 +310,11 @@ The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](
 
 The cycle control beside the notification icon sets `ui.window_cycle_mode` to `"this-machine"` or `"this-machine-and-fleet"`. Next/previous follows visible sidebar rows, including working and non-working rows. Next-blocked remains limited to attention targets; its `Skip collapsed` option is stored as `ui.skip_collapsed_cycle`.
 
-With `ui.nerd_font = true` (the default), agent badges, Space headers, usage providers, and file kinds use Nerd Font glyphs. Set it to `false` to restore text badges, bare Space names, and the `CC` / `CX` / `KI` / `AG` usage labels. Override a Space icon by repo name, `owner/repo` binding, or Space label:
+With `ui.nerd_font = true` (the default), agent badges, Space headers, usage providers, and file kinds use Nerd Font glyphs. Set it to `false` to restore text badges, bare Space names, and the `CC` / `CX` / `KI` / `AG` usage labels.
+
+`ui.subscript_glyphs = false` is the compatibility default. Set it to `true` only after every client displaying this server has the companion Herdr Icons font containing the subscript alphabet (U+F6100–U+F613D). This renders compact account tags and machine aliases as smaller, lowered letters. Herdr does not discover client font coverage or negotiate it over the server protocol. Without this opt-in, labels remain readable ordinary text; that fallback does not reproduce the subscript design. `ui.nerd_font = false` also keeps ordinary text labels.
+
+Override a Space icon by repo name, `owner/repo` binding, or Space label:
 
 ```toml
 [ui.icons.spaces]
@@ -399,6 +403,13 @@ in the sections layout. It defaults to `false` and can also be changed under
 Settings → Sidebar → Show ask subtitles.
 
 Pin or unpin a tab from the CLI with `herdr tab pin <tab_id>` and `herdr tab unpin <tab_id>`. Park or unpark one with `herdr tab park <tab_id>` and `herdr tab unpark <tab_id>`. Parked tabs appear together in the dimmed `Inbox · new` section after Aloops until keyboard input reaches one of their panes. The Needs you rows appear above the Spaces view in both layouts. Up to five show initially; use `▸ N more` to show the rest and `▴ less` to fold them back.
+
+On Unix clients, set `wan = true` in a `[[remote.fleet.hosts]]` entry to keep read-only terminal
+streams open for panes in the active remote workspace and the ten most recently
+focused panes. It defaults to `false`: LAN hosts open pane streams only after a
+click. Recent terminal frames stay in a bounded memory cache, never on disk,
+and appear immediately when reopening a pane while its live stream connects.
+Pre-warming does not take a control lease or send input to the remote pane.
 
 Sidebar session rows show a machine glyph between the provider and age. The default glyphs identify `ub1` (tower), `ub2` (server), `mbpro` (code laptop), and `mbair` (laptop); other hosts show a monitor. With Nerd Font disabled, they become `1`, `2`, `P`, `A`, and `?`. Hover the glyph to see the host name. Set `icon` in a `[[remote.fleet.hosts]]` entry to override its Nerd Font glyph:
 

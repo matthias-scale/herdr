@@ -1965,6 +1965,9 @@ pub struct UiConfig {
     pub hide_whitespace_in_diff: bool,
     /// Render Nerd Font glyphs in the UI and file lists. Default: true.
     pub nerd_font: bool,
+    /// Use companion Herdr Icons subscript glyphs. Default: false. Enable only
+    /// after every displaying client has the updated font; otherwise labels stay plain.
+    pub subscript_glyphs: bool,
     /// Custom icon overrides for Space headers.
     pub icons: UiIconsConfig,
     /// Workspace preselected in the Home composer for a new thread.
@@ -2283,6 +2286,8 @@ pub struct FleetHostConfig {
     pub target: String,
     /// Read this machine's socket and run-state directory without SSH.
     pub local: bool,
+    /// Keep read-only pane streams warm on high-latency links. Default: false.
+    pub wan: bool,
     /// Optional Herdr socket override for this host.
     pub socket: Option<String>,
     /// Optional named Herdr session opened when this host is activated.
@@ -2514,6 +2519,7 @@ impl Default for UiConfig {
             combine_repos_across_hosts: false,
             hide_whitespace_in_diff: false,
             nerd_font: true,
+            subscript_glyphs: false,
             icons: UiIconsConfig::default(),
             new_thread_workspace: NewThreadWorkspaceConfig::CurrentCheckout,
             add_project_start_dir: String::new(),
@@ -3799,6 +3805,9 @@ scrollback_lines = 12345
     #[test]
     fn nerd_font_defaults_on_and_accepts_an_ascii_fallback() {
         assert!(Config::default().ui.nerd_font);
+        assert!(!Config::default().ui.subscript_glyphs);
+        let config: Config = toml::from_str("[ui]\nsubscript_glyphs = true\n").unwrap();
+        assert!(config.ui.subscript_glyphs);
         assert_eq!(Config::default().files.icons, FilesIconConfig::Nerd);
         let config: Config = toml::from_str("[ui]\nnerd_font = false\n").unwrap();
         assert!(!config.ui.nerd_font);
@@ -3874,5 +3883,19 @@ scrollback_lines = 12345
                 cache_read: 0.5,
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod fleet_wan_tests {
+    use super::FleetHostConfig;
+    #[test]
+    fn fleet_host_wan_is_optional_and_defaults_false() {
+        let default: FleetHostConfig =
+            toml::from_str("name = 'remote'\ntarget = 'remote'").expect("host");
+        assert!(!default.wan);
+        let wan: FleetHostConfig =
+            toml::from_str("name = 'remote'\ntarget = 'remote'\nwan = true").expect("WAN host");
+        assert!(wan.wan);
     }
 }

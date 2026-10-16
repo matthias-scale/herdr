@@ -1263,6 +1263,7 @@ impl App {
             sidebar_projection_revision: 0,
             workspace_picker_forces_spaces_tree: false,
             workspace_scroll: 0,
+            fleet_usage_scroll: 0,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
@@ -1436,6 +1437,7 @@ impl App {
             dock_files_roots_by_cwd: std::collections::HashMap::new(),
             files_icons: config.files.icons,
             nerd_font: config.ui.nerd_font,
+            subscript_glyphs: config.ui.subscript_glyphs,
             space_icons: config.ui.icons.spaces.clone(),
             dock_home_selection: None,
             dock_home_ticket_selection: None,
@@ -3340,6 +3342,7 @@ impl App {
         if !invalid_section("ui") {
             let nerd_font_changed = self.state.nerd_font != config.ui.nerd_font;
             self.state.nerd_font = config.ui.nerd_font;
+            self.state.subscript_glyphs = config.ui.subscript_glyphs;
             self.state.space_icons = config.ui.icons.spaces.clone();
             if nerd_font_changed {
                 self.refresh_remote_agent_panel_entries();

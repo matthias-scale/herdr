@@ -1575,6 +1575,7 @@ pub(crate) struct SidebarPresentationState {
     /// renders and scrolls itself instead of relying on the mutating path.
     pub(crate) revealed_workspace_id: Option<String>,
     pub(crate) workspace_scroll: usize,
+    pub(crate) fleet_usage_scroll: usize,
     pub(crate) mobile_switcher_scroll: usize,
     pub(crate) collapsed_groups: std::collections::HashSet<String>,
     /// Global projection revision last reconciled into this attach.
@@ -3680,6 +3681,8 @@ pub(crate) struct AgentPressState {
 
 pub(crate) struct RemoteAgentPressState {
     pub agent_ref: crate::api::schema::AgentRef,
+    pub start_col: u16,
+    pub start_row: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4883,6 +4886,7 @@ pub struct AppState {
     pub(crate) sidebar_projection_revision: u64,
     pub(crate) workspace_picker_forces_spaces_tree: bool,
     pub workspace_scroll: usize,
+    pub(crate) fleet_usage_scroll: usize,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
     pub mobile_switcher_scroll: usize,
@@ -5010,6 +5014,7 @@ pub struct AppState {
         std::collections::HashMap<std::path::PathBuf, std::path::PathBuf>,
     pub(crate) files_icons: crate::config::FilesIconConfig,
     pub(crate) nerd_font: bool,
+    pub(crate) subscript_glyphs: bool,
     pub(crate) space_icons: std::collections::BTreeMap<String, String>,
     /// Selection inside the dock home tab, swapped per client through
     /// `DockPresentationState`. A key, never an index.
@@ -5705,6 +5710,8 @@ pub(crate) enum ControlId {
     SidebarMore,
     SidebarFooter(SidebarFooterItem),
     SidebarHover(usize),
+    SidebarFleetRow(usize),
+    SidebarFleetToken(usize, usize),
     SidebarRowHover(u16),
     NotepadUsageRow(usize),
     NotepadUsageToggle,
@@ -5725,6 +5732,7 @@ pub(crate) enum ControlId {
     TopBarScrollRight,
     TopBarNewTab,
     TopBarTabPin(usize),
+    TopBarTabActivity(usize),
     TopBarRepoEditor,
     TopBarAddAction,
     TopBarUserAction(usize),
@@ -6645,6 +6653,7 @@ impl AppState {
             &mut other.revealed_workspace_id,
         );
         std::mem::swap(&mut self.workspace_scroll, &mut other.workspace_scroll);
+        std::mem::swap(&mut self.fleet_usage_scroll, &mut other.fleet_usage_scroll);
         std::mem::swap(
             &mut self.mobile_switcher_scroll,
             &mut other.mobile_switcher_scroll,
@@ -8411,6 +8420,7 @@ impl AppState {
             sidebar_projection_revision: 0,
             workspace_picker_forces_spaces_tree: false,
             workspace_scroll: 0,
+            fleet_usage_scroll: 0,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
@@ -8588,6 +8598,7 @@ impl AppState {
             dock_files_roots_by_cwd: std::collections::HashMap::new(),
             files_icons: crate::config::FilesIconConfig::Nerd,
             nerd_font: true,
+            subscript_glyphs: false,
             space_icons: std::collections::BTreeMap::new(),
             dock_home_selection: None,
             dock_home_ticket_selection: None,

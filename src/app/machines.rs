@@ -233,6 +233,7 @@ mod tests {
             icon: None,
             target: target.into(),
             local,
+            wan: false,
             socket: None,
             session: None,
         }

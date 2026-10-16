@@ -34,6 +34,7 @@ impl Reconnect {
 
 struct State {
     connected: bool,
+    binary_compatible: bool,
     reconnect: Reconnect,
     evidence: HashMap<String, super::HostEvidence>,
 }
@@ -45,6 +46,7 @@ pub(crate) struct HostChannel {
     program: OsString,
     directory: PathBuf,
     state: Mutex<State>,
+    binary_probe: Mutex<()>,
 }
 
 impl HostChannel {
@@ -74,8 +76,10 @@ impl HostChannel {
             target: target.into(),
             program,
             directory,
+            binary_probe: Mutex::new(()),
             state: Mutex::new(State {
                 connected: false,
+                binary_compatible: false,
                 reconnect: Reconnect::default(),
                 evidence: HashMap::new(),
             }),
@@ -123,6 +127,7 @@ impl HostChannel {
                 return Ok(());
             }
             state.connected = false;
+            state.binary_compatible = false;
             state.reconnect.failed(Instant::now());
             return Err("STATUS UNKNOWN: SSH master disconnected".into());
         }
@@ -131,6 +136,7 @@ impl HostChannel {
         match self.output(master, Vec::new(), deadline) {
             Ok(output) if output.status.success() => {
                 state.connected = true;
+                state.binary_compatible = false;
                 // Keep the outage start until a real request succeeds.
                 state.reconnect.retry_at = None;
                 Ok(())
@@ -152,8 +158,47 @@ impl HostChannel {
     pub(crate) fn command(&self, timeout: Duration) -> Result<Command, String> {
         self.ensure_connected(Instant::now() + timeout)?;
         let mut command = self.base_command(timeout);
-        command.args(["-o", "ProxyCommand=false"]).arg(&self.target);
+        command
+            .args(["-T", "-o", "RequestTTY=no", "-o", "ProxyCommand=false"])
+            .arg(&self.target);
         Ok(command)
+    }
+
+    /// A fleet inventory can seed this record. Otherwise only the first open
+    /// on a master pays for a binary probe; each new master invalidates it.
+    pub(crate) fn ensure_binary_compatible(&self, timeout: Duration) -> Result<(), String> {
+        self.probe_binary_once(timeout, || {
+            let bytes = self.run("herdr --version\n", timeout)?;
+            let text = String::from_utf8_lossy(&bytes);
+            if text.trim().strip_prefix("herdr ") == Some(crate::build_info::version().as_str()) {
+                Ok(())
+            } else {
+                Err("remote Herdr binary differs from the local build".into())
+            }
+        })
+    }
+
+    fn probe_binary_once(
+        &self,
+        timeout: Duration,
+        probe: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let _probe = self.binary_probe.lock().unwrap_or_else(|e| e.into_inner());
+        self.ensure_connected(Instant::now() + timeout)?;
+        if self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .binary_compatible
+        {
+            return Ok(());
+        }
+        probe()?;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.connected {
+            state.binary_compatible = true;
+        }
+        Ok(())
     }
 
     fn run(&self, script: &str, timeout: Duration) -> Result<Vec<u8>, String> {
@@ -174,6 +219,7 @@ impl HostChannel {
                 };
                 if transport_failed && state.connected {
                     state.connected = false;
+                    state.binary_compatible = false;
                     state.reconnect.failed(Instant::now());
                 }
                 Err(match result {
@@ -252,6 +298,12 @@ pub(super) fn retain_during_reconnect(evidence: super::HostEvidence) -> super::H
 fn retain(state: &mut State, evidence: super::HostEvidence, now: Instant) -> super::HostEvidence {
     let key = format!("{:?}", evidence.host);
     if evidence.agents.is_ok() {
+        if state.connected
+            && evidence.runtime.version.as_deref() == Some(crate::build_info::version().as_str())
+            && evidence.runtime.protocol == Some(crate::protocol::PROTOCOL_VERSION)
+        {
+            state.binary_compatible = true;
+        }
         state.evidence.insert(key, evidence.clone());
     } else if state.reconnect.disconnected_at.is_some() && !state.reconnect.stale(now) {
         return state.evidence.get(&key).cloned().unwrap_or(evidence);
@@ -303,6 +355,7 @@ mod tests {
         };
         let mut state = State {
             connected: true,
+            binary_compatible: false,
             reconnect: Reconnect::default(),
             evidence: HashMap::new(),
         };
@@ -320,6 +373,103 @@ mod tests {
         assert!(retain(&mut state, failed, now + Duration::from_secs(3))
             .agents
             .is_err());
+    }
+
+    #[test]
+    fn binary_probe_once_for_two_opens_and_again_after_master_reconnect() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = PathBuf::from("/tmp").join(format!(
+            "hc-binary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        crate::platform::create_remote_private_dir(&root).expect("fixture");
+        let program = root.join("ssh");
+        std::fs::write(&program, r#"#!/bin/sh
+socket=''
+operation=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -S) socket="$2"; shift 2 ;;
+    -O) operation="$2"; shift 2 ;;
+    -o) shift 2 ;;
+    -fN) operation=start; shift ;;
+    *) shift ;;
+  esac
+done
+case "$operation" in
+  start) touch "$socket" ;;
+  exit) rm -f "$socket" ;;
+  *) test -f "$socket" || exit 255; cat >/dev/null; echo probe >> "${socket}.probes"; echo 'herdr VERSION' ;;
+esac
+"#.replace("VERSION", &crate::build_info::version())).expect("fake ssh");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+            .expect("executable");
+        let channel = HostChannel::new("remote", program.into(), &root).expect("channel");
+        let timeout = Duration::from_secs(2);
+        channel
+            .ensure_binary_compatible(timeout)
+            .expect("first open");
+        channel
+            .ensure_binary_compatible(timeout)
+            .expect("second open");
+        let probes = channel.directory.join("control.probes");
+        assert_eq!(
+            std::fs::read_to_string(&probes)
+                .expect("probes")
+                .lines()
+                .count(),
+            1
+        );
+        // A successful fleet read on this master seeds the same record.
+        channel.state.lock().expect("state").binary_compatible = false;
+        let evidence = super::super::HostEvidence {
+            host: super::super::FleetHostConfig {
+                name: "remote".into(),
+                target: "remote".into(),
+                ..Default::default()
+            },
+            agents: Ok(Vec::new()),
+            groups: None,
+            runs: Vec::new(),
+            sessions: None,
+            aloop: None,
+            inbox: None,
+            runtime: super::super::HostRuntime {
+                version: Some(crate::build_info::version()),
+                protocol: Some(crate::protocol::PROTOCOL_VERSION),
+                session_events: false,
+            },
+        };
+        retain(
+            &mut channel.state.lock().expect("state"),
+            evidence,
+            Instant::now(),
+        );
+        channel
+            .probe_binary_once(timeout, || {
+                Err("cached inventory must skip the probe".into())
+            })
+            .expect("inventory record");
+        std::fs::remove_file(channel.directory.join("control")).expect("master disconnect");
+        assert!(channel.ensure_binary_compatible(timeout).is_err());
+        assert!(!channel.state.lock().expect("state").binary_compatible);
+        channel.state.lock().expect("state").reconnect.retry_at = None;
+        channel
+            .ensure_binary_compatible(timeout)
+            .expect("reconnected open");
+        assert_eq!(
+            std::fs::read_to_string(&probes)
+                .expect("probes")
+                .lines()
+                .count(),
+            2
+        );
+        drop(channel);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

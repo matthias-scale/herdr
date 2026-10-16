@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-# HERDR_INTEGRATION_VERSION=7
+# HERDR_INTEGRATION_VERSION=8
 try:
     from closing_block_record import extract as extract_record, validate as validate_record
 except ImportError:  # standalone tooling can display prose but cannot trust it for state
@@ -273,6 +273,7 @@ class ClosingBlock:
     record_errors: list[str] = field(default_factory=list)
     record_state: str | None = None
     record_completion: str | None = None
+    now_waiting_on_you: bool = False
 
     @property
     def gates(self) -> list[Item]:
@@ -330,6 +331,8 @@ class ClosingBlock:
     def herdr_state(self) -> str:
         if self.source == "record" and self.record_state:
             return self.record_state
+        if (self.source != "record" or self.record_errors) and self.now_waiting_on_you:
+            return "blocked"
         return "unknown"
 
     def message(self) -> str | None:
@@ -897,6 +900,13 @@ def parse(text: str) -> ClosingBlock:
         (marker.start() for marker in (agents, external_wait) if marker), default=-1
     )
     now_is_latest = bool(last_now and last_now.start() > latest_legacy_position)
+    block.now_waiting_on_you = bool(
+        now_is_latest
+        and last_now
+        and re.fullmatch(
+            r"waiting[ \t]+on[ \t]+you\.?", last_now.group("rest").strip(), re.I
+        )
+    )
     latest_activity_position = max(
         latest_legacy_position, last_now.start() if last_now else -1
     )

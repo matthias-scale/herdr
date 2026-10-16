@@ -255,6 +255,15 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
         .into_iter()
         .find_map(|(control, rect)| rect_contains(rect, col, row).then_some(control))
         .or_else(|| {
+            let index = super::sidebar::fleet_panels::row_at(app, col, row)?;
+            Some(
+                super::sidebar::fleet_panels::token_at(app, index, col)
+                    .map_or(ControlId::SidebarFleetRow(index), |token| {
+                        ControlId::SidebarFleetToken(index, token)
+                    }),
+            )
+        })
+        .or_else(|| {
             view.tab_hit_areas
                 .iter()
                 .enumerate()
@@ -262,6 +271,15 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
                     (rect.width > 1 && col == rect.x && row >= rect.y && row < rect.bottom())
                         .then_some(ControlId::TopBarTabPin(index))
                 })
+        })
+        .or_else(|| {
+            let active = app
+                .active
+                .and_then(|ws| app.workspaces.get(ws))
+                .map(|ws| ws.active_tab)?;
+            let rect = view.tab_hit_areas.get(active)?;
+            (super::tabs::tab_activity_column(app, active, *rect) == Some(col) && row == rect.y)
+                .then_some(ControlId::TopBarTabActivity(active))
         })
         .or_else(|| {
             view.status_buttons
@@ -313,7 +331,7 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
         })
 }
 
-fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> {
+pub(crate) fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> {
     let view = &app.view;
     let target = match control {
         ControlId::FocusBoardNewCard
@@ -475,6 +493,22 @@ fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> 
         ControlId::SidebarHover(index) => {
             let target = view.sidebar_hover_targets.get(index)?;
             (target.rect, target.label.clone())
+        }
+        ControlId::SidebarFleetRow(index) => super::sidebar::fleet_panels::row_target(app, index)?,
+        ControlId::SidebarFleetToken(row, token) => {
+            super::sidebar::fleet_panels::token_target(app, row, token)?
+        }
+        ControlId::TopBarTabActivity(index) => {
+            let tab = view.tab_hit_areas.get(index)?;
+            (
+                Rect::new(
+                    super::tabs::tab_activity_column(app, index, *tab)?,
+                    tab.y,
+                    1,
+                    1,
+                ),
+                super::tabs::tab_activity_tooltip(app, index),
+            )
         }
         ControlId::SidebarRowHover(_) => return None,
         ControlId::DockClose => (view.dock_tab_close_rect, "Close tab".into()),

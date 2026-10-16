@@ -4200,7 +4200,13 @@ mod tests {
         let auto_rect = app.view.tab_hit_areas[0];
         let custom_rect = app.view.tab_hit_areas[1];
         let auto_style = buffer[(auto_rect.x + 1, auto_rect.y)].style();
-        let custom_style = buffer[(custom_rect.x + 1, custom_rect.y)].style();
+        let custom_label_x = (custom_rect.x + 1..custom_rect.right())
+            .find(|x| {
+                let symbol = buffer[(*x, custom_rect.y)].symbol();
+                !symbol.trim().is_empty() && symbol != "●" && symbol != "○" && symbol != "·"
+            })
+            .unwrap();
+        let custom_style = buffer[(custom_label_x, custom_rect.y)].style();
 
         assert_eq!(auto_style.fg, Some(app.palette.overlay0));
         assert!(auto_style.add_modifier.contains(Modifier::DIM));
@@ -4229,7 +4235,13 @@ mod tests {
         let buffer = terminal.backend().buffer();
 
         let custom_rect = app.view.tab_hit_areas[1];
-        let custom_style = buffer[(custom_rect.x + 1, custom_rect.y)].style();
+        let custom_label_x = (custom_rect.x + 1..custom_rect.right())
+            .find(|x| {
+                let symbol = buffer[(*x, custom_rect.y)].symbol();
+                !symbol.trim().is_empty() && symbol != "●" && symbol != "○" && symbol != "·"
+            })
+            .unwrap();
+        let custom_style = buffer[(custom_label_x, custom_rect.y)].style();
 
         assert_eq!(custom_style.bg, Some(app.palette.accent));
         assert_eq!(custom_style.fg, Some(app.palette.surface_dim));
