@@ -1,5 +1,7 @@
 # herdr
 
+For account/model picker UI work, follow the [approved visual reference](docs/ui-reference/account-model-picker.png).
+
 Terminal based agent runtime for coding agents.
 
 ## Scope and Audience

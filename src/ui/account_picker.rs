@@ -37,7 +37,7 @@ pub(crate) fn geometry(home: &HomeState, area: Rect, anchor: Rect) -> PickerGeom
         .account_picker
         .rows
         .iter()
-        .map(|row| row.label.chars().count() as u16 + 12)
+        .map(|row| row.label.chars().count() as u16 + 20)
         .max()
         .unwrap_or(24)
         .clamp(24, 36);
@@ -404,13 +404,14 @@ fn compact_quota(usage: Option<&crate::provider_usage::AccountUsage>, unavailabl
         if usage.stale {
             status.push('◷');
         }
-        match usage.peak_percent() {
-            Some(used) => {
-                if used >= 100 {
-                    status.push('■');
-                }
-                status.push_str(&format!("{}%", 100u8.saturating_sub(used)));
-            }
+        if usage.peak_percent().is_some_and(|used| used >= 100) {
+            status.push('■');
+        }
+        match usage.seven_day {
+            Some(window) => status.push_str(&format!(
+                "week · 7d {}%",
+                100u8.saturating_sub(window.used_percent)
+            )),
             None => status.push('?'),
         }
     } else {
@@ -582,7 +583,7 @@ mod tests {
                     profile_id: id.into(),
                     label: "team".into(),
                     usage: AccountUsage {
-                        five_hour: Some(QuotaWindow {
+                        seven_day: Some(QuotaWindow {
                             used_percent: used,
                             resets_at: None,
                         }),
@@ -612,7 +613,14 @@ mod tests {
             }
             .expect("provider token");
             assert!(rail.contains(icon));
-            for label in ["inherited", "team (one)", "team (two)", "59%", "27%", "⊘"] {
+            for label in [
+                "inherited",
+                "team (one)",
+                "team (two)",
+                "week · 7d 59%",
+                "week · 7d 27%",
+                "⊘",
+            ] {
                 assert!(rail.contains(label), "{label}: {rail:?}");
             }
             assert!(
@@ -630,21 +638,40 @@ mod tests {
         assert_eq!(compact_quota(None, false), "?");
         assert_eq!(compact_quota(Some(&usage), true), "⊘?");
         usage.five_hour = Some(QuotaWindow {
-            used_percent: 41,
+            used_percent: 91,
             resets_at: None,
         });
-        assert_eq!(compact_quota(Some(&usage), false), "59%");
-        assert_eq!(compact_quota(Some(&usage), true), "⊘59%");
+        assert_eq!(compact_quota(Some(&usage), false), "?");
+        usage.seven_day = Some(QuotaWindow {
+            used_percent: 64,
+            resets_at: None,
+        });
+        for session_used in [0, 41, 91] {
+            usage.five_hour.as_mut().expect("session").used_percent = session_used;
+            assert_eq!(compact_quota(Some(&usage), false), "week · 7d 36%");
+        }
+        assert_eq!(compact_quota(Some(&usage), true), "⊘week · 7d 36%");
         usage.stale = true;
-        assert_eq!(compact_quota(Some(&usage), false), "◷59%");
+        assert_eq!(compact_quota(Some(&usage), false), "◷week · 7d 36%");
         usage.unavailable = Some(UsageUnavailable::AuthExpired);
-        assert_eq!(compact_quota(Some(&usage), false), "!◷59%");
+        assert_eq!(compact_quota(Some(&usage), false), "!◷week · 7d 36%");
         usage.stale = false;
         usage.unavailable = None;
-        usage.five_hour.as_mut().expect("window").used_percent = 100;
-        assert_eq!(compact_quota(Some(&usage), false), "■0%");
+        usage.five_hour.as_mut().expect("session").used_percent = 100;
+        assert_eq!(compact_quota(Some(&usage), false), "■week · 7d 36%");
         usage.unavailable = Some(UsageUnavailable::HelperMissing);
-        assert_eq!(compact_quota(Some(&usage), false), "⊘■0%");
+        assert_eq!(compact_quota(Some(&usage), false), "⊘■week · 7d 36%");
+        usage.seven_day = None;
+        assert_eq!(compact_quota(Some(&usage), false), "⊘■?");
+        usage.unavailable = Some(UsageUnavailable::AuthExpired);
+        assert_eq!(compact_quota(Some(&usage), false), "!■?");
+        usage.unavailable = None;
+        usage.five_hour = None;
+        usage.seven_day = Some(QuotaWindow {
+            used_percent: 100,
+            resets_at: None,
+        });
+        assert_eq!(compact_quota(Some(&usage), false), "■week · 7d 0%");
     }
 
     #[test]
