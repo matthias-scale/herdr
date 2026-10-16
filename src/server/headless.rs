@@ -6792,6 +6792,7 @@ impl HeadlessServer {
         if client.graphics_surface_reset_pending {
             retained_fallback!("graphics_surface_reset");
         }
+        let graphics_workspace = client.graphics_workspace_index(&self.app.state);
         if self.app.state.kitty_graphics_enabled
             && cell_size.is_known()
             && crate::kitty_graphics::has_visible_pane_graphics(
@@ -6802,6 +6803,7 @@ impl HeadlessServer {
                     pane_infos: client.retained_pane_infos.as_slice(),
                     split_borders: &[],
                 },
+                graphics_workspace,
                 cell_size,
             )
         {
@@ -7016,6 +7018,13 @@ impl HeadlessServer {
         for (client_id, (cols, rows), cell_size, is_foreground, mode) in render_targets {
             let area = Rect::new(0, 0, cols, rows);
             let is_app_client = matches!(mode, ClientConnectionMode::App);
+            let graphics_workspace = is_app_client
+                .then(|| {
+                    self.clients
+                        .get(&client_id)
+                        .and_then(|client| client.graphics_workspace_index(&self.app.state))
+                })
+                .flatten();
             let mut frame = match mode {
                 ClientConnectionMode::App => {
                     let focus_initialized = self.clients[&client_id].focus_initialized;
@@ -7298,10 +7307,11 @@ impl HeadlessServer {
             let client_presentation_policy = is_app_client
                 .then(|| {
                     self.clients.get(&client_id).map(|client| {
-                        client.presentation_policy_with_pomodoro(
+                        client.presentation_policy_with_pomodoro_and_graphics_workspace(
                             &self.app.state,
                             pomodoro_presentation
                                 .is_some_and(crate::ui::pomodoro::InputPresentation::owns_input),
+                            graphics_workspace,
                         )
                     })
                 })

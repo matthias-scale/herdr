@@ -315,6 +315,37 @@ impl ClientConnection {
         app_state: &crate::app::state::AppState,
         pomodoro_owns_input: bool,
     ) -> crate::app::state::ClientPresentationPolicy<'static> {
+        self.presentation_policy_with_pomodoro_and_graphics_workspace(
+            app_state,
+            pomodoro_owns_input,
+            self.graphics_workspace_index(app_state),
+        )
+    }
+
+    pub(crate) fn graphics_workspace_index(
+        &self,
+        app_state: &crate::app::state::AppState,
+    ) -> Option<usize> {
+        if !self.focus_initialized {
+            return app_state.active;
+        }
+        match self.active_workspace_id.as_deref() {
+            Some(workspace_id) => app_state
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == workspace_id),
+            None => self
+                .active_workspace
+                .filter(|index| app_state.workspaces.get(*index).is_some()),
+        }
+    }
+
+    pub(crate) fn presentation_policy_with_pomodoro_and_graphics_workspace(
+        &self,
+        app_state: &crate::app::state::AppState,
+        pomodoro_owns_input: bool,
+        graphics_workspace: Option<usize>,
+    ) -> crate::app::state::ClientPresentationPolicy<'static> {
         let dock = &self.dock_presentation;
         let preview_is_in_dock =
             !dock.collapsed && dock.tab == Some(crate::app::DockSurface::Editor);
@@ -337,6 +368,7 @@ impl ClientConnection {
             &self.dock_presentation,
             pomodoro_owns_input,
             !tab_surface_replaced,
+            graphics_workspace,
             std::sync::Arc::clone(&self.retained_pane_infos),
         )
     }
@@ -495,7 +527,37 @@ pub(crate) fn render_targets(
 
 #[cfg(test)]
 mod focus_tests {
-    use super::aggregate_outer_focus;
+    use super::{aggregate_outer_focus, ClientConnection};
+
+    #[test]
+    fn graphics_workspace_resolution_does_not_fall_back_from_a_stale_identity() {
+        let mut state = crate::app::state::AppState::test_new();
+        state.workspaces = vec![
+            crate::workspace::Workspace::test_new("global-workspace"),
+            crate::workspace::Workspace::test_new("client-workspace"),
+        ];
+        state.active = Some(0);
+        let mut client = ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            0,
+            crate::protocol::RenderEncoding::SemanticFrame,
+            None,
+        );
+        client.focus_initialized = true;
+        client.active_workspace = Some(0);
+        client.active_workspace_id = Some("deleted-workspace".into());
+        assert_eq!(client.graphics_workspace_index(&state), None);
+
+        client.active_workspace_id = Some(state.workspaces[1].id.clone());
+        assert_eq!(client.graphics_workspace_index(&state), Some(1));
+
+        client.active_workspace_id = None;
+        client.active_workspace = Some(1);
+        assert_eq!(client.graphics_workspace_index(&state), Some(1));
+    }
 
     #[test]
     fn f2_focus_aggregation_accepts_any_focused_or_unknown_client() {
