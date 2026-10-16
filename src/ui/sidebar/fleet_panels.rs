@@ -897,11 +897,20 @@ fn row_count(app: &AppState, width: u16) -> usize {
             identities.insert(account_key(&app.agent_host_name, account));
         }
     }
+    let notices = notice_count(app);
+    let usage_extra = if app.collapsed_sidebar_groups.contains(USAGE_KEY) {
+        labels::plan(app, width).last().map_or(0, |entry| entry.row)
+    } else {
+        identities.len().max(1)
+    };
+    2 + notices + usage_extra + resource_extra(app, width)
+}
+
+fn notice_count(app: &AppState) -> usize {
     let now = app
         .status_now_unix
         .unwrap_or(app.view_observed_unix_s as i64);
-    let notices = app
-        .fleet_snapshot
+    app.fleet_snapshot
         .observations
         .iter()
         .filter(|observation| {
@@ -920,13 +929,7 @@ fn row_count(app: &AppState, width: u16) -> usize {
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
         })
-        .sum::<usize>();
-    let usage_extra = if app.collapsed_sidebar_groups.contains(USAGE_KEY) {
-        labels::plan(app, width).last().map_or(0, |entry| entry.row)
-    } else {
-        identities.len().max(1)
-    };
-    2 + notices + usage_extra + resource_extra(app, width)
+        .sum()
 }
 
 fn resource_extra(app: &AppState, width: u16) -> usize {
@@ -955,7 +958,11 @@ pub(crate) fn resources_visible(app: &AppState, sidebar: Rect) -> bool {
         return false;
     }
     let panel = area(app, sidebar);
-    usize::from(panel.height) >= 2 + resource_extra(app, panel.width)
+    // In overflow mode the resource rows can be reached by scrolling, but
+    // are not kept on screen; retain the top metric dots as a visible fallback.
+    let height = usize::from(panel.height);
+    let pinned = 2 + notice_count(app) + resource_extra(app, panel.width);
+    height > pinned || (height == pinned && row_count(app, panel.width) == pinned)
 }
 
 fn visible_rows(app: &AppState, width: u16, height: u16) -> Vec<Row> {
@@ -969,23 +976,10 @@ fn visible_rows(app: &AppState, width: u16, height: u16) -> Vec<Row> {
     }
     let pinned = all.iter().filter(|row| row.pinned).count();
     if pinned >= height {
-        // Very small terminals cannot hold every section. Keep the fleet
-        // header and the trailing resource rows rather than hiding resources
-        // behind account rows.
-        let mut fixed = all.into_iter().filter(|row| row.pinned).collect::<Vec<_>>();
-        let first = fixed.remove(0);
-        let tail = height.saturating_sub(1);
-        return std::iter::once(first)
-            .chain(
-                fixed
-                    .into_iter()
-                    .rev()
-                    .take(tail)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev(),
-            )
-            .collect();
+        // Even a one-row panel must allow every section control, account,
+        // notice and machine row to be reached in its original order.
+        let scroll = app.fleet_usage_scroll.min(all.len() - height);
+        return all.into_iter().skip(scroll).take(height).collect();
     }
     let account_slots = height - pinned;
     let account_count = all.len() - pinned;
@@ -1018,9 +1012,14 @@ pub(crate) fn scroll(app: &mut AppState, col: u16, row: u16, delta: i8) -> bool 
     let area = area(app, app.view.sidebar_rect);
     let all = rows(app, area.width);
     let pinned = all.iter().filter(|item| item.pinned).count();
-    let account_slots = usize::from(area.height).saturating_sub(pinned);
-    let account_count = all.len().saturating_sub(pinned);
-    let max_scroll = account_count.saturating_sub(account_slots);
+    let height = usize::from(area.height);
+    let max_scroll = if pinned >= height {
+        all.len().saturating_sub(height)
+    } else {
+        let account_slots = height - pinned;
+        let account_count = all.len() - pinned;
+        account_count.saturating_sub(account_slots)
+    };
     app.fleet_usage_scroll = if delta < 0 {
         app.fleet_usage_scroll.saturating_sub(1)
     } else {
@@ -1786,6 +1785,97 @@ mod tests {
         assert_eq!(
             crate::ui::tooltip::tooltip_target(&app, control).unwrap().1,
             tip
+        );
+    }
+
+    #[test]
+    fn overflow_scroll_reaches_every_notice_resource_and_section_at_tiny_heights() {
+        let now = 1_000_000;
+        let mut app = AppState::test_new();
+        app.status_now_unix = Some(now);
+        for index in 0..5 {
+            let name = format!("ub{index}");
+            app.fleet_snapshot
+                .hosts
+                .push(host(&name, HostState::Reachable));
+            let mut expired = usage(95, now);
+            expired.unavailable = Some(UsageUnavailable::AuthExpired);
+            app.fleet_snapshot.observations.push(observation(
+                &name,
+                now,
+                vec![account(
+                    QuotaProvider::Claude,
+                    &format!("profile{index}"),
+                    expired,
+                )],
+            ));
+        }
+        let all = rows(&app, 80);
+        assert_eq!(all.iter().filter(|row| row.pinned).count(), 12);
+        for height in [1_u16, 2] {
+            let mut reached = std::collections::BTreeSet::new();
+            for offset in 0..all.len() {
+                app.fleet_usage_scroll = offset;
+                for row in visible_rows(&app, 80, height) {
+                    reached.insert(row.tooltip);
+                }
+            }
+            assert_eq!(reached.len(), all.len(), "height {height} hid a row");
+        }
+
+        // Exercise the actual panel wheel and tooltip path at a short height.
+        app.view.sidebar_rect = (1..40)
+            .map(|height| Rect::new(0, 0, 80, height))
+            .find(|rect| area(&app, *rect).height == 3)
+            .expect("a three-row panel geometry");
+        let panel = area(&app, app.view.sidebar_rect);
+        assert!(!resources_visible(&app, app.view.sidebar_rect));
+        app.fleet_usage_scroll = 0;
+        let mut reached = std::collections::BTreeSet::new();
+        for _ in 0..all.len() {
+            for (index, row) in visible_rows(&app, panel.width, panel.height)
+                .iter()
+                .enumerate()
+            {
+                reached.insert(row.tooltip.clone());
+                let (hit, tip) = row_target(&app, index).unwrap();
+                assert_eq!(tip, row.tooltip);
+                assert_eq!(hit.y, panel.y + index as u16);
+                let control = crate::ui::tooltip::hovered_control_at(&app, hit.x, hit.y).unwrap();
+                assert_eq!(
+                    control,
+                    crate::app::state::ControlId::SidebarFleetRow(index)
+                );
+                assert_eq!(
+                    crate::ui::tooltip::tooltip_target(&app, control).unwrap().1,
+                    tip
+                );
+            }
+            assert!(scroll(&mut app, panel.x, panel.y, 1));
+        }
+        assert_eq!(reached.len(), all.len());
+        assert_eq!(
+            reached
+                .iter()
+                .filter(|tip| tip.contains("Login required"))
+                .count(),
+            5
+        );
+        assert_eq!(reached.iter().filter(|tip| tip.contains("CPU:")).count(), 5);
+        assert!(reached.iter().any(|tip| tip.contains("Fleet usage")));
+        assert!(reached.iter().any(|tip| tip.contains("Fleet resources")));
+        app.fleet_usage_scroll = all
+            .iter()
+            .position(|row| row.section == Some(Section::Resources))
+            .unwrap();
+        assert_eq!(
+            visible_rows(&app, panel.width, panel.height)[0].section,
+            Some(Section::Resources)
+        );
+        assert!(toggle(&mut app, 0));
+        assert_eq!(
+            app.sidebar_group_collapsed_persistence_request,
+            Some((RESOURCES_KEY.into(), true))
         );
     }
 
