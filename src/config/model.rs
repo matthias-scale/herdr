@@ -3890,6 +3890,31 @@ scrollback_lines = 12345
 mod fleet_wan_tests {
     use super::FleetHostConfig;
     #[test]
+    fn fleet_tailscale_docs_example_parses() {
+        let docs = include_str!("../../docs/next/website/src/content/docs/persistence-remote.mdx");
+        let example = docs
+            .split_once("{/* fleet-tailscale-example */}")
+            .expect("fleet example marker")
+            .1
+            .split_once("```toml\n")
+            .expect("TOML fence")
+            .1
+            .split_once("\n```")
+            .expect("closing fence")
+            .0;
+        let config: super::Config = toml::from_str(example).expect("documented fleet config");
+        let fleet = config.remote.fleet;
+        assert_eq!(fleet.self_name.as_deref(), Some("laptop"));
+        assert_eq!(fleet.refresh_interval_ms, 5000);
+        assert_eq!(fleet.hosts.len(), 1);
+        let host = &fleet.hosts[0];
+        assert_eq!(host.name, "workbox");
+        assert_eq!(host.target, "workbox.tailnet.ts.net");
+        assert_eq!(host.session.as_deref(), Some("agents"));
+        assert!(host.wan);
+    }
+
+    #[test]
     fn fleet_host_wan_is_optional_and_defaults_false() {
         let default: FleetHostConfig =
             toml::from_str("name = 'remote'\ntarget = 'remote'").expect("host");
