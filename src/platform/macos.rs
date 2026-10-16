@@ -829,7 +829,23 @@ pub fn descendant_processes(root_pid: u32) -> Vec<ForegroundProcess> {
     )
 }
 
+pub(crate) fn process_tree_state(root_pid: u32) -> super::ProcessTreeState {
+    if root_pid == 0 || process_bsdinfo(root_pid).is_none() {
+        return super::ProcessTreeState::Unknown;
+    }
+
+    match try_listed_pids(PROC_PPID_ONLY, root_pid) {
+        Ok(children) if children.is_empty() => super::ProcessTreeState::IdleShellOnly,
+        Ok(_) => super::ProcessTreeState::HasChildren,
+        Err(()) => super::ProcessTreeState::Unknown,
+    }
+}
+
 fn listed_pids(kind: u32, value: u32) -> Vec<u32> {
+    try_listed_pids(kind, value).unwrap_or_default()
+}
+
+fn try_listed_pids(kind: u32, value: u32) -> Result<Vec<u32>, ()> {
     const MAX_FOREGROUND_PROCESSES: usize = 64;
     let mut capacity = 16usize;
 
@@ -838,6 +854,8 @@ fn listed_pids(kind: u32, value: u32) -> Vec<u32> {
         let mut pids = vec![0 as libc::pid_t; capacity];
         let buffer_bytes = pids.len() * std::mem::size_of::<libc::pid_t>();
         let returned_bytes = unsafe {
+            // `proc_listpids` reports an error as zero, so clear and inspect errno.
+            *libc::__error() = 0;
             libc::proc_listpids(
                 kind,
                 value,
@@ -845,25 +863,32 @@ fn listed_pids(kind: u32, value: u32) -> Vec<u32> {
                 buffer_bytes as libc::c_int,
             )
         };
-        if returned_bytes <= 0 {
-            return Vec::new();
+        let errno = unsafe { *libc::__error() };
+        if returned_bytes < 0 {
+            return Err(());
+        }
+        if returned_bytes == 0 {
+            return if errno == 0 { Ok(Vec::new()) } else { Err(()) };
         }
 
         let returned_bytes = returned_bytes as usize;
+        if returned_bytes % std::mem::size_of::<libc::pid_t>() != 0 {
+            return Err(());
+        }
         let count = returned_bytes / std::mem::size_of::<libc::pid_t>();
         if returned_bytes < buffer_bytes {
             if count > MAX_FOREGROUND_PROCESSES {
-                return Vec::new();
+                return Err(());
             }
-            return collect_positive_pids(pids, count);
+            return Ok(collect_positive_pids(pids, count));
         }
         if capacity == MAX_FOREGROUND_PROCESSES + 1 {
-            return Vec::new();
+            return Err(());
         }
         capacity = capacity.saturating_mul(2).min(MAX_FOREGROUND_PROCESSES + 1);
     }
 
-    Vec::new()
+    Err(())
 }
 
 /// Read `e_tpgid` (foreground process group of the controlling terminal)
