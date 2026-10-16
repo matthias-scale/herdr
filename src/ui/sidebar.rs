@@ -165,6 +165,7 @@ pub(crate) fn entry_attention_tier(entry: &AgentPanelEntry) -> AttentionTier {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn entry_attention_rank(entry: &AgentPanelEntry) -> u8 {
     if !entry_is_blocked(entry) {
         return if entry_attention_tier(entry) == AttentionTier::Attention {
