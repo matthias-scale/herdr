@@ -33,6 +33,7 @@ impl RetryBackoff {
 
 /// Read-only streams are opt-in, scoped to the active remote workspace and
 /// the ten most recently focused panes. Inventory excludes removed panes.
+#[cfg(any(unix, test))]
 pub(crate) fn prewarm_selection<'a>(
     hosts: impl Iterator<Item = &'a FleetHostConfig>,
     inventory: &[crate::api::schema::AgentRef],

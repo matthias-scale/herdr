@@ -400,7 +400,7 @@ Settings → Sidebar → Show ask subtitles.
 
 Pin or unpin a tab from the CLI with `herdr tab pin <tab_id>` and `herdr tab unpin <tab_id>`. Park or unpark one with `herdr tab park <tab_id>` and `herdr tab unpark <tab_id>`. Parked tabs appear together in the dimmed `Inbox · new` section after Aloops until keyboard input reaches one of their panes. The Needs you rows appear above the Spaces view in both layouts. Up to five show initially; use `▸ N more` to show the rest and `▴ less` to fold them back.
 
-Set `wan = true` in a `[[remote.fleet.hosts]]` entry to keep read-only terminal
+On Unix clients, set `wan = true` in a `[[remote.fleet.hosts]]` entry to keep read-only terminal
 streams open for panes in the active remote workspace and the ten most recently
 focused panes. It defaults to `false`: LAN hosts open pane streams only after a
 click. Recent terminal frames stay in a bounded memory cache, never on disk,
