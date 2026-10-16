@@ -47,20 +47,14 @@ def _read_rows(transcript_path: str) -> tuple[list[dict], bool]:
     complete = True
     try:
         with open(transcript_path, encoding="utf-8") as fh:
-            lines = fh.readlines()
-            for index, line in enumerate(lines):
+            for line in fh:
                 if not line.strip():
                     continue
                 try:
                     row = json.loads(line)
-                except (ValueError, UnicodeDecodeError):
-                    # Only a torn final non-tool row is safe to ignore. A bad
-                    # middle row or possible tool row could hide live work.
-                    tool_row = '"type"' in line and (
-                        '"tool_use"' in line or '"tool_result"' in line
-                    )
-                    if index == len(lines) - 1 and not tool_row:
-                        continue
+                except ValueError:
+                    # Keep parsed rows (a torn trailing line mid-flush must not
+                    # discard the file), but a bad row is not evidence of idle.
                     complete = False
                     continue
                 if not isinstance(row, dict):
