@@ -61,23 +61,29 @@ fn active_session_machine_suffix(app: &AppState) -> Option<String> {
 
 /// The tab's existing lifecycle aggregation is the authority for its small
 /// activity mark. Unknown panes stay gray, including before detection.
-fn tab_activity(tab: &crate::workspace::Tab, app: &AppState) -> (char, ratatui::style::Color) {
+fn tab_activity(
+    tab: &crate::workspace::Tab,
+    app: &AppState,
+) -> (&'static str, ratatui::style::Color) {
     let (state, seen, attention) = tab.aggregate_state_and_attention(&app.terminals);
-    let p = &app.palette;
-    match (state, seen) {
-        (crate::detect::AgentState::Blocked, _) => ('●', p.red),
-        (crate::detect::AgentState::Idle, false) => ('●', p.green),
-        (crate::detect::AgentState::Working, _) => (
-            '●',
-            if attention == crate::terminal::state::AttentionTier::None {
-                p.blue
-            } else {
-                p.red
-            },
-        ),
-        (crate::detect::AgentState::Idle, true) => ('○', p.overlay0),
-        (crate::detect::AgentState::Unknown, _) => ('○', p.overlay0),
-    }
+    tab_activity_style(state, seen, attention, app)
+}
+
+fn tab_activity_style(
+    state: crate::detect::AgentState,
+    seen: bool,
+    attention: crate::terminal::state::AttentionTier,
+    app: &AppState,
+) -> (&'static str, Color) {
+    let glyph = super::status::state_icon_symbol(state, seen, app.status_indicators);
+    let color = if state == crate::detect::AgentState::Working
+        && attention != crate::terminal::state::AttentionTier::None
+    {
+        app.palette.red
+    } else {
+        super::status::state_label_color(state, seen, &app.palette)
+    };
+    (glyph, color)
 }
 
 pub(crate) fn tab_activity_tooltip(app: &AppState, index: usize) -> String {
@@ -1416,7 +1422,7 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
             .into_iter()
             .find(|bg| contrast_ratio(color, *bg).is_some_and(|ratio| ratio >= 4.5))
             .unwrap_or(p.surface0);
-            frame.buffer_mut()[(x, rect.y)].set_symbol(if glyph == '●' { "●" } else { "○" });
+            frame.buffer_mut()[(x, rect.y)].set_symbol(glyph);
             frame.buffer_mut()[(x, rect.y)].set_fg(color);
             frame.buffer_mut()[(x, rect.y)].set_bg(marker_bg);
         }
@@ -1513,6 +1519,25 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn activity_preserves_unknown_seen_idle_done_and_indicator_preference() {
+        use crate::{detect::AgentState, terminal::state::AttentionTier};
+        let mut app = AppState::test_new();
+        let unknown = tab_activity_style(AgentState::Unknown, true, AttentionTier::None, &app);
+        let idle = tab_activity_style(AgentState::Idle, true, AttentionTier::None, &app);
+        assert_eq!(unknown, ("·", app.palette.overlay0));
+        assert_eq!(idle, ("○", app.palette.green));
+        assert_ne!(unknown, idle);
+        assert_eq!(
+            tab_activity_style(AgentState::Idle, false, AttentionTier::None, &app),
+            ("●", app.palette.blue)
+        );
+        app.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
+        assert_eq!(
+            tab_activity_style(AgentState::Working, false, AttentionTier::None, &app),
+            ("◐", app.palette.blue)
+        );
+    }
     /// The layout tests below assert geometry, so they opt every optional
     /// control in. The hidden default has its own tests.
     fn all_tab_actions_visible() -> TabActionVisibility {
@@ -1565,7 +1590,7 @@ mod tests {
             .draw(|frame| render_tab_bar(&app, frame, app.view.tab_bar_rect))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        assert!(matches!(buffer[(column, rect.y)].symbol(), "●" | "○"));
+        assert_eq!(buffer[(column, rect.y)].symbol(), "·");
         assert_eq!(buffer[(column + 1, rect.y)].symbol(), " ");
         assert_ne!(
             buffer[(rect.x, rect.y)].symbol(),
@@ -1860,7 +1885,7 @@ mod tests {
         assert_eq!(rect.width, 21);
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(rect.x, rect.y)].symbol(), "P");
-        assert_eq!(buffer[(rect.x + 1, rect.y)].symbol(), "○");
+        assert_eq!(buffer[(rect.x + 1, rect.y)].symbol(), "·");
         assert_eq!(buffer[(rect.x + 2, rect.y)].symbol(), " ");
         assert_eq!(buffer[(rect.x + 3, rect.y)].symbol(), "提");
         assert_eq!(buffer[(rect.x + rect.width - 1, rect.y)].symbol(), " ");
@@ -1899,9 +1924,9 @@ mod tests {
         let cell: String = (rect.x..rect.x + rect.width)
             .map(|x| buffer[(x, rect.y)].symbol())
             .collect();
-        assert!(cell.starts_with("P○ "));
+        assert!(cell.starts_with("P· "));
         let name_start = cell.find("omarchy").unwrap();
-        let left_padding = name_start - 3;
+        let left_padding = cell[..name_start].chars().count() - 3;
         let right_padding = cell.chars().rev().take_while(|ch| *ch == ' ').count();
         assert!(left_padding.abs_diff(right_padding) <= 1, "{cell:?}");
     }

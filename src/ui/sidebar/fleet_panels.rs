@@ -24,6 +24,7 @@ use super::{display_width, truncate_end};
 pub(crate) const USAGE_KEY: &str = "fleet-panel:usage";
 pub(crate) const RESOURCES_KEY: &str = "fleet-panel:resources";
 const FRESH_SECONDS: i64 = 120;
+mod labels;
 
 pub(crate) fn available(app: &AppState) -> bool {
     !app.fleet_snapshot.hosts.is_empty()
@@ -565,33 +566,41 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
     usage_header.pinned = true;
     if usage_collapsed {
         let mut compact = vec![usage_header];
-        for account in &accounts {
+        for (account, identity) in accounts.iter().zip(labels::plan(app, width)) {
+            while compact.len() <= identity.row {
+                compact.push(Row::styled(
+                    vec![("    ".into(), app.palette.overlay1)],
+                    "Fleet usage · hover an account for details",
+                ));
+            }
             let value = severity(&account.account.usage, account.fresh);
             let icon = crate::ui::icons::themed_usage_label(
                 account.account.provider,
                 app.nerd_font,
                 &app.palette,
             );
-            let token = format!(" {icon} {}", severity_dot(value));
-            if display_width(&compact.last().unwrap().text) + display_width(&token) > width as usize
-            {
-                compact.push(Row::styled(
-                    vec![("  ".into(), app.palette.overlay1)],
-                    "Fleet usage · hover an account for details",
-                ));
-            }
-            let line = compact.last_mut().unwrap();
+            let prefix = " ".repeat(identity.gap);
+            let token = format!(
+                "{prefix}{icon}{}{} {}",
+                identity.clearance,
+                identity.tag,
+                severity_dot(value)
+            );
+            let line = &mut compact[identity.row];
             line.targets.push((
                 display_width(&line.text) as u16,
                 display_width(&token) as u16,
                 account_tip(account, now),
             ));
             line.spans.push((
-                format!(" {icon} "),
+                format!("{prefix}{icon}{}", identity.clearance),
                 provider_color(account.account.provider, app),
             ));
-            line.spans
-                .push((severity_dot(value).into(), severity_color(value, app)));
+            line.spans.push((identity.tag, app.palette.overlay1));
+            line.spans.push((
+                format!(" {}", severity_dot(value)),
+                severity_color(value, app),
+            ));
             line.text.push_str(&token);
         }
         rows.extend(compact);
@@ -705,6 +714,12 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
     resource_header.section = Some(Section::Resources);
     let mut resource_rows = Vec::new();
     let mut compact_resource_rows = Vec::new();
+    let aliases = labels::machine_aliases(
+        &hosts
+            .iter()
+            .map(|host| host.name.clone())
+            .collect::<Vec<_>>(),
+    );
     for host in hosts {
         let fleet_observation = app
             .fleet_snapshot
@@ -759,7 +774,11 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
         };
         let values = metrics.map(|value| value.map_or("—".into(), |v| format!("{v}%")));
         if resources_collapsed {
-            let token = format!(" {dot}");
+            let alias = aliases
+                .get(&host.name)
+                .map(|alias| labels::render(&alias.to_string(), app))
+                .unwrap_or_else(|| "?".into());
+            let token = format!(" {dot}{alias}");
             let line = compact_resource_rows
                 .last_mut()
                 .unwrap_or(&mut resource_header);
@@ -782,7 +801,8 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
                     host.state != HostState::Unreachable,
                 ),
             ));
-            line.spans.push((token.clone(), color));
+            line.spans.push((format!(" {dot}"), color));
+            line.spans.push((alias, app.palette.overlay1));
             line.text.push_str(&token);
         } else {
             resource_rows.push(Row::styled(
@@ -828,8 +848,8 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
     rows
 }
 
-/// Layout needs only cardinalities. Do not format tooltips, bars, or cloned
-/// account rows while sizing the workspace list on each view pass.
+/// Layout needs only identities and compact label widths. Do not format
+/// tooltips, bars, or cloned account rows while sizing the workspace list.
 fn row_count(app: &AppState, width: u16) -> usize {
     let mut identities = std::collections::BTreeSet::new();
     let has_local_observation = app.fleet_snapshot.observations.iter().any(|observation| {
@@ -873,26 +893,7 @@ fn row_count(app: &AppState, width: u16) -> usize {
         })
         .sum::<usize>();
     let usage_extra = if app.collapsed_sidebar_groups.contains(USAGE_KEY) {
-        let mut lines = 0;
-        let mut used = display_width(if app.nerd_font {
-            "▸ 󰓅"
-        } else {
-            "▸ Usage"
-        });
-        for (provider, _) in &identities {
-            let token =
-                1 + display_width(crate::ui::icons::themed_usage_label(
-                    *provider,
-                    app.nerd_font,
-                    &app.palette,
-                )) + 2;
-            if used + token > width as usize {
-                lines += 1;
-                used = 2;
-            }
-            used += token;
-        }
-        lines
+        labels::plan(app, width).last().map_or(0, |entry| entry.row)
     } else {
         identities.len().max(1)
     };
@@ -908,11 +909,11 @@ fn resource_extra(app: &AppState, width: u16) -> usize {
             "▸ Resources"
         });
         for _ in &app.fleet_snapshot.hosts {
-            if used + 2 > width as usize {
+            if used + 3 > width as usize {
                 lines += 1;
                 used = 2;
             }
-            used += 2;
+            used += 3;
         }
         lines
     } else {
@@ -1325,7 +1326,7 @@ mod tests {
             compact[0]
                 .spans
                 .iter()
-                .filter(|(part, _)| part == "●")
+                .filter(|(part, _)| part.trim() == "●")
                 .count(),
             3
         );
@@ -1518,6 +1519,63 @@ mod tests {
     }
 
     #[test]
+    fn compact_tags_keep_identity_tooltips_when_shared_accounts_and_hosts_reorder() {
+        let now = 1_000_000;
+        let mut app = AppState::test_new();
+        app.status_now_unix = Some(now);
+        app.subscript_glyphs = true;
+        app.collapsed_sidebar_groups.insert(USAGE_KEY.into());
+        app.collapsed_sidebar_groups.insert(RESOURCES_KEY.into());
+        let mut alder = account(QuotaProvider::Claude, "alder", usage(20, now));
+        alder.usage.email = Some("alder@example.test".into());
+        let atlas = account(QuotaProvider::Claude, "atlas", usage(40, now));
+        let birch = account(QuotaProvider::Codex, "birch", usage(70, now));
+        for name in ["lab-a", "lab-b"] {
+            app.fleet_snapshot
+                .hosts
+                .push(host(name, HostState::Reachable));
+        }
+        app.fleet_snapshot.observations = vec![
+            observation("lab-b", now, vec![birch, alder.clone()]),
+            observation("lab-a", now, vec![atlas, alder]),
+        ];
+        let tokens = |app: &AppState| {
+            rows(app, 18)
+                .into_iter()
+                .flat_map(|row| {
+                    assert!(display_width(&row.text) <= 18);
+                    row.targets
+                        .into_iter()
+                        .filter_map(move |(start, width, tip)| {
+                            tip.lines()
+                                .find_map(|line| line.strip_prefix("Profile: "))
+                                .map(|profile| {
+                                    (
+                                        profile.to_string(),
+                                        row.text
+                                            .chars()
+                                            .skip(usize::from(start))
+                                            .take(usize::from(width))
+                                            .collect::<String>(),
+                                    )
+                                })
+                        })
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let before = tokens(&app);
+        assert_eq!(before.len(), 3); // Shared alder is one identity, with its own tag.
+        assert!(before["alder"].contains(&labels::render("AL", &app)));
+        assert!(before["atlas"].contains(&labels::render("AT", &app)));
+        assert!(!before["birch"].contains(&labels::render("B", &app))); // Single Codex has no tag.
+        app.fleet_snapshot.observations.reverse();
+        for observation in &mut app.fleet_snapshot.observations {
+            observation.usage.accounts.reverse();
+        }
+        assert_eq!(tokens(&app), before);
+    }
+
+    #[test]
     fn compact_sections_wrap_many_accounts_and_hosts_without_losing_tooltips() {
         let now = 1_000_000;
         let mut app = AppState::test_new();
@@ -1563,7 +1621,16 @@ mod tests {
                         .skip(usize::from(*start))
                         .take(usize::from(*width))
                         .collect();
-                    assert_eq!(token, " \u{EC82} ●");
+                    let label = token
+                        .trim_start()
+                        .strip_prefix('\u{EC82}')
+                        .unwrap()
+                        .strip_suffix(" ●")
+                        .unwrap();
+                    assert!((1..=2).contains(&label.len()));
+                    assert!(label
+                        .chars()
+                        .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit()));
                 }
             }
         }

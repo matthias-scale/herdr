@@ -4199,7 +4199,7 @@ mod tests {
         let custom_label_x = (custom_rect.x + 1..custom_rect.right())
             .find(|x| {
                 let symbol = buffer[(*x, custom_rect.y)].symbol();
-                !symbol.trim().is_empty() && symbol != "●" && symbol != "○"
+                !symbol.trim().is_empty() && symbol != "●" && symbol != "○" && symbol != "·"
             })
             .unwrap();
         let custom_style = buffer[(custom_label_x, custom_rect.y)].style();
@@ -4234,7 +4234,7 @@ mod tests {
         let custom_label_x = (custom_rect.x + 1..custom_rect.right())
             .find(|x| {
                 let symbol = buffer[(*x, custom_rect.y)].symbol();
-                !symbol.trim().is_empty() && symbol != "●" && symbol != "○"
+                !symbol.trim().is_empty() && symbol != "●" && symbol != "○" && symbol != "·"
             })
             .unwrap();
         let custom_style = buffer[(custom_label_x, custom_rect.y)].style();
