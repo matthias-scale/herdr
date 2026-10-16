@@ -154,6 +154,10 @@
             "pane_id": {
               "type": "string"
             },
+            "parked": {
+              "description": "Whether the owning tab is parked. Older hosts omit this field.",
+              "type": "boolean"
+            },
             "reported_at": {
               "type": [
                 "string",
@@ -9216,6 +9220,10 @@
             "pane_id": {
               "type": "string"
             },
+            "parked": {
+              "description": "Whether the owning tab is parked. Older hosts omit this field.",
+              "type": "boolean"
+            },
             "reported_at": {
               "type": [
                 "string",
@@ -10594,6 +10602,10 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "parked": {
+              "description": "Whether the owning tab is parked. Older hosts omit this field.",
+              "type": "boolean"
             },
             "reported_at": {
               "type": [
