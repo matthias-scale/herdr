@@ -601,6 +601,12 @@ impl App {
         {
             changed |= self.reap_due_done_panes(now);
         }
+        if self
+            .next_empty_pane_close_deadline(now)
+            .is_some_and(|deadline| now >= deadline)
+        {
+            changed |= self.close_due_empty_panes(now);
+        }
 
         if self
             .state
@@ -1314,6 +1320,7 @@ impl App {
                 .then(|| self.state.next_done_hide_deadline(now))
                 .flatten(),
             self.state.next_done_reap_deadline(now),
+            self.next_empty_pane_close_deadline(now),
             self.state.next_done_settle_deadline(now),
             self.state.next_snooze_deadline_at(
                 now,

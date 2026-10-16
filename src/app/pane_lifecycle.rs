@@ -11,6 +11,9 @@ use crate::layout::PaneId;
 
 const REAP_LOG_FILE_NAME: &str = "reap-log.jsonl";
 const STRICT_THRESHOLD_STEP: Duration = Duration::from_nanos(1);
+// Failed eligibility checks retry slowly so headless polling does not rescan
+// terminal history and process trees on every client-accept tick.
+const EMPTY_PANE_CLOSE_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 struct DonePaneTarget {
@@ -179,6 +182,133 @@ impl AppState {
 }
 
 impl App {
+    pub(crate) fn next_empty_pane_close_deadline(&self, now: Instant) -> Option<Instant> {
+        if !self.state.auto_close_empty_panes {
+            return None;
+        }
+        let mut next = None;
+        let mut due = false;
+        for (ws_idx, workspace) in self.state.workspaces.iter().enumerate() {
+            for tab in &workspace.tabs {
+                for (pane_id, pane) in &tab.panes {
+                    if self.state.empty_pane_close_excluded.contains(pane_id)
+                        || self.state.remote_focus_proxy_panes.contains(pane_id)
+                    {
+                        continue;
+                    }
+                    let Some(terminal) = self.state.terminals.get(&pane.attached_terminal_id)
+                    else {
+                        continue;
+                    };
+                    let Some(runtime) = self.state.runtime_for_pane_in_workspace(
+                        &self.terminal_runtimes,
+                        ws_idx,
+                        *pane_id,
+                    ) else {
+                        continue;
+                    };
+                    if !empty_shell_process_candidate(terminal, runtime) {
+                        continue;
+                    }
+                    let Some(deadline) = pane
+                        .activity
+                        .deadline_after(self.state.close_empty_panes_after)
+                    else {
+                        continue;
+                    };
+                    if deadline <= now {
+                        due = true;
+                    } else {
+                        next =
+                            Some(next.map_or(deadline, |current: Instant| current.min(deadline)));
+                    }
+                }
+            }
+        }
+        if due {
+            let retry = self
+                .state
+                .empty_pane_close_retry_after
+                .filter(|retry| *retry > now)
+                .unwrap_or(now);
+            Some(next.map_or(retry, |deadline| deadline.min(retry)))
+        } else {
+            next
+        }
+    }
+
+    pub(crate) fn close_due_empty_panes(&mut self, now: Instant) -> bool {
+        if !self.state.auto_close_empty_panes {
+            return false;
+        }
+        let state = &self.state;
+        let runtimes = &self.terminal_runtimes;
+        let mut due = Vec::new();
+        let mut retry_needed = false;
+        for (ws_idx, workspace) in state.workspaces.iter().enumerate() {
+            for tab in &workspace.tabs {
+                for (pane_id, pane) in &tab.panes {
+                    if state.empty_pane_close_excluded.contains(pane_id)
+                        || state.remote_focus_proxy_panes.contains(pane_id)
+                    {
+                        continue;
+                    }
+                    if pane
+                        .activity
+                        .deadline_after(state.close_empty_panes_after)
+                        .is_none_or(|deadline| now < deadline)
+                    {
+                        continue;
+                    }
+                    let Some(terminal) = state.terminals.get(&pane.attached_terminal_id) else {
+                        continue;
+                    };
+                    let Some(runtime) =
+                        state.runtime_for_pane_in_workspace(runtimes, ws_idx, *pane_id)
+                    else {
+                        continue;
+                    };
+                    if empty_shell_prompt_only(terminal, runtime) {
+                        due.push(*pane_id);
+                    } else if empty_shell_process_candidate(terminal, runtime) {
+                        retry_needed = true;
+                    }
+                }
+            }
+        }
+
+        let mut closed = false;
+        for pane_id in due {
+            // Revalidate after collecting IDs because an earlier close may have
+            // removed the workspace or changed its pane layout.
+            let Some(ws_idx) = self
+                .state
+                .workspaces
+                .iter()
+                .enumerate()
+                .find(|(_, workspace)| workspace.pane_state(pane_id).is_some())
+                .map(|(ws_idx, _)| ws_idx)
+            else {
+                continue;
+            };
+            let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
+                continue;
+            };
+            let target = PaneTarget {
+                pane_id: public_pane_id,
+            };
+            if let Err(error) = self.close_pane_for_reap("pane_lifecycle.empty".into(), &target) {
+                tracing::warn!(pane = %target.pane_id, %error, "failed to close empty shell pane");
+                retry_needed = true;
+            } else {
+                closed = true;
+            }
+        }
+        self.state.empty_pane_close_retry_after =
+            retry_needed.then(|| now + EMPTY_PANE_CLOSE_RETRY_INTERVAL);
+        closed
+    }
+
     pub(crate) fn reap_due_done_panes(&mut self, now: Instant) -> bool {
         let pane_ids = self.state.due_done_pane_ids(now);
         let mut reaped = false;
@@ -220,6 +350,91 @@ impl App {
         }
         reaped
     }
+}
+
+fn empty_shell_prompt_only(
+    terminal: &crate::terminal::TerminalState,
+    runtime: &crate::terminal::TerminalRuntime,
+) -> bool {
+    if !empty_shell_process_candidate(terminal, runtime) {
+        return false;
+    }
+    let Some(shell_pid) = runtime.child_pid() else {
+        return false;
+    };
+    let process_tree_state = if terminal.foreground_process_active() {
+        crate::platform::ProcessTreeState::HasChildren
+    } else {
+        crate::platform::process_tree_state(shell_pid)
+    };
+    let snapshot = runtime.recent_text_snapshot(256);
+    empty_shell_prompt_eligible(
+        !runtime.child_has_exited(),
+        runtime.is_suspended(),
+        terminal.effective_agent_label().is_some(),
+        process_tree_state,
+        !snapshot.truncated,
+        &snapshot.text,
+    )
+}
+
+fn empty_shell_process_candidate(
+    terminal: &crate::terminal::TerminalState,
+    runtime: &crate::terminal::TerminalRuntime,
+) -> bool {
+    runtime.child_pid().is_some()
+        && !runtime.is_remote_proxy()
+        && !runtime.child_has_exited()
+        && !runtime.is_suspended()
+        && terminal.effective_agent_label().is_none()
+        && !terminal.foreground_process_active()
+}
+
+fn empty_shell_prompt_eligible(
+    shell_alive: bool,
+    suspended: bool,
+    agent_present: bool,
+    process_tree_state: crate::platform::ProcessTreeState,
+    snapshot_complete: bool,
+    text: &str,
+) -> bool {
+    shell_alive
+        && !suspended
+        && !agent_present
+        && process_tree_state == crate::platform::ProcessTreeState::IdleShellOnly
+        && snapshot_complete
+        && prompt_only_text(text)
+}
+
+fn prompt_only_text(text: &str) -> bool {
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let Some(line) = lines.next() else {
+        return false;
+    };
+    if lines.next().is_some() {
+        return false;
+    }
+
+    let prompt = line.trim();
+    if prompt.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let Some(marker) = prompt.chars().last() else {
+        return false;
+    };
+    if !matches!(marker, '$' | '#' | '%' | '>' | '❯') {
+        return false;
+    }
+
+    let Some(context) = prompt.strip_suffix(marker) else {
+        return false;
+    };
+    !context.is_empty()
+        && ((context.contains('@') && context.contains(':'))
+            || context.starts_with("~/")
+            || context.starts_with("./")
+            || context.starts_with("../")
+            || context.starts_with('/'))
 }
 
 pub(crate) fn pane_is_done(
@@ -388,6 +603,278 @@ mod tests {
     fn elapsed_test_clock(elapsed: Duration) -> (Instant, Instant) {
         let since = Instant::now();
         (since, since + elapsed)
+    }
+
+    #[cfg(unix)]
+    async fn auto_close_test_app(argv: &[&str], screen: &[u8]) -> (App, PaneId) {
+        let mut config = crate::config::Config::default();
+        config.session.auto_close_empty_panes = true;
+        config.session.close_empty_panes_after_minutes = 1;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.state.workspaces = vec![Workspace::test_new("auto-close")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let (events, _event_rx) = tokio::sync::mpsc::channel(16);
+        let argv = argv
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect::<Vec<_>>();
+        let runtime = crate::terminal::TerminalRuntime::spawn_argv_command(
+            pane_id,
+            24,
+            80,
+            std::env::temp_dir(),
+            &argv,
+            &crate::pane::PaneLaunchEnv::default(),
+            crate::pane::AgentDetection::Disabled,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            app.render_notify.clone(),
+            app.render_dirty.clone(),
+        )
+        .expect("spawn test shell");
+        assert!(runtime.child_pid().is_some(), "test shell has a live pid");
+        runtime.test_process_pty_bytes(screen);
+        app.terminal_runtimes.insert(terminal_id, runtime);
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("test pane")
+            .activity
+            .set_last_at(Instant::now() - Duration::from_secs(2 * 60));
+        (app, pane_id)
+    }
+
+    #[cfg(unix)]
+    fn run_auto_close_scheduler_tick(app: &mut App) {
+        app.handle_scheduled_tasks(Instant::now(), false);
+    }
+
+    #[cfg(unix)]
+    fn auto_close_test_pane_exists(app: &App, pane_id: PaneId) -> bool {
+        app.state
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.pane_state(pane_id).is_some())
+    }
+
+    #[cfg(unix)]
+    fn auto_close_test_terminal_id(app: &App, pane_id: PaneId) -> crate::terminal::TerminalId {
+        app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone()
+    }
+
+    #[test]
+    fn empty_idle_shell_closes_after_configured_timeout() {
+        let now = Instant::now();
+        let activity = crate::activity_age::PaneActivity::new(now);
+        let timeout = Duration::from_secs(15 * 60);
+        assert!(empty_shell_prompt_eligible(
+            true,
+            false,
+            false,
+            crate::platform::ProcessTreeState::IdleShellOnly,
+            true,
+            "user@host:~$ "
+        ));
+        let deadline = activity.deadline_after(timeout).expect("activity deadline");
+        assert_eq!(deadline, now + timeout);
+        assert!(now + timeout - Duration::from_nanos(1) < deadline);
+        assert!(now + timeout >= deadline);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scheduled_auto_close_closes_idle_local_shell_after_timeout() {
+        let (mut app, pane_id) =
+            auto_close_test_app(&["/bin/sh", "-c", "read _"], b"user@host:~$ ").await;
+        let now = Instant::now();
+        assert_eq!(app.next_empty_pane_close_deadline(now), Some(now));
+
+        app.handle_scheduled_tasks(now, false);
+
+        assert!(!auto_close_test_pane_exists(&app, pane_id));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scheduled_auto_close_keeps_restored_pane() {
+        let (mut app, pane_id) =
+            auto_close_test_app(&["/bin/sh", "-c", "read _"], b"user@host:~$ ").await;
+        app.state.empty_pane_close_excluded.insert(pane_id);
+
+        run_auto_close_scheduler_tick(&mut app);
+
+        assert!(auto_close_test_pane_exists(&app, pane_id));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scheduled_auto_close_keeps_remote_proxy_pane() {
+        let (mut app, pane_id) =
+            auto_close_test_app(&["/bin/sh", "-c", "read _"], b"user@host:~$ ").await;
+        app.state.remote_focus_proxy_panes.insert(pane_id);
+
+        run_auto_close_scheduler_tick(&mut app);
+
+        assert!(auto_close_test_pane_exists(&app, pane_id));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scheduled_auto_close_keeps_scrollback() {
+        let (mut app, pane_id) = auto_close_test_app(
+            &["/bin/sh", "-c", "read _"],
+            b"echo hello\r\nhello\r\nuser@host:~$ ",
+        )
+        .await;
+
+        run_auto_close_scheduler_tick(&mut app);
+
+        assert!(auto_close_test_pane_exists(&app, pane_id));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scheduled_auto_close_keeps_output_and_prompt_on_one_line() {
+        let (mut app, pane_id) =
+            auto_close_test_app(&["/bin/sh", "-c", "read _"], b"command outputuser@host:~$ ").await;
+
+        run_auto_close_scheduler_tick(&mut app);
+
+        assert!(auto_close_test_pane_exists(&app, pane_id));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scheduled_auto_close_keeps_unreadable_process_tree() {
+        let (mut app, pane_id) =
+            auto_close_test_app(&["/bin/sh", "-c", "read _"], b"user@host:~$ ").await;
+        let terminal_id = auto_close_test_terminal_id(&app, pane_id);
+        let runtime = app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("test runtime");
+        let shell_pid = runtime.child_pid().expect("live test shell");
+        runtime.test_set_child_pid(u32::MAX);
+        assert_eq!(
+            crate::platform::process_tree_state(u32::MAX),
+            crate::platform::ProcessTreeState::Unknown
+        );
+
+        run_auto_close_scheduler_tick(&mut app);
+
+        if let Some(runtime) = app.terminal_runtimes.get(&terminal_id) {
+            runtime.test_set_child_pid(shell_pid);
+        }
+        crate::platform::signal_processes(&[shell_pid], crate::platform::Signal::Kill);
+        assert!(auto_close_test_pane_exists(&app, pane_id));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scheduled_auto_close_keeps_agent_pane() {
+        let (mut app, pane_id) =
+            auto_close_test_app(&["/bin/sh", "-c", "read _"], b"user@host:~$ ").await;
+        let terminal_id = auto_close_test_terminal_id(&app, pane_id);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal")
+            .detected_agent = Some(Agent::Codex);
+
+        run_auto_close_scheduler_tick(&mut app);
+
+        assert!(auto_close_test_pane_exists(&app, pane_id));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scheduled_auto_close_keeps_child_process() {
+        let (mut app, pane_id) =
+            auto_close_test_app(&["/bin/sh", "-c", "sleep 30 & read _"], b"user@host:~$ ").await;
+        let shell_pid = app
+            .terminal_runtimes
+            .get(&auto_close_test_terminal_id(&app, pane_id))
+            .and_then(crate::terminal::TerminalRuntime::child_pid)
+            .expect("live test shell");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while crate::platform::process_tree_state(shell_pid)
+            != crate::platform::ProcessTreeState::HasChildren
+        {
+            assert!(Instant::now() < deadline, "test shell did not start child");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        run_auto_close_scheduler_tick(&mut app);
+
+        assert!(auto_close_test_pane_exists(&app, pane_id));
+    }
+
+    #[test]
+    fn empty_pane_with_child_or_unknown_process_tree_is_kept() {
+        for process_tree_state in [
+            crate::platform::ProcessTreeState::HasChildren,
+            crate::platform::ProcessTreeState::Unknown,
+        ] {
+            assert!(!empty_shell_prompt_eligible(
+                true,
+                false,
+                false,
+                process_tree_state,
+                true,
+                "user@host:~$ "
+            ));
+        }
+    }
+
+    #[test]
+    fn pane_with_output_beyond_prompt_is_kept() {
+        assert!(!empty_shell_prompt_eligible(
+            true,
+            false,
+            false,
+            crate::platform::ProcessTreeState::IdleShellOnly,
+            true,
+            "echo hello\nhello\nuser@host:~$ "
+        ));
+        assert!(!empty_shell_prompt_eligible(
+            true,
+            false,
+            false,
+            crate::platform::ProcessTreeState::IdleShellOnly,
+            false,
+            "user@host:~$ "
+        ));
+    }
+
+    #[test]
+    fn prompt_only_text_requires_one_unambiguous_prompt_line() {
+        assert!(prompt_only_text("user@host:~$ "));
+        assert!(!prompt_only_text("command outputuser@host:~$ "));
+        assert!(!prompt_only_text("output\nuser@host:~$ "));
+        assert!(!prompt_only_text("unexpected text"));
+        assert!(!prompt_only_text("ambiguous$"));
+    }
+
+    #[test]
+    fn agent_prompt_is_kept_even_when_idle() {
+        assert!(!empty_shell_prompt_eligible(
+            true,
+            false,
+            true,
+            crate::platform::ProcessTreeState::IdleShellOnly,
+            true,
+            "user@host:~$ "
+        ));
     }
 
     #[test]

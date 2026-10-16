@@ -721,6 +721,11 @@ impl TerminalRuntime {
 
 #[cfg(test)]
 impl TerminalRuntime {
+    #[cfg(unix)]
+    pub(crate) fn test_set_child_pid(&self, pid: u32) {
+        self.0.test_set_child_pid(pid);
+    }
+
     pub(crate) fn test_reset_cwd_query_count() {
         crate::pane::PaneRuntime::test_reset_cwd_query_count();
     }

@@ -367,13 +367,44 @@ impl Tab {
         terminals: &HashMap<TerminalId, TerminalState>,
     ) -> PaneId {
         let focused = self.layout.focused();
-        if self.pane_is_agent(focused, terminals) {
+        // The name belongs to the agent's session, which is normally on its
+        // primary pane. A companion can itself be detected as an agent and
+        // have a terminal title, but that title is not the session name.
+        let has_session_name = |pane: PaneId| {
+            !self
+                .panes
+                .get(&pane)
+                .is_some_and(|state| state.is_companion)
+                && self
+                    .terminal_id(pane)
+                    .and_then(|terminal_id| terminals.get(terminal_id))
+                    .is_some_and(|terminal| {
+                        terminal.effective_work_context().session_name.is_some()
+                    })
+        };
+        if has_session_name(focused) {
             return focused;
         }
         if let Some(previous) = self.layout.prev_focused() {
-            if previous != focused && self.pane_is_agent(previous, terminals) {
+            if previous != focused && has_session_name(previous) {
                 return previous;
             }
+        }
+        if let Some(pane) = self
+            .layout
+            .pane_ids()
+            .into_iter()
+            .filter(|pane| has_session_name(*pane))
+            .max_by_key(|pane| {
+                self.terminal_id(*pane)
+                    .and_then(|terminal_id| terminals.get(terminal_id))
+                    .and_then(TerminalState::agent_activity_at)
+            })
+        {
+            return pane;
+        }
+        if self.pane_is_agent(focused, terminals) {
+            return focused;
         }
         self.layout
             .pane_ids()
@@ -412,10 +443,10 @@ impl Tab {
         // title. The session name outranks the terminal title because the
         // latter is whatever the agent last painted — often the checkout
         // directory before a session has been named.
-        let title = terminal
-            .manual_label
+        let title = context
+            .session_name
             .clone()
-            .or_else(|| context.session_name.clone())
+            .or_else(|| terminal.manual_label.clone())
             .or_else(|| {
                 let terminal_title = terminal.terminal_title_stripped();
                 let home = std::env::var_os("HOME")
@@ -1150,6 +1181,39 @@ mod title_source_tests {
             .work_context_display_projection(&app.terminals)
             .map(|projection| projection.full_label());
         assert_eq!(label.as_deref(), Some("second agent"));
+    }
+
+    #[test]
+    fn focused_agent_companion_keeps_primary_session_name() {
+        let mut app = AppState::test_new();
+        let mut ws = Workspace::test_new("w");
+        let primary = ws.tabs[0].root_pane;
+        let companion = ws.test_split(Direction::Horizontal);
+        ws.tabs[0].panes.get_mut(&companion).unwrap().is_companion = true;
+        ws.tabs[0].layout.focus_pane(companion);
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+
+        let primary_terminal = app.workspaces[0].tabs[0].panes[&primary]
+            .attached_terminal_id
+            .clone();
+        let companion_terminal = app.workspaces[0].tabs[0].panes[&companion]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&primary_terminal)
+            .unwrap()
+            .set_hook_session_name(Some("Review session".to_string()))
+            .unwrap();
+        let companion_terminal = app.terminals.get_mut(&companion_terminal).unwrap();
+        companion_terminal.detected_agent = Some(Agent::Claude);
+        companion_terminal.set_terminal_title(Some("Side pane title".to_string()));
+
+        let label = app.workspaces[0].tabs[0]
+            .work_context_display_projection(&app.terminals)
+            .map(|projection| projection.full_label());
+        assert_eq!(label.as_deref(), Some("Review session"));
     }
 
     /// A window with no agent in it at all is untouched: it still names its

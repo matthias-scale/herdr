@@ -1118,6 +1118,87 @@ pub fn descendant_processes(root_pid: u32) -> Vec<ForegroundProcess> {
     })
 }
 
+pub(crate) fn process_tree_state(root_pid: u32) -> super::ProcessTreeState {
+    if root_pid == 0 || process_pgrp_comm_and_state(root_pid).is_none() {
+        return super::ProcessTreeState::Unknown;
+    }
+
+    match checked_child_pids(root_pid) {
+        Ok(false) => super::ProcessTreeState::IdleShellOnly,
+        Ok(true) => super::ProcessTreeState::HasChildren,
+        Err(()) => super::ProcessTreeState::Unknown,
+    }
+}
+
+fn checked_child_pids(pid: u32) -> Result<bool, ()> {
+    const MAX_TASKS: usize = 2_048;
+    let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).map_err(|_| ())?;
+    let mut children_file_seen = false;
+    let mut missing_children_file = false;
+    let mut task_count = 0;
+
+    for task in tasks {
+        task_count += 1;
+        if task_count > MAX_TASKS {
+            return Err(());
+        }
+        let task = task.map_err(|_| ())?;
+        let path = task.path().join("children");
+        match std::fs::read_to_string(path) {
+            Ok(contents) => {
+                children_file_seen = true;
+                for child in contents.split_ascii_whitespace() {
+                    if child.parse::<u32>().map_err(|_| ())? > 0 {
+                        return Ok(true);
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing_children_file = true;
+            }
+            Err(_) => return Err(()),
+        }
+    }
+
+    if children_file_seen {
+        return (!missing_children_file).then_some(false).ok_or(());
+    }
+
+    checked_child_pids_by_scan(pid)
+}
+
+fn checked_child_pids_by_scan(pid: u32) -> Result<bool, ()> {
+    const MAX_PROCESSES: usize = 16_384;
+    let entries = std::fs::read_dir("/proc").map_err(|_| ())?;
+    let mut process_count = 0;
+    for entry in entries {
+        let entry = entry.map_err(|_| ())?;
+        let Some(candidate) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        process_count += 1;
+        if process_count > MAX_PROCESSES {
+            return Err(());
+        }
+        let stat = match std::fs::read_to_string(format!("/proc/{candidate}/stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(()),
+        };
+        let Some(parent) = parent_pid_from_stat(&stat) else {
+            return Err(());
+        };
+        if parent == pid {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Direct children of `pid`.
 ///
 /// `/proc/<pid>/task/<tid>/children` is one read per thread and needs no

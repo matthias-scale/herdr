@@ -382,8 +382,8 @@ use windows_sys::{
     Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation},
     Win32::{
         Foundation::{
-            CloseHandle, GlobalFree, LocalFree, FILETIME, HANDLE, HWND, INVALID_HANDLE_VALUE,
-            MAX_PATH, NTSTATUS, STATUS_SUCCESS, UNICODE_STRING,
+            CloseHandle, GetLastError, GlobalFree, LocalFree, ERROR_NO_MORE_FILES, FILETIME,
+            HANDLE, HWND, INVALID_HANDLE_VALUE, MAX_PATH, NTSTATUS, STATUS_SUCCESS, UNICODE_STRING,
         },
         Globalization::{CompareStringOrdinal, CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN},
         Security::SECURITY_ATTRIBUTES,
@@ -1055,10 +1055,16 @@ struct ProcessSnapshot {
     entry_by_pid: HashMap<u32, usize>,
     children_by_parent: HashMap<u32, Vec<usize>>,
     agent_indices: OnceLock<Vec<usize>>,
+    complete: bool,
 }
 
 impl ProcessSnapshot {
+    #[cfg(test)]
     fn new(entries: Vec<WindowsProcessEntry>) -> Self {
+        Self::new_with_completeness(entries, true)
+    }
+
+    fn new_with_completeness(entries: Vec<WindowsProcessEntry>, complete: bool) -> Self {
         let mut entry_by_pid = HashMap::with_capacity(entries.len());
         let mut children_by_parent = HashMap::<u32, Vec<usize>>::new();
         for (index, entry) in entries.iter().enumerate() {
@@ -1073,6 +1079,7 @@ impl ProcessSnapshot {
             entry_by_pid,
             children_by_parent,
             agent_indices: OnceLock::new(),
+            complete,
         }
     }
 
@@ -1644,7 +1651,8 @@ pub(crate) fn foreground_process_job(child_pid: u32) -> Option<ForegroundJob> {
 }
 
 pub(crate) fn available_pane_shell(child_pid: u32) -> Option<String> {
-    let snapshot = ProcessSnapshot::new(snapshot_processes());
+    let (entries, complete) = snapshot_processes();
+    let snapshot = ProcessSnapshot::new_with_completeness(entries, complete);
     available_pane_shell_from_snapshot(child_pid, &snapshot)
 }
 
@@ -1673,6 +1681,25 @@ pub fn descendant_processes(root_pid: u32) -> Vec<super::ForegroundProcess> {
         .into_iter()
         .map(foreground_process_from_entry)
         .collect()
+}
+
+pub(crate) fn process_tree_state(root_pid: u32) -> super::ProcessTreeState {
+    if root_pid == 0 {
+        return super::ProcessTreeState::Unknown;
+    }
+    let snapshot = cached_foreground_processes();
+    if !snapshot.complete || snapshot.entry(root_pid).is_none() {
+        return super::ProcessTreeState::Unknown;
+    }
+    if snapshot
+        .children_by_parent
+        .get(&root_pid)
+        .is_some_and(|children| !children.is_empty())
+    {
+        super::ProcessTreeState::HasChildren
+    } else {
+        super::ProcessTreeState::IdleShellOnly
+    }
 }
 
 pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJob> {
@@ -1946,10 +1973,10 @@ fn foreground_process_from_entry(entry: &WindowsProcessEntry) -> super::Foregrou
     }
 }
 
-fn snapshot_processes() -> Vec<WindowsProcessEntry> {
+fn snapshot_processes() -> (Vec<WindowsProcessEntry>, bool) {
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let _snapshot = ProcessHandle(snapshot);
 
@@ -1959,6 +1986,9 @@ fn snapshot_processes() -> Vec<WindowsProcessEntry> {
     };
     let mut output = Vec::new();
     let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    if !ok {
+        return (output, unsafe { GetLastError() } == ERROR_NO_MORE_FILES);
+    }
     while ok {
         let pid = entry.th32ProcessID;
         let name = nul_terminated_utf16_to_string(&entry.szExeFile);
@@ -1970,7 +2000,7 @@ fn snapshot_processes() -> Vec<WindowsProcessEntry> {
         });
         ok = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
     }
-    output
+    (output, unsafe { GetLastError() } == ERROR_NO_MORE_FILES)
 }
 
 fn cached_foreground_processes() -> Arc<ProcessSnapshot> {
@@ -2148,7 +2178,7 @@ impl ProcessSnapshotCache {
     fn snapshot(
         &mut self,
         max_age: Duration,
-        build: impl FnOnce() -> Vec<WindowsProcessEntry>,
+        build: impl FnOnce() -> (Vec<WindowsProcessEntry>, bool),
     ) -> Arc<ProcessSnapshot> {
         if let Some(cached) = &self.cached {
             if cached.built_at.elapsed() < max_age {
@@ -2156,7 +2186,8 @@ impl ProcessSnapshotCache {
             }
         }
 
-        let snapshot = Arc::new(ProcessSnapshot::new(build()));
+        let (entries, complete) = build();
+        let snapshot = Arc::new(ProcessSnapshot::new_with_completeness(entries, complete));
         self.cached = Some(CachedProcessSnapshot {
             built_at: Instant::now(),
             snapshot: Arc::clone(&snapshot),
@@ -2557,7 +2588,8 @@ pub fn session_processes(child_pid: u32) -> Vec<u32> {
         return Vec::new();
     }
 
-    let snapshot = ProcessSnapshot::new(snapshot_processes());
+    let (entries, complete) = snapshot_processes();
+    let snapshot = ProcessSnapshot::new_with_completeness(entries, complete);
     session_processes_from_snapshot(child_pid, &snapshot)
 }
 
@@ -4083,16 +4115,16 @@ mod tests {
             builds += 1;
             let entries = vec![test_entry(10, 1, "powershell.exe", &["powershell.exe"])];
             first_build_completed_at = Some(Instant::now());
-            entries
+            (entries, true)
         });
         assert!(cache.cached.as_ref().unwrap().built_at >= first_build_completed_at.unwrap());
         let second = cache.snapshot(Duration::from_secs(60), || {
             builds += 1;
-            Vec::new()
+            (Vec::new(), true)
         });
         let refreshed = cache.snapshot(Duration::ZERO, || {
             builds += 1;
-            vec![test_entry(20, 1, "pwsh.exe", &["pwsh.exe"])]
+            (vec![test_entry(20, 1, "pwsh.exe", &["pwsh.exe"])], true)
         });
 
         assert!(Arc::ptr_eq(&first, &second));
