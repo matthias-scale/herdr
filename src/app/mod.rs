@@ -757,6 +757,7 @@ impl App {
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         let restored_snapshot = (!no_session).then(crate::persist::load).flatten();
+        let has_restored_session = restored_snapshot.is_some();
         let session_writer = Arc::new(std::sync::Mutex::new(crate::persist::SessionWriter::new(
             !no_session && restored_snapshot.is_none(),
         )));
@@ -1100,6 +1101,7 @@ impl App {
             agent_runs_active_count: None,
             aloop_projection: None,
             remote_focus_proxy_panes: std::collections::HashSet::new(),
+            empty_pane_close_excluded: std::collections::HashSet::new(),
             sidebar_selected_remote_agent: None,
             dock_symphony: None,
             symphony_detail: None,
@@ -1661,6 +1663,15 @@ impl App {
         };
 
         state.terminals = restored_terminals;
+        if has_restored_session {
+            state.empty_pane_close_excluded.extend(
+                state
+                    .workspaces
+                    .iter()
+                    .flat_map(|workspace| workspace.tabs.iter())
+                    .flat_map(|tab| tab.panes.keys().copied()),
+            );
+        }
 
         // The notepad's dragged height persists in the host's presentation
         // file, next to the dock width.
@@ -2041,6 +2052,13 @@ impl App {
         }
         app.state.detach_exits = false;
         app.state.workspaces = workspaces;
+        app.state.empty_pane_close_excluded.extend(
+            app.state
+                .workspaces
+                .iter()
+                .flat_map(|workspace| workspace.tabs.iter())
+                .flat_map(|tab| tab.panes.keys().copied()),
+        );
         app.state.refresh_local_agent_panel_identities();
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();

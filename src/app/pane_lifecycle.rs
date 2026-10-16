@@ -191,6 +191,11 @@ impl App {
         for (ws_idx, workspace) in self.state.workspaces.iter().enumerate() {
             for tab in &workspace.tabs {
                 for (pane_id, pane) in &tab.panes {
+                    if self.state.empty_pane_close_excluded.contains(pane_id)
+                        || self.state.remote_focus_proxy_panes.contains(pane_id)
+                    {
+                        continue;
+                    }
                     let Some(terminal) = self.state.terminals.get(&pane.attached_terminal_id)
                     else {
                         continue;
@@ -243,6 +248,11 @@ impl App {
         for (ws_idx, workspace) in state.workspaces.iter().enumerate() {
             for tab in &workspace.tabs {
                 for (pane_id, pane) in &tab.panes {
+                    if state.empty_pane_close_excluded.contains(pane_id)
+                        || state.remote_focus_proxy_panes.contains(pane_id)
+                    {
+                        continue;
+                    }
                     if pane
                         .activity
                         .deadline_after(state.close_empty_panes_after)
@@ -369,6 +379,7 @@ fn empty_shell_process_candidate(
     runtime: &crate::terminal::TerminalRuntime,
 ) -> bool {
     runtime.child_pid().is_some()
+        && !runtime.is_remote_proxy()
         && !runtime.child_has_exited()
         && !runtime.is_suspended()
         && terminal.effective_agent_label().is_none()
