@@ -9427,6 +9427,8 @@ mod tests {
         // same socket, which surfaces as AddrInUse. A counter cannot collide.
         let dir = std::env::temp_dir().join(format!("hh-{}", crate::config::test_unique_suffix()));
         let _ = fs::create_dir_all(&dir);
+        // Scheduled scratch polling must not observe the user's notes.
+        app.state.scratch.dir = dir.join("scratch");
         let socket_path = dir.join("client.sock");
         let _ = fs::remove_file(&socket_path);
         let listener = bind_local_listener(&socket_path).expect("bind test listener");
