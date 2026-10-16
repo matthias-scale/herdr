@@ -757,6 +757,7 @@ impl App {
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         let restored_snapshot = (!no_session).then(crate::persist::load).flatten();
+        let has_restored_session = restored_snapshot.is_some();
         let session_writer = Arc::new(std::sync::Mutex::new(crate::persist::SessionWriter::new(
             !no_session && restored_snapshot.is_none(),
         )));
@@ -1105,6 +1106,7 @@ impl App {
             agent_runs_active_count: None,
             aloop_projection: None,
             remote_focus_proxy_panes: std::collections::HashSet::new(),
+            empty_pane_close_excluded: std::collections::HashSet::new(),
             sidebar_selected_remote_agent: None,
             dock_symphony: None,
             symphony_detail: None,
@@ -1164,6 +1166,14 @@ impl App {
                 config.session.reap_done_after_minutes.saturating_mul(60),
             ),
             reap_done_panes: config.session.reap_done_panes,
+            auto_close_empty_panes: config.session.auto_close_empty_panes,
+            close_empty_panes_after: std::time::Duration::from_secs(
+                config
+                    .session
+                    .close_empty_panes_after_minutes
+                    .saturating_mul(60),
+            ),
+            empty_pane_close_retry_after: None,
             settle_after: std::time::Duration::from_secs(
                 config
                     .session
@@ -1658,6 +1668,15 @@ impl App {
         };
 
         state.terminals = restored_terminals;
+        if has_restored_session {
+            state.empty_pane_close_excluded.extend(
+                state
+                    .workspaces
+                    .iter()
+                    .flat_map(|workspace| workspace.tabs.iter())
+                    .flat_map(|tab| tab.panes.keys().copied()),
+            );
+        }
 
         // The notepad's dragged height persists in the host's presentation
         // file, next to the dock width.
@@ -2038,6 +2057,13 @@ impl App {
         }
         app.state.detach_exits = false;
         app.state.workspaces = workspaces;
+        app.state.empty_pane_close_excluded.extend(
+            app.state
+                .workspaces
+                .iter()
+                .flat_map(|workspace| workspace.tabs.iter())
+                .flat_map(|tab| tab.panes.keys().copied()),
+        );
         app.state.refresh_local_agent_panel_identities();
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
@@ -2939,6 +2965,14 @@ impl App {
                 config.session.reap_done_after_minutes.saturating_mul(60),
             );
             self.state.reap_done_panes = config.session.reap_done_panes;
+            self.state.auto_close_empty_panes = config.session.auto_close_empty_panes;
+            self.state.close_empty_panes_after = std::time::Duration::from_secs(
+                config
+                    .session
+                    .close_empty_panes_after_minutes
+                    .saturating_mul(60),
+            );
+            self.state.empty_pane_close_retry_after = None;
             self.state.auto_settle_finished = config.session.auto_settle_finished;
             self.state.settle_finished_after = std::time::Duration::from_secs(
                 config

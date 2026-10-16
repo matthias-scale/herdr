@@ -7742,6 +7742,13 @@ impl HeadlessServer {
         {
             other_changed |= self.app.reap_due_done_panes(now);
         }
+        if self
+            .app
+            .next_empty_pane_close_deadline(now)
+            .is_some_and(|deadline| now >= deadline)
+        {
+            other_changed |= self.app.close_due_empty_panes(now);
+        }
 
         if self
             .app

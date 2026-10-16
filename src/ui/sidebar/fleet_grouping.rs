@@ -234,33 +234,15 @@ pub(super) fn rows<'a>(
             .1
             .push(entry);
     }
-    let activity_sort =
-        app.sidebar_presentation.fleet_sort == crate::app::state::FleetSidebarSort::Activity;
     let mut groups = groups.into_iter().collect::<Vec<_>>();
-    // Compare only visible agents for urgency/activity. Working-only projects
-    // remain last in either mode; their own newest activity breaks ties.
-    groups.sort_by_cached_key(|(key, (_, entries))| {
-        let mut urgency = 3;
-        let mut newest = None;
-        for entry in entries {
-            let state = state_index(app, entry);
-            if state != 3 {
-                urgency = urgency.min(state);
-                newest = newest.max(compact_activity_instant(entry));
-            }
-        }
-        if urgency == 3 {
-            newest = entries
-                .iter()
-                .filter_map(|entry| compact_activity_instant(entry))
-                .max();
-        }
-        (
-            urgency == 3,
-            if activity_sort { 0 } else { urgency },
-            std::cmp::Reverse(newest),
-            *key,
-        )
+    // Activity timestamps are display metadata and must not reorder rows.
+    groups.sort_by_key(|(key, (_, entries))| {
+        let urgency = entries
+            .iter()
+            .map(|entry| state_index(app, entry))
+            .min()
+            .unwrap_or(3);
+        (urgency == 3, urgency, *key)
     });
     let mut rows = vec![SidebarRow::SectionHeader {
         title: PROJECTS,
@@ -269,15 +251,33 @@ pub(super) fn rows<'a>(
         collapsed: false,
     }];
     for (project, (name, mut entries)) in groups {
-        entries.sort_by_key(|entry| {
-            (
-                if activity_sort {
-                    0
-                } else {
-                    state_index(app, entry)
-                },
-                std::cmp::Reverse(compact_activity_instant(entry)),
-            )
+        entries.sort_by(|left, right| {
+            state_index(app, left)
+                .cmp(&state_index(app, right))
+                .then_with(|| match (&left.identity, &right.identity) {
+                    (AgentPanelIdentity::Local(_), AgentPanelIdentity::Remote(_)) => {
+                        std::cmp::Ordering::Less
+                    }
+                    (AgentPanelIdentity::Remote(_), AgentPanelIdentity::Local(_)) => {
+                        std::cmp::Ordering::Greater
+                    }
+                    _ => std::cmp::Ordering::Equal,
+                })
+                .then_with(|| sidebar_machine_host(app, left).cmp(sidebar_machine_host(app, right)))
+                .then_with(|| match (&left.identity, &right.identity) {
+                    (AgentPanelIdentity::Remote(left), AgentPanelIdentity::Remote(right)) => {
+                        left.cmp(right)
+                    }
+                    (AgentPanelIdentity::Local(left), AgentPanelIdentity::Local(right)) => {
+                        left.pane_id.cmp(&right.pane_id)
+                    }
+                    (AgentPanelIdentity::Local(_), AgentPanelIdentity::Remote(_)) => {
+                        std::cmp::Ordering::Less
+                    }
+                    (AgentPanelIdentity::Remote(_), AgentPanelIdentity::Local(_)) => {
+                        std::cmp::Ordering::Greater
+                    }
+                })
         });
         let total = entries.len();
         let working = entries
@@ -415,7 +415,103 @@ mod tests {
     }
 
     #[test]
-    fn three_hosts_share_one_project_and_sort_by_activity() {
+    fn remote_activity_timestamp_changes_do_not_reorder_rows() {
+        let (mut app, mut entries) = fixture();
+        // Keep the owner time within the monotonic clock's representable range
+        // on short-lived Windows/macOS runners as well as Linux.
+        let owner_time = time::OffsetDateTime::now_utc()
+            .replace_nanosecond(0)
+            .expect("whole-second owner timestamp");
+        let now = u64::try_from(owner_time.unix_timestamp()).expect("Unix time");
+        let timestamp = owner_time
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("owner timestamp");
+        for host in &mut app.fleet_snapshot.hosts {
+            host.entries[0].last_turn_at = Some(timestamp.clone());
+        }
+        let first = remote_agent_panel_entries_at(&app.fleet_snapshot, now, false);
+        let activity = compact_activity_instant(&first[0].entry).expect("remote activity");
+        // Put a local row between the two refresh-derived instants. The owner
+        // timestamp has not changed, so this must not move the remote row.
+        entries.truncate(1);
+        entries[0].activity_at = Some(activity + std::time::Duration::from_nanos(1));
+        let project = |remote: &[std::sync::Arc<RemoteAgentPanelEntry>]| {
+            let mut all = entries.clone();
+            all.extend(remote.iter().map(remote_agent_as_panel_entry));
+            rows(&app, &all, false)
+                .into_iter()
+                .filter_map(|row| match row {
+                    SidebarRow::Tab { entry, .. } => {
+                        Some(sidebar_machine_host(&app, &entry).to_string())
+                    }
+                    SidebarRow::RemoteAgent { entry, .. } => Some(entry.agent_ref.host.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let second = remote_agent_panel_entries_at(&app.fleet_snapshot, now + 1, false);
+        assert_eq!(
+            project(&first),
+            project(&second),
+            "unchanged remote inventory moved around a local row"
+        );
+        assert_eq!(first[0].entry.activity_at, second[0].entry.activity_at);
+        assert_eq!(first[0].entry.last_turn_at, second[0].entry.last_turn_at);
+        let mut changed = app.fleet_snapshot.clone();
+        changed.hosts[0].entries[0].last_turn_at = Some(
+            (owner_time + time::Duration::seconds(1))
+                .format(&time::format_description::well_known::Rfc3339)
+                .expect("new owner timestamp"),
+        );
+        let changed = remote_agent_panel_entries_at(&changed, now + 2, false);
+        assert!(changed[0].entry.activity_at > second[0].entry.activity_at);
+        assert_eq!(
+            project(&second),
+            project(&changed),
+            "activity timestamps must not reorder stable identities"
+        );
+    }
+
+    #[test]
+    fn equal_activity_uses_host_and_agent_identity() {
+        let (mut app, mut entries) = fixture();
+        entries.truncate(1);
+        entries[0].activity_at = None;
+        entries[0].last_turn_at = None;
+        for remote in &mut app.remote_agent_panel_entries {
+            let remote = std::sync::Arc::make_mut(remote);
+            remote.entry.activity_at = None;
+            remote.entry.last_turn_at = None;
+        }
+        let mut same_host = (*app.remote_agent_panel_entries[0]).clone();
+        same_host.agent_ref.agent = "another-agent".into();
+        same_host.entry.identity = AgentPanelIdentity::Remote(same_host.agent_ref.clone());
+        app.remote_agent_panel_entries
+            .push(std::sync::Arc::new(same_host));
+        entries.extend(
+            app.remote_agent_panel_entries
+                .iter()
+                .map(remote_agent_as_panel_entry),
+        );
+        let order = |entries: &[AgentPanelEntry]| {
+            rows(&app, entries, false)
+                .into_iter()
+                .filter_map(|row| match row {
+                    SidebarRow::Tab { entry, .. } => Some(entry.identity.clone()),
+                    SidebarRow::RemoteAgent { entry, .. } => {
+                        Some(AgentPanelIdentity::Remote(entry.agent_ref.clone()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = order(&entries);
+        entries.reverse();
+        assert_eq!(first, order(&entries));
+    }
+
+    #[test]
+    fn three_hosts_share_one_project_and_sort_by_stable_identity() {
         let (app, entries) = fixture();
         let hidden = rows(&app, &entries, false);
         assert_eq!(
@@ -439,13 +535,13 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(hosts, ["ub1", "ub2", "mbpro"]);
+        assert_eq!(hosts, ["ub2", "mbpro", "ub1"]);
         assert_eq!(
             hosts
                 .iter()
                 .map(|host| sidebar_device_code(&app, host))
                 .collect::<Vec<_>>(),
-            [Some('1'), Some('2'), Some('m')]
+            [Some('2'), Some('m'), Some('1')]
         );
         assert!(!expanded.iter().any(
             |row| matches!(row, SidebarRow::NestedHeader { key, .. } if key.starts_with("device:"))
@@ -915,7 +1011,7 @@ mod tests {
     }
 
     #[test]
-    fn projects_sort_by_visible_urgency_then_age_and_working_only_stays_last() {
+    fn projects_keep_identity_order_with_working_only_last() {
         let (mut app, entries) = fixture();
         let mut agents = Vec::new();
         for (index, (repo, state)) in [
@@ -962,11 +1058,9 @@ mod tests {
             names(&app),
             ["z-blocked", "a-done", "b-waiting", "only-working"]
         );
+        let stable_order = names(&app);
         app.sidebar_presentation.fleet_sort = crate::app::state::FleetSidebarSort::Activity;
-        assert_eq!(
-            names(&app),
-            ["b-waiting", "a-done", "z-blocked", "only-working"]
-        );
+        assert_eq!(names(&app), stable_order);
     }
 
     #[test]

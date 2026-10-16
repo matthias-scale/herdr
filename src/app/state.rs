@@ -4563,6 +4563,9 @@ pub struct AppState {
     /// Local panes backed by remote-focus operations. Agent identity remains
     /// owned by `RemoteFocusOperations`; this marker only hides proxy chrome.
     pub(crate) remote_focus_proxy_panes: std::collections::HashSet<crate::layout::PaneId>,
+    /// Panes present when this server lifetime began or imported by handoff.
+    /// Empty-pane auto-close is only for panes created during this lifetime.
+    pub(crate) empty_pane_close_excluded: std::collections::HashSet<crate::layout::PaneId>,
     /// Selected remote row for the client presentation currently being
     /// handled or rendered.
     pub(crate) sidebar_selected_remote_agent: Option<crate::api::schema::AgentRef>,
@@ -4684,6 +4687,9 @@ pub struct AppState {
     pub(crate) hide_done_after: std::time::Duration,
     pub(crate) reap_done_after: std::time::Duration,
     pub(crate) reap_done_panes: bool,
+    pub(crate) auto_close_empty_panes: bool,
+    pub(crate) close_empty_panes_after: std::time::Duration,
+    pub(crate) empty_pane_close_retry_after: Option<std::time::Instant>,
     pub(crate) settle_after: std::time::Duration,
     /// Grace window a finished work reading must survive before the pane
     /// settles (`session.settle_finished_after_minutes`).
@@ -8226,6 +8232,7 @@ impl AppState {
             agent_runs_active_count: None,
             aloop_projection: None,
             remote_focus_proxy_panes: std::collections::HashSet::new(),
+            empty_pane_close_excluded: std::collections::HashSet::new(),
             sidebar_selected_remote_agent: None,
             symphony_detail: None,
             dock_symphony: None,
@@ -8291,6 +8298,9 @@ impl AppState {
             hide_done_after: std::time::Duration::from_secs(30 * 60),
             reap_done_after: std::time::Duration::from_secs(4 * 60 * 60),
             reap_done_panes: true,
+            auto_close_empty_panes: true,
+            close_empty_panes_after: std::time::Duration::from_secs(15 * 60),
+            empty_pane_close_retry_after: None,
             settle_after: std::time::Duration::from_secs(3 * 24 * 60 * 60),
             settle_finished_after: std::time::Duration::from_secs(10 * 60),
             settle_done_after: std::time::Duration::from_secs(30 * 60),

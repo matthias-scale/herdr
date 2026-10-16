@@ -24,6 +24,13 @@ pub struct ForegroundJob {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessTreeState {
+    IdleShellOnly,
+    HasChildren,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     Hangup,
     Terminate,
@@ -35,6 +42,26 @@ pub enum Signal {
 pub enum ChildExitReason {
     Exited,
     Interrupted,
+}
+
+pub(crate) fn process_tree_state(root_pid: u32) -> ProcessTreeState {
+    #[cfg(target_os = "linux")]
+    {
+        linux::process_tree_state(root_pid)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::process_tree_state(root_pid)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::process_tree_state(root_pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = root_pid;
+        ProcessTreeState::Unknown
+    }
 }
 
 impl ChildExitReason {

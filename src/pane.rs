@@ -4620,6 +4620,11 @@ impl PaneRuntime {
 
 #[cfg(test)]
 impl PaneRuntime {
+    #[cfg(unix)]
+    pub(crate) fn test_set_child_pid(&self, pid: u32) {
+        self.child_pid.store(pid, Ordering::Release);
+    }
+
     pub(crate) fn test_reset_cwd_query_count() {
         TEST_CWD_QUERY_COUNT.with(|count| count.set(0));
     }

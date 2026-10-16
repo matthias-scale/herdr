@@ -693,24 +693,92 @@ impl Snapshot {
             }) else {
                 continue;
             };
-            incoming
+            let incoming_snapshot = incoming
+                .sessions
+                .as_ref()
+                .and_then(|sessions| sessions.snapshot.as_ref());
+            let existing_snapshot = existing
+                .sessions
+                .as_ref()
+                .and_then(|sessions| sessions.snapshot.as_ref());
+            // Revisions are owner-local. After a known owner restart, the poll
+            // starts a new history and must not inherit rows from the old one.
+            let epoch_changed =
+                incoming_snapshot
+                    .and_then(|snapshot| snapshot.get("epoch").and_then(serde_json::Value::as_str))
+                    .zip(existing_snapshot.and_then(|snapshot| {
+                        snapshot.get("epoch").and_then(serde_json::Value::as_str)
+                    }))
+                    .is_some_and(|(incoming, existing)| incoming != existing);
+            if epoch_changed {
+                continue;
+            }
+            let live_rows = existing
                 .entries
-                .retain(|entry| entry.source != EvidenceSource::Herdr);
+                .iter()
+                .filter(|entry| entry.source == EvidenceSource::Herdr)
+                .map(|entry| (&entry.agent_ref, entry))
+                .collect::<HashMap<_, _>>();
+            let mut returned = HashSet::new();
+            for row in &mut incoming.entries {
+                if row.source != EvidenceSource::Herdr {
+                    continue;
+                }
+                returned.insert(row.agent_ref.clone());
+                if let Some(live) = live_rows.get(&row.agent_ref) {
+                    // Equal or unversioned owner evidence lets the fresh safety
+                    // poll repair a missed event. Only provably older rows lose.
+                    if live
+                        .agent_info()
+                        .zip(row.agent_info())
+                        .is_some_and(|(live, polled)| {
+                            live.terminal_id == polled.terminal_id
+                                && (live.revision > polled.revision
+                                    || (live.revision == polled.revision
+                                        // Zero also means absent/reset lifecycle evidence.
+                                        && polled.state_change_seq != 0
+                                        && live.state_change_seq > polled.state_change_seq))
+                        })
+                    {
+                        *row = (**live).clone();
+                    }
+                }
+            }
             incoming.entries.extend(
                 existing
                     .entries
                     .iter()
-                    .filter(|entry| entry.source == EvidenceSource::Herdr)
+                    .filter(|row| {
+                        row.source == EvidenceSource::Herdr && !returned.contains(&row.agent_ref)
+                    })
                     .cloned(),
             );
-            // Cached fallback evidence must not roll back the session model
-            // received through session.changed or the resubscription seed.
-            if let Some(live) = &existing.sessions {
-                if let Some(incoming) = &mut incoming.sessions {
-                    incoming.snapshot = live.snapshot.clone();
-                    incoming.sections = live.sections.clone();
-                } else {
-                    incoming.sessions = Some(live.clone());
+            // Sections describe the same session snapshot and follow its owner
+            // epoch/revision. A missing snapshot is not a fresh replacement.
+            let keep_live_session = match (incoming_snapshot, existing_snapshot) {
+                (None, Some(_)) => true,
+                (Some(polled), Some(live)) => {
+                    polled
+                        .get("epoch")
+                        .and_then(serde_json::Value::as_str)
+                        .zip(live.get("epoch").and_then(serde_json::Value::as_str))
+                        .is_some_and(|(polled, live)| polled == live)
+                        && live
+                            .get("revision")
+                            .and_then(serde_json::Value::as_u64)
+                            .zip(polled.get("revision").and_then(serde_json::Value::as_u64))
+                            .is_some_and(|(live, polled)| live > polled)
+                }
+                _ => false,
+            };
+            if keep_live_session {
+                if let Some(live) = &existing.sessions {
+                    if let Some(incoming) = &mut incoming.sessions {
+                        incoming.snapshot = live.snapshot.clone();
+                        incoming.sections = live.sections.clone();
+                    } else {
+                        incoming.sessions = Some(live.clone());
+                    }
                 }
             }
             incoming.state = existing.state;
@@ -4244,6 +4312,14 @@ pub(crate) struct EffectiveRemoteLifecycle<'a> {
 }
 
 impl FleetRow {
+    /// Owner activity identity, independent of the observer's refresh clock.
+    pub(crate) fn activity_unix_seconds(&self) -> Option<u64> {
+        self.last_turn_at
+            .as_deref()
+            .and_then(parse_utc_timestamp)
+            .or_else(|| self.reported_at.as_deref().and_then(parse_utc_timestamp))
+    }
+
     pub(crate) fn age_seconds_at(&self, now_unix_s: u64) -> Option<u64> {
         self.last_turn_at
             .as_deref()
@@ -8538,6 +8614,149 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
     }
 
     #[test]
+    fn safety_poll_repairs_missing_stream_state() {
+        let (current, _) = pane_lifecycle_snapshot(HostState::Reachable);
+        let mut incoming = current.clone();
+        let mut info = incoming.hosts[0].entries[0]
+            .agent_info()
+            .expect("owner agent")
+            .clone();
+        info.revision += 1;
+        info.agent_status = AgentStatus::Blocked;
+        incoming.hosts[0].entries[0] = FleetRow::test_agent_info_row("office", info);
+        let expected = incoming.hosts[0].entries.clone();
+        incoming.preserve_live_agent_inventory_from(&current, |_| true);
+        assert_eq!(incoming.hosts[0].entries, expected);
+    }
+
+    #[test]
+    fn safety_poll_repairs_session_snapshot_and_sections() {
+        let (mut current, _) = pane_lifecycle_snapshot(HostState::Reachable);
+        current.hosts[0].sessions = Some(HostSessionInventory {
+            snapshot: Some(serde_json::json!({"epoch":"owner", "revision":23})),
+            sections: Vec::new(),
+            runs: Vec::new(),
+            loops: Vec::new(),
+        });
+        let mut incoming = current.clone();
+        let inventory = incoming.hosts[0]
+            .sessions
+            .as_mut()
+            .expect("session inventory");
+        inventory.snapshot = Some(serde_json::json!({"epoch":"owner", "revision":24}));
+        inventory.sections.push(HostSessionSection {
+            name: "main",
+            pane_ids: vec!["new-pane".into()],
+        });
+        let expected = incoming.hosts[0].sessions.clone();
+        incoming.preserve_live_agent_inventory_from(&current, |_| true);
+        assert_eq!(incoming.hosts[0].sessions, expected);
+    }
+
+    #[test]
+    fn equal_safety_poll_preserves_rows_and_activity() {
+        let (mut current, _) = pane_lifecycle_snapshot(HostState::Reachable);
+        let now = unix_now_s();
+        current.hosts[0].entries[0].last_turn_at = Some(format_utc_timestamp(now));
+        let before = crate::ui::sidebar::remote_agent_panel_entries_at(&current, now, false);
+        assert!(before[0].entry.activity_at.is_some());
+        let mut incoming = current.clone();
+        incoming.preserve_live_agent_inventory_from(&current, |_| true);
+        assert_eq!(incoming.hosts[0].entries, current.hosts[0].entries);
+        let after = crate::ui::sidebar::remote_agent_panel_entries_at(&incoming, now + 1, false);
+        assert_eq!(before[0].entry.activity_at, after[0].entry.activity_at);
+    }
+
+    #[test]
+    fn safety_poll_keeps_newer_stream_rows_and_agents_missing_from_poll() {
+        let (base, _) = pane_lifecycle_snapshot(HostState::Reachable);
+        for state_changed in [false, true] {
+            let mut current = base.clone();
+            let mut incoming = current.clone();
+            let info = current.hosts[0].entries[0]
+                .agent_info
+                .as_mut()
+                .expect("owner");
+            if state_changed {
+                info.state_change_seq += 1;
+            } else {
+                info.revision += 1;
+            }
+            current.hosts[0]
+                .entries
+                .push(FleetRow::test_agent_row("office", "stream-only"));
+            incoming.preserve_live_agent_inventory_from(&current, |_| true);
+            assert_eq!(incoming.hosts[0].entries, current.hosts[0].entries);
+        }
+    }
+
+    #[test]
+    fn safety_poll_accepts_reset_agent_sequence() {
+        let (current, _) = pane_lifecycle_snapshot(HostState::Reachable);
+        for newer_content in [false, true] {
+            let mut incoming = current.clone();
+            let mut info = incoming.hosts[0].entries[0]
+                .agent_info()
+                .expect("owner")
+                .clone();
+            // Clearing agent authority resets this optional sequence to zero,
+            // while the terminal and its content revision survive.
+            info.state_change_seq = 0;
+            if newer_content {
+                info.revision += 1;
+            }
+            info.agent_status = AgentStatus::Unknown;
+            incoming.hosts[0].entries[0] = FleetRow::test_agent_info_row("office", info);
+            let expected = incoming.hosts[0].entries.clone();
+            incoming.preserve_live_agent_inventory_from(&current, |_| true);
+            assert_eq!(incoming.hosts[0].entries, expected);
+        }
+    }
+
+    #[test]
+    fn safety_poll_accepts_equal_or_missing_agent_revision() {
+        let (current, _) = pane_lifecycle_snapshot(HostState::Reachable);
+        for versioned in [true, false] {
+            let mut incoming = current.clone();
+            let row = &mut incoming.hosts[0].entries[0];
+            row.state = "blocked".into();
+            row.blocked = true;
+            if !versioned {
+                row.agent_info = None;
+            }
+            let expected = incoming.hosts[0].entries.clone();
+            incoming.preserve_live_agent_inventory_from(&current, |_| true);
+            assert_eq!(incoming.hosts[0].entries, expected);
+        }
+    }
+
+    #[test]
+    fn safety_poll_accepts_unversioned_sessions_and_owner_restart() {
+        let (mut current, _) = pane_lifecycle_snapshot(HostState::Reachable);
+        current.hosts[0].sessions = Some(HostSessionInventory {
+            snapshot: Some(serde_json::json!({"epoch":"old", "revision":23})),
+            sections: Vec::new(),
+            runs: Vec::new(),
+            loops: Vec::new(),
+        });
+        for snapshot in [
+            serde_json::json!({"epoch":"new", "revision":1}),
+            serde_json::json!({}),
+        ] {
+            let mut incoming = current.clone();
+            let inventory = incoming.hosts[0].sessions.as_mut().expect("inventory");
+            inventory.snapshot = Some(snapshot);
+            inventory.sections.push(HostSessionSection {
+                name: "main",
+                pane_ids: vec!["new-pane".into()],
+            });
+            let expected = incoming.hosts[0].sessions.clone();
+            incoming.preserve_live_agent_inventory_from(&current, |_| true);
+            assert_eq!(incoming.hosts[0].sessions, expected);
+        }
+    }
+
+    #[test]
     fn cached_poll_preserves_live_session_snapshot_and_sections() {
         let (mut current, _) = pane_lifecycle_snapshot(HostState::Reachable);
         let inventory = HostSessionInventory {
@@ -8552,7 +8771,7 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
         current.hosts[0].sessions = Some(inventory.clone());
         let mut cached = current.clone();
         cached.hosts[0].sessions = Some(HostSessionInventory {
-            snapshot: Some(serde_json::json!({"epoch":"old", "revision":1})),
+            snapshot: Some(serde_json::json!({"epoch":"current", "revision":1})),
             sections: Vec::new(),
             runs: Vec::new(),
             loops: Vec::new(),

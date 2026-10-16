@@ -5309,10 +5309,19 @@ mod tests {
     fn install_remote_click_snapshot(app: &mut App, first_age: u64, include_first: bool) {
         let mut first =
             crate::fleet::FleetRow::test_agent_row_with_state("ub1", "pane/first", "working");
+        // Sidebar order follows the owner's turn timestamp, not the polled age.
+        let now = time::OffsetDateTime::now_utc();
+        let turn_at = |age: u64| {
+            (now - time::Duration::seconds(i64::try_from(age).expect("test age")))
+                .format(&time::format_description::well_known::Rfc3339)
+                .expect("turn timestamp")
+        };
         first.age_s = Some(first_age);
+        first.last_turn_at = Some(turn_at(first_age));
         let mut second =
             crate::fleet::FleetRow::test_agent_row_with_state("ub1", "pane/second", "working");
         second.age_s = Some(10);
+        second.last_turn_at = Some(turn_at(10));
         let entries = if include_first {
             vec![first, second]
         } else {
@@ -5406,14 +5415,14 @@ mod tests {
     }
 
     #[test]
-    fn remote_click_survives_reordering_fleet_update() {
+    fn remote_click_survives_activity_timestamp_update() {
         let (mut app, agent_ref, column, row) = remote_click_fixture();
         press_remote_click(&mut app, column, row);
         install_remote_click_snapshot(&mut app, 60, true);
-        assert_ne!(
+        assert_eq!(
             crate::ui::remote_agent_row_at(&app.state, row).as_ref(),
             Some(&agent_ref),
-            "fleet update must move the pressed agent"
+            "activity timestamp changes must not reorder stable identities"
         );
         assert_remote_click_opens(&mut app, &agent_ref, column, row);
     }

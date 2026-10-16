@@ -2002,6 +2002,38 @@ mod tests {
     }
 
     #[test]
+    fn agent_inventory_reports_owner_tab_parked_with_legacy_json_default() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        mark_agent(&mut app, 0, pane_id);
+        for parked in [true, false] {
+            app.state.workspaces[0].tabs[0].parked = parked;
+            let response = app.handle_agent_list("parked".into());
+            let success: SuccessResponse = serde_json::from_str(&response).expect("agent list");
+            let ResponseResult::AgentList { agents } = success.result else {
+                panic!("agent inventory response");
+            };
+            assert_eq!(agents.len(), 1);
+            assert_eq!(agents[0].parked, parked);
+            let mut value = serde_json::to_value(&agents[0]).expect("serialize inventory");
+            assert_eq!(
+                value.get("parked"),
+                parked.then_some(&serde_json::Value::Bool(true))
+            );
+            let decoded: crate::api::schema::AgentInfo =
+                serde_json::from_value(value.clone()).expect("inventory round trip");
+            assert_eq!(decoded.parked, parked);
+            value
+                .as_object_mut()
+                .expect("inventory object")
+                .remove("parked");
+            let legacy: crate::api::schema::AgentInfo =
+                serde_json::from_value(value).expect("legacy inventory without parked");
+            assert!(!legacy.parked);
+        }
+    }
+
+    #[test]
     fn agent_list_uses_the_server_self_name_and_public_pane_id() {
         let mut app = app_with_agent();
         app.state.agent_host_name = "laptop".to_string();

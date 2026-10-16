@@ -391,6 +391,9 @@ pub struct AgentInfo {
     pub agent_session: Option<AgentSessionInfo>,
     pub workspace_id: String,
     pub tab_id: String,
+    /// Whether the owning tab is parked. Older hosts omit this field.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub parked: bool,
     pub pane_id: String,
     pub focused: bool,
     #[serde(default, skip_serializing_if = "super::is_false")]
