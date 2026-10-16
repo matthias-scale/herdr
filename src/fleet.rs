@@ -4559,29 +4559,32 @@ fn agent_work(agent: &AgentInfo) -> Option<String> {
 /// `display_title`, so their fallback cannot recover manual pane labels or know
 /// the remote user's home directory. It deliberately treats HOME as unknown.
 fn agent_title(agent: &AgentInfo) -> Option<String> {
+    // The native session name beats prompt-derived and host display titles.
+    if agent.work_context.session_name.is_some() {
+        return agent.work_context.session_name.clone();
+    }
     if agent.display_title.is_some() {
         return agent.display_title.clone();
     }
-    let title = agent.work_context.session_name.clone().or_else(|| {
-        crate::workspace::agent_title_from_terminal_or_work(crate::workspace::AgentTitleContext {
-            terminal_title: agent.terminal_title_stripped.as_deref(),
-            work_title: agent.work_context.work_title.as_deref(),
-            cwd: agent.cwd.as_deref().map(Path::new),
-            home: None,
-            agent_name: agent.name.as_deref(),
-            agent_label: agent.agent.as_deref(),
-            display_agent: agent.display_agent.as_deref(),
-            detected_agent: agent
-                .agent
-                .as_deref()
-                .and_then(crate::detect::parse_agent_label),
-        })
-    });
     let projection = crate::workspace::TabDisplayProjection::Derived {
         agent: None,
         ticket: agent.work_context.primary_ticket().map(str::to_string),
         binding: None,
-        title,
+        title: crate::workspace::agent_title_from_terminal_or_work(
+            crate::workspace::AgentTitleContext {
+                terminal_title: agent.terminal_title_stripped.as_deref(),
+                work_title: agent.work_context.work_title.as_deref(),
+                cwd: agent.cwd.as_deref().map(Path::new),
+                home: None,
+                agent_name: agent.name.as_deref(),
+                agent_label: agent.agent.as_deref(),
+                display_agent: agent.display_agent.as_deref(),
+                detected_agent: agent
+                    .agent
+                    .as_deref()
+                    .and_then(crate::detect::parse_agent_label),
+            },
+        ),
     };
     crate::workspace::session_title(Some(&projection), None)
 }
@@ -4744,13 +4747,16 @@ fn print_table(rows: &[FleetRow]) {
             .or(row.error.as_deref())
             .unwrap_or("-");
         println!(
-            "{:<7} {:<5} {:<20} {:<19} {:<20} {:<25} {:>5}  {}",
-            truncate(&row.host, 7),
-            row.source.table_label(),
-            truncate(identity, 20),
-            truncate(&model, 19),
-            truncate(row.work.as_deref().unwrap_or("-"), 20),
-            truncate(&state, 25),
+            "{} {} {} {} {} {} {:>5}  {}",
+            table_cell(&row.host, 7),
+            table_cell(row.source.table_label(), 5),
+            table_cell(identity, 20),
+            table_cell(&model, 19),
+            table_cell(
+                row.title.as_deref().or(row.work.as_deref()).unwrap_or("-"),
+                20
+            ),
+            table_cell(&state, 25),
             age_label(row.age_s),
             truncate(gate, 70),
         );
@@ -4760,7 +4766,7 @@ fn print_table(rows: &[FleetRow]) {
 fn human_state(state: &str) -> String {
     match state {
         "blocked_liveness_unknown" => "BLOCKED · UNKNOWN".into(),
-        "status_unknown" => "STATUS UNKNOWN".into(),
+        "status_unknown" => "UNKNOWN".into(),
         other => other.to_ascii_uppercase(),
     }
 }
@@ -4774,6 +4780,10 @@ fn truncate(value: &str, width: usize) -> String {
         .take(width.saturating_sub(1))
         .chain(['…'])
         .collect()
+}
+
+fn table_cell(value: &str, width: usize) -> String {
+    format!("{:<width$}", truncate(value, width))
 }
 
 fn age_label(age_s: Option<u64>) -> String {
@@ -8204,10 +8214,11 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
     }
 
     #[test]
-    fn remote_agent_title_prefers_host_display_title_verbatim() {
+    fn remote_agent_title_prefers_session_name_then_work_title() {
         let agent: AgentInfo = serde_json::from_value(serde_json::json!({
             "terminal_id": "term-1",
             "work_context": {
+                "session_name": "native session",
                 "ticket_ids": ["SCA-1"],
                 "work_title": "collector fallback"
             },
@@ -8226,7 +8237,36 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
         .expect("valid agent info");
 
         let row = FleetRow::from_agent("ub1", false, agent, 0).expect("valid fleet row");
-        assert_eq!(row.title.as_deref(), Some("SCA-9: exact host title"));
+        assert_eq!(row.title.as_deref(), Some("native session"));
+        assert_eq!(row.work.as_deref(), Some("SCA-1"));
+
+        let agent: AgentInfo = serde_json::from_value(serde_json::json!({
+            "terminal_id": "term-1",
+            "work_context": {
+                "ticket_ids": ["SCA-1"],
+                "work_title": "collector fallback"
+            },
+            "name": "cl-ceea66cc",
+            "agent": "codex",
+            "display_title": "runtime title",
+            "agent_status": "working",
+            "workspace_id": "w23",
+            "tab_id": "t1",
+            "pane_id": "w23:p1E",
+            "focused": false,
+            "revision": 1
+        }))
+        .expect("valid agent info");
+        let row = FleetRow::from_agent("ub1", false, agent, 0).expect("valid fleet row");
+        assert_eq!(row.title.as_deref(), Some("runtime title"));
+        assert_eq!(row.work.as_deref(), Some("SCA-1"));
+    }
+
+    #[test]
+    fn fleet_table_cells_are_fixed_width_and_unknown_state_is_one_token() {
+        assert_eq!(table_cell("a long session name", 8), "a long …");
+        assert_eq!(table_cell("idle", 8), "idle    ");
+        assert_eq!(human_state("status_unknown"), "UNKNOWN");
     }
 
     #[test]
