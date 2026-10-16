@@ -2421,7 +2421,7 @@
           "key": "remote.fleet.refresh_interval_ms",
           "type": "integer",
           "default": "15000",
-          "description": "Milliseconds between background fleet inventory refreshes. Minimum: 100."
+          "description": "Milliseconds between background fleet inventory refreshes. Minimum: 100. Host entries under [[remote.fleet.hosts]] may set wan = true (default false) to keep read-only terminal streams open for the active remote workspace and ten most recently focused panes."
         },
         {
           "key": "remote.fleet.timeout_ms",

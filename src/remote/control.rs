@@ -82,7 +82,14 @@ impl SshRunner for OpenSshRunner {
                 "SSH target must not begin with '-'",
             ));
         }
-        let mut command = ssh_command(host);
+        let channel = crate::fleet::channel::for_host(&host.target).map_err(io::Error::other)?;
+        channel
+            .ensure_binary_compatible(Duration::from_secs(5))
+            .map_err(io::Error::other)?;
+        let mut command = channel
+            .command(Duration::from_secs(5))
+            .map_err(io::Error::other)?;
+        configure_ssh_command(&mut command, host, false);
         let mut child = command.spawn()?;
         let Some(stdin) = child.stdin.take() else {
             return Err(io::Error::other("ssh stdin was not available"));
@@ -103,6 +110,16 @@ impl SshRunner for OpenSshRunner {
 #[cfg(unix)]
 fn ssh_command(host: &crate::config::FleetHostConfig) -> std::process::Command {
     let mut command = std::process::Command::new("ssh");
+    configure_ssh_command(&mut command, host, true);
+    command
+}
+
+#[cfg(unix)]
+fn configure_ssh_command(
+    command: &mut std::process::Command,
+    host: &crate::config::FleetHostConfig,
+    include_target: bool,
+) {
     let remote_command = if let Some(path) = host.socket.as_deref() {
         let session = host
             .session
@@ -121,21 +138,27 @@ fn ssh_command(host: &crate::config::FleetHostConfig) -> std::process::Command {
     } else {
         "herdr remote-control-bridge".to_owned()
     };
+    // The supervised command already has its target; options must precede it.
+    // OpenSSH accepts -T and BatchMode from the channel's base configuration.
+    if include_target {
+        command
+            .args([
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "RequestTTY=no",
+                "-o",
+                "ConnectTimeout=5",
+                "--",
+            ])
+            .arg(&host.target);
+    }
     command
-        .arg("-T")
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("RequestTTY=no")
-        .arg("-o")
-        .arg("ConnectTimeout=5")
-        .arg("--")
-        .arg(&host.target)
         .arg(remote_command)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    command
 }
 
 #[cfg(unix)]
@@ -301,6 +324,7 @@ impl ControlSessionTermination {
 #[derive(Clone)]
 struct SessionHandle {
     host: String,
+    agent: AgentRef,
     outbound_tx: tokio::sync::mpsc::Sender<ProxyOutbound>,
     detach_requested: Arc<AtomicBool>,
     writer_decision: Arc<Mutex<()>>,
@@ -308,8 +332,8 @@ struct SessionHandle {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RemoteHostIdentity {
-    remote_name: String,
+pub(super) struct RemoteHostIdentity {
+    pub(super) remote_name: String,
     target: String,
     socket: Option<String>,
     session: Option<String>,
@@ -325,6 +349,9 @@ pub(crate) struct SshRemoteFocusTransport {
     hosts: std::collections::HashMap<String, crate::config::FleetHostConfig>,
     remote_identities: std::collections::HashMap<String, RemoteHostIdentity>,
     config_generation: u64,
+    cache: std::sync::Arc<std::sync::Mutex<super::snapshot_cache::SnapshotCache>>,
+    #[cfg(unix)]
+    prewarm: super::prewarm::Prewarm,
 }
 
 impl SshRemoteFocusTransport {
@@ -340,6 +367,9 @@ impl SshRemoteFocusTransport {
             hosts,
             remote_identities: std::collections::HashMap::new(),
             config_generation: 0,
+            cache: Default::default(),
+            #[cfg(unix)]
+            prewarm: Default::default(),
         }
     }
 
@@ -367,6 +397,8 @@ impl SshRemoteFocusTransport {
     #[cfg(unix)]
     fn reconfigure(&mut self, fleet: &crate::config::FleetConfig) -> Vec<String> {
         let next_hosts = Self::admitted_hosts(fleet);
+        self.prewarm.clear();
+        *self.cache.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
         let revoked = {
             let sessions = self
                 .sessions
@@ -451,6 +483,10 @@ impl SshRemoteFocusTransport {
                 ),
             });
         }
+        self.prewarm.focus(agent_ref);
+        // Finish any observer cache write before a control frame can arrive.
+        drop(self.cache.lock().unwrap_or_else(|e| e.into_inner()));
+        let configured_agent = agent_ref.clone();
         let configured_host = agent_ref.host.clone();
         let remote_host = identity.remote_name.clone();
         let wire_agent_ref =
@@ -492,6 +528,7 @@ impl SshRemoteFocusTransport {
                 operation_id.clone(),
                 SessionHandle {
                     host: configured_host.clone(),
+                    agent: configured_agent,
                     outbound_tx: channels.detach_tx.clone(),
                     detach_requested: Arc::clone(&detach_requested),
                     writer_decision: Arc::clone(&writer_decision),
@@ -611,6 +648,60 @@ impl std::fmt::Debug for SshRemoteFocusTransport {
 }
 
 impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport {
+    fn replay_cached(
+        &mut self,
+        agent: &AgentRef,
+        runtime: &crate::terminal::TerminalRuntime,
+    ) -> bool {
+        self.cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replay(agent, |frame| {
+                runtime.process_remote_frame(&frame.bytes);
+            })
+    }
+    fn cache_frame(&mut self, agent: &AgentRef, frame: crate::protocol::TerminalFrame) {
+        self.cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(agent, frame);
+    }
+    fn cache_snapshot(&mut self, agent: &AgentRef, runtime: &crate::terminal::TerminalRuntime) {
+        if let Some(frame) = super::snapshot_cache::SnapshotCache::capture(runtime) {
+            self.cache_frame(agent, frame);
+        }
+    }
+    fn note_focus(&mut self, agent: &AgentRef) {
+        #[cfg(unix)]
+        self.prewarm.focus(agent);
+        #[cfg(not(unix))]
+        let _ = agent;
+    }
+    fn prewarm_workspace(&mut self, workspace: Option<&AgentRef>, size: (u16, u16)) {
+        #[cfg(unix)]
+        self.prewarm.set_size(size);
+        #[cfg(unix)]
+        if self.hosts.values().any(|host| host.wan) && self.prewarm.due(workspace) {
+            let active = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .map(|session| session.agent.clone())
+                .collect();
+            self.prewarm.update(
+                workspace,
+                &self.hosts,
+                &self.remote_identities,
+                Arc::clone(&self.runner),
+                Arc::clone(&self.cache),
+                &active,
+            );
+        }
+        #[cfg(not(unix))]
+        let _ = (workspace, size);
+    }
+
     fn accepts_remote_host(&self, host: &str) -> bool {
         self.hosts.contains_key(host)
     }
@@ -659,6 +750,10 @@ impl crate::app::remote_focus::RemoteFocusTransport for SshRemoteFocusTransport 
                     entry.insert(None);
                 }
             }
+        }
+        #[cfg(unix)]
+        if self.hosts.values().any(|host| host.wan) {
+            self.prewarm.observe(snapshot);
         }
         for (name, configured) in &self.hosts {
             let Some(Some(observed)) = observations.get(name.as_str()) else {
@@ -830,7 +925,7 @@ fn read_message_with_deadline(
 }
 
 #[cfg(unix)]
-fn read_initial_welcome(
+pub(super) fn read_initial_welcome(
     stream: &mut dyn ControlStream,
     deadline: Instant,
 ) -> Result<ServerMessage, protocol::FramingError> {
@@ -840,9 +935,9 @@ fn read_initial_welcome(
 }
 
 #[cfg(unix)]
-struct CancellableReader<'a> {
-    reader: &'a mut dyn ControlReadHalf,
-    detached: &'a AtomicBool,
+pub(super) struct CancellableReader<'a> {
+    pub(super) reader: &'a mut dyn ControlReadHalf,
+    pub(super) detached: &'a AtomicBool,
 }
 
 #[cfg(unix)]

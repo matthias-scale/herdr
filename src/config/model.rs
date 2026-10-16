@@ -2283,6 +2283,8 @@ pub struct FleetHostConfig {
     pub target: String,
     /// Read this machine's socket and run-state directory without SSH.
     pub local: bool,
+    /// Keep read-only pane streams warm on high-latency links. Default: false.
+    pub wan: bool,
     /// Optional Herdr socket override for this host.
     pub socket: Option<String>,
     /// Optional named Herdr session opened when this host is activated.
@@ -3874,5 +3876,19 @@ scrollback_lines = 12345
                 cache_read: 0.5,
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod fleet_wan_tests {
+    use super::FleetHostConfig;
+    #[test]
+    fn fleet_host_wan_is_optional_and_defaults_false() {
+        let default: FleetHostConfig =
+            toml::from_str("name = 'remote'\ntarget = 'remote'").expect("host");
+        assert!(!default.wan);
+        let wan: FleetHostConfig =
+            toml::from_str("name = 'remote'\ntarget = 'remote'\nwan = true").expect("WAN host");
+        assert!(wan.wan);
     }
 }
