@@ -148,6 +148,8 @@ use self::user_actions::render_add_action_overlay;
 use self::work_link_picker::render_work_link_picker;
 use self::work_view::render as render_work_view;
 
+#[cfg(test)]
+pub(crate) use self::sidebar::agent_panel_entries;
 pub(crate) use self::sidebar::local_agent_panel_identities;
 pub(crate) use self::{
     dialogs::{
@@ -163,16 +165,16 @@ pub(crate) use self::{
         SETTINGS_POPUP_WIDTH,
     },
     sidebar::{
-        agent_counts_by_workspace, agent_panel_entries, all_agent_panel_entries,
-        collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
-        collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
-        expanded_sidebar_toggle_rect, needs_you_more_at, needs_you_row_at,
-        normalized_workspace_scroll, relative_agent_navigation_entry, remote_agent_panel_entries,
-        remote_agent_panel_entries_at, remote_agent_row_at, repo_group_focus_plan,
-        sidebar_agent_run_at, sidebar_aloop_target_at, sidebar_coverage, sidebar_dim_header_at,
-        sidebar_filter_anchor_rect, sidebar_filter_menu_layout, sidebar_filter_options,
-        sidebar_group_menu_layout, sidebar_group_mode_anchor_rect_for_app,
-        sidebar_header_new_menu_rect, sidebar_header_new_thread_rect, sidebar_header_overflow_rect,
+        agent_counts_by_workspace, all_agent_panel_entries, collapsed_sidebar_row_scroll,
+        collapsed_sidebar_scroll_for_target, collapsed_sidebar_sections,
+        collapsed_sidebar_toggle_rect, compute_sidebar_row_areas, expanded_sidebar_toggle_rect,
+        needs_you_more_at, needs_you_row_at, normalized_workspace_scroll,
+        relative_agent_navigation_entry, remote_agent_panel_entries, remote_agent_panel_entries_at,
+        remote_agent_row_at, repo_group_focus_plan, sidebar_agent_run_at, sidebar_aloop_target_at,
+        sidebar_coverage, sidebar_dim_header_at, sidebar_filter_anchor_rect,
+        sidebar_filter_menu_layout, sidebar_filter_options, sidebar_group_menu_layout,
+        sidebar_group_mode_anchor_rect_for_app, sidebar_header_new_menu_rect,
+        sidebar_header_new_thread_rect, sidebar_header_overflow_rect,
         sidebar_header_search_rect_for_app, sidebar_header_star_filter_rect,
         sidebar_missive_copy_url, sidebar_nested_header_at, sidebar_new_menu_layout,
         sidebar_new_thread_layout, sidebar_new_thread_matches, sidebar_object_action_at,
