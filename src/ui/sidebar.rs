@@ -3,6 +3,7 @@ mod coverage;
 mod fleet_grouping;
 pub(crate) use fleet_grouping::host_options as host_filter_options;
 pub(crate) mod devices;
+pub(crate) mod fleet_panels;
 pub(crate) mod inbox;
 pub(crate) mod notes;
 mod runs;
@@ -2479,11 +2480,15 @@ fn expanded_sidebar_content(area: Rect) -> Rect {
 fn expanded_sidebar_content_for_app(app: &AppState, area: Rect) -> Rect {
     let content = expanded_sidebar_content(area);
     let host_row = u16::from(sidebar_hosts_rect(app, area).width > 0);
+    let fleet_rows = fleet_panels::area(app, area).height;
     Rect::new(
         content.x,
         content.y,
         content.width,
-        content.height.saturating_sub(host_row),
+        content
+            .height
+            .saturating_sub(host_row)
+            .saturating_sub(fleet_rows),
     )
 }
 
@@ -11826,6 +11831,7 @@ pub(super) fn render_sidebar(
         crate::ui::notepad::render_notepad(app, frame, sidebar_notepad_rect(app, area));
         crate::ui::goals::render_goals(app, frame, sidebar_goals_rect(app, area));
     }
+    fleet_panels::render(app, frame, area);
     render_sidebar_header(app, frame, area, p);
     if finder_open {
         render_agent_finder_footer(app, frame, area);
@@ -34527,7 +34533,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_areas.hosts = true;
         app.notepad.enabled = true;
         app.notepad.height = 18;
-        app.notepad.set_visible_tabs(vec!["usage".to_string()]);
+        app.notepad.set_visible_tabs(vec!["context".to_string()]);
         app.goals.enabled = true;
         app.goals.load = crate::goals::GoalsLoad::Ready(
             crate::goals::parse(

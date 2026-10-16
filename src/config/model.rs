@@ -1965,6 +1965,9 @@ pub struct UiConfig {
     pub hide_whitespace_in_diff: bool,
     /// Render Nerd Font glyphs in the UI and file lists. Default: true.
     pub nerd_font: bool,
+    /// Use companion Herdr Icons subscript glyphs. Default: false. Enable only
+    /// after every displaying client has the updated font; otherwise labels stay plain.
+    pub subscript_glyphs: bool,
     /// Custom icon overrides for Space headers.
     pub icons: UiIconsConfig,
     /// Workspace preselected in the Home composer for a new thread.
@@ -2514,6 +2517,7 @@ impl Default for UiConfig {
             combine_repos_across_hosts: false,
             hide_whitespace_in_diff: false,
             nerd_font: true,
+            subscript_glyphs: false,
             icons: UiIconsConfig::default(),
             new_thread_workspace: NewThreadWorkspaceConfig::CurrentCheckout,
             add_project_start_dir: String::new(),
@@ -3799,6 +3803,9 @@ scrollback_lines = 12345
     #[test]
     fn nerd_font_defaults_on_and_accepts_an_ascii_fallback() {
         assert!(Config::default().ui.nerd_font);
+        assert!(!Config::default().ui.subscript_glyphs);
+        let config: Config = toml::from_str("[ui]\nsubscript_glyphs = true\n").unwrap();
+        assert!(config.ui.subscript_glyphs);
         assert_eq!(Config::default().files.icons, FilesIconConfig::Nerd);
         let config: Config = toml::from_str("[ui]\nnerd_font = false\n").unwrap();
         assert!(!config.ui.nerd_font);

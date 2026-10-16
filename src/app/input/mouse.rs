@@ -1420,6 +1420,18 @@ impl AppState {
 
                 if in_sidebar {
                     self.sidebar_selected_settled = None;
+                    if !self.sidebar_collapsed {
+                        if let Some(index) =
+                            crate::ui::sidebar::fleet_panels::row_at(self, mouse.column, mouse.row)
+                        {
+                            if crate::ui::sidebar::fleet_panels::token_at(self, index, mouse.column)
+                                .is_none()
+                            {
+                                crate::ui::sidebar::fleet_panels::toggle(self, index);
+                            }
+                            return None;
+                        }
+                    }
                     if self.on_sidebar_toggle(mouse.column, mouse.row) {
                         self.toggle_sidebar_collapsed();
                         return None;
@@ -2171,6 +2183,19 @@ impl AppState {
                     self.forward_pane_reported_wheel(terminal_runtimes, &info, mouse);
                 }
             }
+
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if in_sidebar
+                    && crate::ui::sidebar::fleet_panels::scroll(
+                        self,
+                        mouse.column,
+                        mouse.row,
+                        if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                            -1
+                        } else {
+                            1
+                        },
+                    ) => {}
 
             MouseEventKind::ScrollUp if in_sidebar => {
                 if !self.scroll_collapsed_sidebar(-1) {

@@ -10,7 +10,7 @@ pub(crate) const STATUS_METRIC_REFRESH_INTERVAL: Duration = Duration::from_secs(
 pub(crate) const STATUS_METRIC_STALE_AFTER: Duration = Duration::from_secs(4);
 const STATUS_METRIC_REPAINT_INTERVAL: Duration = Duration::from_secs(4);
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StatusMetrics {
     pub cpu_percent: Option<u8>,
     /// Logical core count, so a busy percentage can be read as cores.
