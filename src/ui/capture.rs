@@ -193,7 +193,7 @@ fn footer(app: &AppState, frame: &mut Frame, rect: Rect) {
         return;
     };
     let queued = capture.queued_count;
-    let active = capture.spawned_count + capture.active_count;
+    let active = capture.active_count;
     let rows = [
         "Enter save · Ctrl+S spawn · Esc close".to_string(),
         format!(

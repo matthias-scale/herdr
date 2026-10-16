@@ -587,12 +587,11 @@ impl App {
             Some(crate::app::capture::CaptureAction::Consumed) => self.persist_capture_draft(),
             Some(crate::app::capture::CaptureAction::Spawn) => {
                 let active = self.focus_active_count();
-                let spawned = crate::focus_capture::queue_counts(&self.state.focus_dir).spawned;
-                if active + spawned >= self.state.focus_spawn_limit {
+                if active >= self.state.focus_spawn_limit {
                     if let Some(capture) = self.state.capture.as_mut() {
                         capture.gate_reason = Some(String::new());
                         capture.entering_reason = true;
-                        capture.error = Some(format!("{} agents already active — type a reason for urgent, Enter to spawn, Esc to just save", active + spawned));
+                        capture.error = Some(format!("{} agents already active — type a reason for urgent, Enter to spawn, Esc to just save", active));
                     }
                     return;
                 }
