@@ -3134,6 +3134,7 @@ pub(crate) fn remote_agent_panel_entries_at(
                     remote_host: None,
                 },
             );
+            panel_entry.parked = row.agent_info().is_some_and(|info| info.parked);
             panel_entry.last_turn_at = row
                 .last_turn_at
                 .as_deref()
@@ -4507,6 +4508,25 @@ fn compact_sidebar_rows_inner(
     } else {
         Vec::new()
     };
+    inbox_new_entries.extend(
+        remote_entries
+            .iter()
+            .filter(|entry| {
+                entry.parked
+                    && (!sections_layout
+                        || app
+                            .sidebar_presentation
+                            .host_filter
+                            .as_deref()
+                            .is_none_or(|host| sidebar_machine_host(app, entry) == host))
+            })
+            .cloned()
+            .map(|mut entry| {
+                entry.working_shelf = true;
+                entry
+            }),
+    );
+    remote_entries.retain(|entry| !entry.parked);
     if app.blocked_filter {
         remote_entries.retain(|entry| {
             entry_has_red_dot(entry)
@@ -6129,10 +6149,7 @@ fn append_inbox_new_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[
         collapsed,
     });
     if !collapsed {
-        rows.extend(entries.iter().cloned().map(|entry| SidebarRow::Tab {
-            entry: Box::new(entry),
-            depth: 0,
-        }));
+        append_tab_rows(rows, entries.to_vec(), 0);
     }
 }
 
@@ -33716,6 +33733,71 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(needs_you < active && active < settled);
         assert!(settled < pods && pods < unassigned && unassigned < run && run < loop_row);
         assert!(loop_row < symphony);
+    }
+
+    #[test]
+    fn remote_parked_agents_move_between_inbox_and_done_on_fleet_refresh() {
+        let mut app = app_with_agents(&["local"]);
+        app.sidebar_sections_layout = true;
+        app.toggle_sidebar_group(INBOX_NEW_SECTION_TITLE);
+        app.toggle_sidebar_group(DONE_IDLE_SECTION_TITLE);
+        for parked in [true, false] {
+            let mut value = serde_json::to_value(remote_agent_info(
+                "remote-pane",
+                "remote parked",
+                crate::api::schema::AgentStatus::Done,
+                false,
+                false,
+            ))
+            .expect("agent payload");
+            value["parked"] = serde_json::json!(parked);
+            let info = serde_json::from_value(value).expect("remote inventory");
+            let snapshot = crate::fleet::Snapshot {
+                polled: true,
+                hosts: vec![fleet_host_snapshot(
+                    "remote-b",
+                    false,
+                    vec![crate::fleet::FleetRow::test_agent_info_row(
+                        "remote-b", info,
+                    )],
+                )],
+                ..crate::fleet::Snapshot::default()
+            };
+            app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
+            let rows = sidebar_rows(&app);
+            let mut section = "";
+            let mut remote_sections = Vec::new();
+            for row in &rows {
+                match row {
+                    SidebarRow::SectionHeader { title, .. } => section = title,
+                    SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
+                        if matches!(entry.identity, AgentPanelIdentity::Remote(_)) =>
+                    {
+                        remote_sections.push(section);
+                        assert_eq!(entry.parked, parked);
+                    }
+                    SidebarRow::RemoteAgent {
+                        entry,
+                        working_shelf,
+                        ..
+                    } => {
+                        assert_eq!(entry.entry.parked, parked);
+                        assert_eq!(*working_shelf, parked);
+                        remote_sections.push(section);
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                remote_sections,
+                vec![if parked {
+                    INBOX_NEW_SECTION_TITLE
+                } else {
+                    DONE_IDLE_SECTION_TITLE
+                }],
+                "remote parked={parked} must appear exactly once in its section"
+            );
+        }
     }
 
     #[test]
