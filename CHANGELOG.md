@@ -5,6 +5,9 @@
 ### Added
 - Browse settled agents from the keyboard and read their saved Claude or Codex transcript read-only; the resume command is pre-typed so Enter resumes and Esc keeps the pane settled. (#469)
 
+### Fixed
+- Claude plan-accept prompts, AskUserQuestion dialogs, and replies ending in `**Now:** waiting on you` now show as blocked and join the blocker cycle instead of an unknown `?`.
+
 ## [0.9.1] - 2026-09-16
 
 ### Added

@@ -333,12 +333,18 @@ impl Turn {
             && (self.final_reply && self.pending_tools.is_empty() || !self.ask_tools.is_empty())
         {
             let closing = parse_closing(&self.text);
-            self.blocked = closing.state == "blocked";
-            let state = match closing.state.as_str() {
-                "blocked" => AgentState::Blocked,
-                "working" => AgentState::Working,
-                "idle" => AgentState::Idle,
-                _ => AgentState::Unknown,
+            // A pending dialog is Claude's own wait on the human; no closing record can exist mid-tool-call.
+            let ask_pending = !self.ask_tools.is_empty();
+            self.blocked = ask_pending || closing.state == "blocked";
+            let state = if ask_pending {
+                AgentState::Blocked
+            } else {
+                match closing.state.as_str() {
+                    "blocked" => AgentState::Blocked,
+                    "working" => AgentState::Working,
+                    "idle" => AgentState::Idle,
+                    _ => AgentState::Unknown,
+                }
             };
             self.closing = Some(closing);
             self.settled = true;
@@ -689,7 +695,7 @@ mod tests {
         assert_eq!(turn.record().unwrap()["stop_hook_rejections"], 1);
     }
     #[test]
-    fn pending_question_without_a_record_is_unknown_and_interrupted_turn() {
+    fn pending_question_without_a_record_is_blocked_until_a_new_prompt() {
         let mut turn = Turn::default();
         feed(&mut turn, user("choose"), 0);
         feed(
@@ -697,10 +703,45 @@ mod tests {
             json!({"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"ask1","name":"AskUserQuestion"}]}}),
             1,
         );
-        assert_eq!(state(&mut turn, 4), Some(AgentState::Unknown));
+        assert_eq!(state(&mut turn, 4), Some(AgentState::Blocked));
+        assert_eq!(turn.record().unwrap()["detected_kind"], "ask");
         feed(&mut turn, user("new prompt"), 10);
         assert_eq!(state(&mut turn, 100), Some(AgentState::Working));
-        assert!(turn.record().is_none());
+    }
+    #[test]
+    fn plan_accept_prompt_is_blocked_until_the_plan_is_answered() {
+        let mut turn = Turn::default();
+        feed(&mut turn, user("write a plan"), 0);
+        feed(
+            &mut turn,
+            json!({"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"Here is the plan."},{"type":"tool_use","id":"plan1","name":"ExitPlanMode","input":{"plan":"..."}}]}}),
+            1,
+        );
+        assert_eq!(state(&mut turn, 3), Some(AgentState::Working));
+        assert_eq!(state(&mut turn, 4), Some(AgentState::Blocked));
+        feed(
+            &mut turn,
+            json!({"type":"assistant","message":{"content":[]}}),
+            5,
+        );
+        assert_eq!(state(&mut turn, 20), Some(AgentState::Blocked));
+        feed(
+            &mut turn,
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"plan1","content":"approved"}]}}),
+            21,
+        );
+        assert_eq!(state(&mut turn, 22), Some(AgentState::Working));
+    }
+    #[test]
+    fn waiting_on_you_without_a_closing_record_is_blocked() {
+        let mut turn = Turn::default();
+        feed(&mut turn, user("work"), 0);
+        feed(
+            &mut turn,
+            final_reply("**Needs you:** a) A, b) B.\n\n**Now:** waiting on you."),
+            1,
+        );
+        assert_eq!(state(&mut turn, 4), Some(AgentState::Blocked));
     }
     #[test]
     fn final_reply_settles_with_background_task_and_notification_reopens_turn() {
@@ -769,7 +810,7 @@ mod tests {
             json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"ask1","name":"AskUserQuestion"}]}}),
             1,
         );
-        assert_eq!(state(&mut turn, 4), Some(AgentState::Unknown));
+        assert_eq!(state(&mut turn, 4), Some(AgentState::Blocked));
         feed(
             &mut turn,
             json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"ask1","content":"option one"}]}}),
@@ -779,11 +820,11 @@ mod tests {
         assert!(turn.next_action.is_some());
         assert_eq!(
             turn.next_action.as_ref().unwrap()["state_at_settle"],
-            "unknown"
+            "blocked"
         );
         assert_eq!(
             turn.next_action.as_ref().unwrap()["state_at_next_action"],
-            "unknown"
+            "blocked"
         );
         turn.background.insert("abc".into());
         feed(

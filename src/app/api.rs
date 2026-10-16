@@ -803,7 +803,7 @@ impl App {
                 operation_id,
                 frame,
             } => {
-                self.apply_remote_focus_frame(&operation_id, &frame);
+                self.apply_and_cache_remote_focus_frame(&operation_id, *frame);
                 false
             }
             AppEvent::ConnectivityProbed { reachable } => {
@@ -1014,7 +1014,7 @@ impl App {
             frame,
         } = ev
         {
-            self.apply_remote_focus_frame(&operation_id, &frame);
+            self.apply_and_cache_remote_focus_frame(&operation_id, *frame);
             return Some(false);
         }
         if let AppEvent::SymphonyWorkflowsRefreshed { snapshot } = ev {

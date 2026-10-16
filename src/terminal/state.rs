@@ -5538,6 +5538,21 @@ impl TerminalState {
             {
                 return (AgentState::Blocked, "transcript_permission");
             }
+            let matching_blocked_hook = self.hook_authority.as_ref().is_some_and(|authority| {
+                authority.state == AgentState::Blocked
+                    && authority.retired_at.is_none()
+                    && self.detected_agent.is_some_and(|agent| {
+                        crate::detect::parse_agent_label(&authority.agent_label) == Some(agent)
+                    })
+            });
+            if state == AgentState::Unknown
+                && (self.fallback_visible_blocker || matching_blocked_hook)
+            {
+                return (
+                    AgentState::Blocked,
+                    "screen_blocker_over_unknown_transcript",
+                );
+            }
             return (state, "transcript");
         }
         let (state, arbitration) = self.lifecycle_state_and_arbitration();
@@ -15705,6 +15720,71 @@ mod transcript_turn_tests {
             Instant::now(),
         );
         assert_eq!(terminal.raw_agent_state(), AgentState::Working);
+    }
+
+    #[test]
+    fn visible_blocker_promotes_unknown_transcript_only() {
+        let now = Instant::now();
+        let mut terminal = terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Unknown),
+            Some(SystemTime::now()),
+            0,
+            1,
+            now,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Blocked,
+            true,
+            false,
+            false,
+            false,
+            false,
+            now,
+        );
+        assert_eq!(terminal.raw_agent_state(), AgentState::Blocked);
+        assert_eq!(
+            terminal.effective_state_arbitration(),
+            "screen_blocker_over_unknown_transcript"
+        );
+
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Idle),
+            Some(SystemTime::now()),
+            0,
+            2,
+            now,
+        );
+        assert_eq!(terminal.raw_agent_state(), AgentState::Idle);
+        assert_eq!(terminal.effective_state_arbitration(), "transcript");
+    }
+
+    #[test]
+    fn visible_idle_does_not_promote_unknown_transcript() {
+        let now = Instant::now();
+        let mut terminal = terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Unknown),
+            Some(SystemTime::now()),
+            0,
+            1,
+            now,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            now,
+        );
+        assert_eq!(terminal.raw_agent_state(), AgentState::Unknown);
+        assert_eq!(terminal.effective_state_arbitration(), "transcript");
     }
 
     #[test]
