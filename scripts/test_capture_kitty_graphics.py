@@ -3,6 +3,7 @@ import os
 import socket
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -373,7 +374,7 @@ class IsolationTests(unittest.TestCase):
             }
         }
         self.assertEqual(
-            capture.pane_region(window, layout, "wD:p1"),
+            capture.pane_region(window, layout, "wD:p1", {"cols": 80, "rows": 30}),
             (50, 260, 80, 80),
         )
         smaller_client = {"rect": {"x": 0, "y": 0, "width": 480, "height": 320}}
@@ -391,7 +392,9 @@ class IsolationTests(unittest.TestCase):
             }
         }
         self.assertEqual(
-            capture.pane_region(smaller_client, smaller_layout, "wD:p1"),
+            capture.pane_region(
+                smaller_client, smaller_layout, "wD:p1", {"cols": 60, "rows": 20}
+            ),
             (16, 192, 64, 64),
         )
 
@@ -711,6 +714,39 @@ class WezTermEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(capture.CaptureError, "geometry mismatch"):
             capture.validate_wezterm_geometry(pane, layout, "herdr:D:p1")
 
+    def test_chrome_offset_content_area_scales_by_outer_terminal_grid(self):
+        # `pane layout` reports view.terminal_area (content after sidebar, tab bar
+        # and dock) and absolute pane rects; the screenshot spans the outer grid.
+        pane = self.pane()
+        pane.update(cols=120, rows=40, pixel_width=1200, pixel_height=800)
+        window = {"rect": {"x": 0, "y": 0, "width": 1200, "height": 800}}
+        layout = {
+            "result": {
+                "layout": {
+                    "area": {"x": 26, "y": 1, "width": 94, "height": 36},
+                    "panes": [
+                        {
+                            "pane_id": "herdr:D:p1",
+                            "rect": {"x": 26, "y": 1, "width": 94, "height": 36},
+                        }
+                    ],
+                }
+            }
+        }
+        capture.validate_wezterm_geometry(pane, layout, "herdr:D:p1")
+        self.assertEqual(
+            capture.pane_region(window, layout, "herdr:D:p1", pane),
+            (
+                (26 + capture.FIXTURE_COLUMN - 1) * 10,
+                (1 + capture.FIXTURE_ROW - 1) * 20,
+                capture.FIXTURE_COLUMNS * 10,
+                capture.FIXTURE_ROWS * 20,
+            ),
+        )
+        layout["result"]["layout"]["area"]["width"] = 95
+        with self.assertRaisesRegex(capture.CaptureError, "geometry mismatch"):
+            capture.validate_wezterm_geometry(pane, layout, "herdr:D:p1")
+
     def test_compositor_geometry_must_match_the_owned_app_id(self):
         window = {
             "app_id": "herdr-private-d",
@@ -749,6 +785,94 @@ class WezTermEvidenceTests(unittest.TestCase):
             self.assertIn(
                 f"\x1b[{capture.MARKER_ROW};{capture.MARKER_COLUMN}H".encode(), sequence
             )
+
+
+class ScenarioContractTests(unittest.TestCase):
+    def default_config_keys(self):
+        source = (Path(__file__).resolve().parents[1] / "src" / "main.rs").read_text(
+            encoding="utf-8"
+        )
+        body = source.split('const DEFAULT_CONFIG: &str = r##"', 1)[1].split('"##', 1)[
+            0
+        ]
+        section, keys = "", set()
+        for line in body.splitlines():
+            if line.startswith("["):
+                section = line.strip("[]")
+            elif line.startswith("# ") and " = " in line:
+                keys.add((section, line[2:].split(" = ", 1)[0]))
+        return keys
+
+    def test_scenario_config_keys_exist_in_the_source_default_config(self):
+        config = tomllib.loads(capture.scenario_config())
+        known = self.default_config_keys()
+        for name, value in config.items():
+            pairs = value.items() if isinstance(value, dict) else [(name, value)]
+            for key, _ in pairs:
+                section = name if isinstance(value, dict) else ""
+                self.assertIn((section, key), known)
+        self.assertIs(config["onboarding"], False)
+        self.assertIs(config["experimental"]["kitty_graphics"], True)
+        self.assertIs(config["ui"]["show_home_on_start"], False)
+        # Direct F6 dispatches in Terminal mode; a fresh server without Home
+        # starts in Navigate mode, which matches prefix-form bindings.
+        self.assertEqual(config["keys"]["next_workspace"], ["f6", "prefix+f6"])
+
+    def test_pair_starts_owned_server_before_any_client(self):
+        scenario = mock.Mock()
+        scenario.start_client.side_effect = RuntimeError("stop after first client")
+        with self.assertRaisesRegex(RuntimeError, "stop after first client"):
+            capture.HerdrScenario.create_pair(scenario)
+        names = [call[0] for call in scenario.method_calls]
+        self.assertEqual(names[:3], ["start_server", "cli", "start_client"])
+
+    def test_owned_server_is_launched_in_foreground_and_bound_to_its_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run = mock.Mock(root=root)
+            run.own.side_effect = lambda process: process
+            scenario = SimpleNamespace(
+                run=run,
+                binary=Path("/opt/herdr"),
+                session="mat354-x-baseline",
+                label="baseline",
+                env={"HOME": str(root)},
+                home=root,
+                workdir=root / "work",
+                processes=[],
+                server_identity=None,
+            )
+            process = SimpleNamespace(pid=41)
+            with (
+                mock.patch.object(
+                    capture, "OwnedProcess", return_value=process
+                ) as owned,
+                mock.patch.object(
+                    capture,
+                    "wait_for_owned_server",
+                    return_value=SimpleNamespace(pid=41),
+                ),
+            ):
+                capture.HerdrScenario.start_server(scenario)
+            command, env = owned.call_args.args[1:3]
+            self.assertEqual(
+                command, ["/opt/herdr", "server", "--session", "mat354-x-baseline"]
+            )
+            self.assertEqual(env["HERDR_STARTUP_CWD"], str(root / "work"))
+            self.assertEqual(scenario.processes, [process])
+            self.assertEqual(scenario.server_identity.pid, 41)
+            run.record_server_process.assert_called_once()
+            scenario.server_identity = None
+            with (
+                mock.patch.object(capture, "OwnedProcess", return_value=process),
+                mock.patch.object(
+                    capture,
+                    "wait_for_owned_server",
+                    return_value=SimpleNamespace(pid=42),
+                ),
+                self.assertRaisesRegex(capture.CaptureError, "owned server"),
+            ):
+                capture.HerdrScenario.start_server(scenario)
 
 
 if __name__ == "__main__":

@@ -386,7 +386,10 @@ def validate_wezterm_geometry(pane: dict, layout: dict, pane_id: str) -> None:
     rect = selected.get("rect") if selected else None
     if not area or not rect:
         raise CaptureError("Herdr pane layout lacks geometry for the selected pane")
-    if pane["cols"] != area.get("width") or pane["rows"] != area.get("height"):
+    if (
+        area.get("x", 0) + area.get("width", 0) > pane["cols"]
+        or area.get("y", 0) + area.get("height", 0) > pane["rows"]
+    ):
         raise CaptureError(
             "WezTerm outer pane and Herdr layout geometry mismatch; refusing stale coordinates"
         )
@@ -588,6 +591,18 @@ def wezterm_start_command(
         session,
         "client",
     ]
+
+
+def scenario_config() -> str:
+    return (
+        "onboarding = false\n\n"
+        "[keys]\n"
+        'next_workspace = ["f6", "prefix+f6"]\n\n'
+        "[ui]\n"
+        "show_home_on_start = false\n\n"
+        "[experimental]\n"
+        "kitty_graphics = true\n"
+    )
 
 
 def private_wezterm_config() -> str:
@@ -1253,7 +1268,9 @@ class CaptureRun:
         )
 
 
-def pane_region(window: dict, layout: dict, pane_id: str) -> tuple[int, int, int, int]:
+def pane_region(
+    window: dict, layout: dict, pane_id: str, outer: dict
+) -> tuple[int, int, int, int]:
     body = layout.get("result", {}).get("layout", layout.get("result", {}))
     area = body.get("area")
     panes = body.get("panes")
@@ -1271,8 +1288,8 @@ def pane_region(window: dict, layout: dict, pane_id: str) -> tuple[int, int, int
         raise CaptureError(
             "receiving client pane is too small for the positioned Kitty fixture"
         )
-    cell_width = window_rect["width"] / area["width"]
-    cell_height = window_rect["height"] / area["height"]
+    cell_width = window_rect["width"] / outer["cols"]
+    cell_height = window_rect["height"] / outer["rows"]
     left = round((rect["x"] + FIXTURE_COLUMN - 1) * cell_width)
     top = round((rect["y"] + FIXTURE_ROW - 1) * cell_height)
     width = min(window_rect["width"] - left, round(FIXTURE_COLUMNS * cell_width))
@@ -1300,7 +1317,7 @@ class HerdrScenario:
         self.runtime.mkdir(parents=True, exist_ok=True)
         os.chmod(self.runtime, 0o700)
         self.config.parent.mkdir(parents=True, exist_ok=True)
-        self.config.write_text("onboarding = false\n", encoding="utf-8")
+        self.config.write_text(scenario_config(), encoding="utf-8")
         if not run.display:
             raise CaptureError(
                 "private Wayland display was not discovered after Sway startup"
@@ -1355,6 +1372,22 @@ class HerdrScenario:
             )
             self.run.record_server_process(self, self.server_identity)
         return response
+
+    def start_server(self) -> None:
+        process = OwnedProcess(
+            f"{self.label}-server",
+            [str(self.binary), "server", "--session", self.session],
+            {**self.env, "HERDR_STARTUP_CWD": str(self.workdir)},
+            self.run.root / "logs" / f"{self.label}-server.log",
+        )
+        self.processes.append(self.run.own(process))
+        identity = wait_for_owned_server(self.binary, self.session, self.home)
+        if identity.pid != process.pid:
+            raise CaptureError(
+                f"owned server for {self.session} is not the launched PID"
+            )
+        self.server_identity = identity
+        self.run.record_server_process(self, identity)
 
     def start_client(self, app_id: str, label: str) -> OwnedProcess:
         command = wezterm_start_command(
@@ -1609,7 +1642,7 @@ class HerdrScenario:
         return evidence
 
     def create_pair(self) -> tuple[str, str, str, str]:
-        self.start_client(self.a_id, "client-a")
+        self.start_server()
         deadline = time.monotonic() + 20
         response = None
         while time.monotonic() < deadline:
@@ -1619,11 +1652,12 @@ class HerdrScenario:
             except (CaptureError, subprocess.TimeoutExpired):
                 if not any(process.alive() for process in self.processes):
                     raise CaptureError(
-                        "initial Herdr client exited before its server became ready"
+                        "owned Herdr server exited before it became ready"
                     )
                 time.sleep(0.25)
         if response is None:
             raise CaptureError("Herdr API did not become ready before its deadline")
+        self.start_client(self.a_id, "client-a")
         a_workspace = self.workspace_id(response, True)
         a_pane = single_herdr_pane_id(
             self.cli("pane", "list", "--workspace", a_workspace), a_workspace
@@ -1755,8 +1789,9 @@ class HerdrScenario:
 
     def capture_region(self, pane_id: str, app_id: str) -> tuple[int, int, int, int]:
         layout = self.cli("pane", "layout", "--pane", pane_id, log_name="pane-layout")
-        validate_wezterm_geometry(self.outer_pane(app_id), layout, pane_id)
-        return pane_region(self.run.sway.window(app_id), layout, pane_id)
+        outer = self.outer_pane(app_id)
+        validate_wezterm_geometry(outer, layout, pane_id)
+        return pane_region(self.run.sway.window(app_id), layout, pane_id, outer)
 
     def stop_server(self) -> None:
         if self.server_stopped:
