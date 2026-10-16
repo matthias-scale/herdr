@@ -95,7 +95,6 @@ def _scan(rows: list[dict]) -> tuple[str | None, bool]:
 def _pending_agent_calls(rows: list[dict]) -> str | None:
     """Return transcript evidence of running, unknown, or no outstanding work."""
     pending: dict[str, str] = {}
-    background_bash_ids: set[str] = set()
     # A row we cannot pair reliably may hide live work, so it rules out idle.
     malformed = False
     for row in rows:
@@ -120,37 +119,15 @@ def _pending_agent_calls(rows: list[dict]) -> str | None:
                     malformed = True
                 else:
                     pending[call_id] = name.casefold()
-                    tool_input = content.get("input")
-                    if (
-                        name.casefold() == "bash"
-                        and isinstance(tool_input, dict)
-                        and tool_input.get("run_in_background") is True
-                    ):
-                        background_bash_ids.add(call_id)
             elif content.get("type") == "tool_result":
                 call_id = content.get("tool_use_id")
                 if not isinstance(call_id, str):
                     malformed = True
                 else:
-                    if call_id in background_bash_ids:
-                        result_content = content.get("content")
-                        if isinstance(result_content, str):
-                            result_text = result_content.casefold()
-                        elif isinstance(result_content, list):
-                            result_text = " ".join(
-                                part.get("text", "")
-                                for part in result_content
-                                if isinstance(part, dict)
-                                and isinstance(part.get("text"), str)
-                            ).casefold()
-                        else:
-                            result_text = ""
-                        if "background" in result_text or "task id" in result_text:
-                            return "running"
+                    # A background launch ack proves nothing about completion;
+                    # live background work is counted by background_tasks.
                     pending.pop(call_id, None)
     if any(name in {"task", "agent"} for name in pending.values()):
-        return "running"
-    if background_bash_ids & pending.keys():
         return "running"
     return "unknown" if pending or malformed else None
 

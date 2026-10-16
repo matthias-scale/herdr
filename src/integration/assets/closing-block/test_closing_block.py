@@ -2452,7 +2452,7 @@ class StopHookTranscriptTests(unittest.TestCase):
             )
         self.assertEqual(state, "running")
 
-    def test_transcript_background_bash_result_is_running(self):
+    def test_background_bash_ack_defers_to_background_task_count(self):
         import json
 
         hook = self._hook_module()
@@ -2467,7 +2467,15 @@ class StopHookTranscriptTests(unittest.TestCase):
                 'with task ID: bg-1"}]}}'
             ),
         ]
-        self.assertEqual(hook._pending_agent_calls(rows), "running")
+        # The launch ack says nothing about completion; the live count decides.
+        self.assertIsNone(hook._pending_agent_calls(rows))
+        for count, expected in ((1, "running"), (0, "idle")):
+            with self.subTest(background_tasks=count):
+                with mock.patch.object(hook, "pane_activity", return_value=(count, False)):
+                    state = hook._no_record_activity(
+                        {}, "w1:p1", "/tmp/herdr.sock", rows, transcript_known=True
+                    )
+                self.assertEqual(state, expected)
 
     def test_missing_record_with_unavailable_activity_evidence_is_unknown(self):
         hook = self._hook_module()
@@ -2500,7 +2508,7 @@ class StopHookTranscriptTests(unittest.TestCase):
             )
         self.assertEqual(state, "unknown")
 
-    def test_unresolved_background_bash_is_running(self):
+    def test_unresolved_background_bash_is_not_idle(self):
         hook = self._hook_module()
         rows = [{
             "type": "assistant",
@@ -2513,7 +2521,7 @@ class StopHookTranscriptTests(unittest.TestCase):
             state = hook._no_record_activity(
                 {}, "w1:p1", "/tmp/herdr.sock", rows, transcript_known=True
             )
-        self.assertEqual(state, "running")
+        self.assertEqual(state, "unknown")
 
     def test_structurally_malformed_tool_rows_are_not_idle(self):
         hook = self._hook_module()
