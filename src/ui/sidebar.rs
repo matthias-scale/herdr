@@ -165,6 +165,7 @@ pub(crate) fn entry_attention_tier(entry: &AgentPanelEntry) -> AttentionTier {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn entry_attention_rank(entry: &AgentPanelEntry) -> u8 {
     if !entry_is_blocked(entry) {
         return if entry_attention_tier(entry) == AttentionTier::Attention {
@@ -2657,6 +2658,7 @@ pub(crate) fn sidebar_footer_board_hit_area(_area: Rect) -> Rect {
     Rect::default()
 }
 
+#[cfg(test)]
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     agent_panel_entries_with_runtimes(app, None)
 }
@@ -2712,7 +2714,7 @@ pub(crate) fn remote_agent_device_groups(app: &AppState) -> RemoteAgentDeviceGro
         .collect()
 }
 
-fn all_agent_navigation_entries(app: &AppState) -> Vec<AgentPanelEntry> {
+pub(crate) fn all_agent_navigation_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     let mut entries = all_agent_panel_entries(app);
     entries.extend(
         app.remote_agent_panel_entries
@@ -2789,6 +2791,7 @@ pub(crate) fn agent_panel_entries_from(
     agent_panel_entries_with_runtimes(app, Some(terminal_runtimes))
 }
 
+#[cfg(test)]
 fn agent_panel_entries_with_runtimes(
     app: &AppState,
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
@@ -6494,7 +6497,7 @@ fn ordered_tab_entries_preferring(
         .collect()
 }
 
-fn entry_work_context<'a>(
+pub(crate) fn entry_work_context<'a>(
     app: &'a AppState,
     entry: &'a AgentPanelEntry,
 ) -> Option<&'a crate::work_context::PaneWorkContext> {

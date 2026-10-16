@@ -309,10 +309,12 @@ impl App {
                 }
             }
             NavigateAction::FocusAgent(idx) => {
-                if let Some((ws_idx, pane_id)) = self.agent_entry_target(idx) {
-                    self.focus_pane_internal_via_api(ws_idx, pane_id);
+                if let Some(entry) = crate::ui::sidebar::all_agent_navigation_entries(&self.state)
+                    .into_iter()
+                    .nth(idx)
+                {
+                    self.focus_agent_panel_entry(entry);
                     leave_navigate_mode(&mut self.state);
-                    self.state.ensure_agent_row_visible(ws_idx, pane_id);
                 }
             }
             NavigateAction::WorkspacePicker => {
@@ -344,8 +346,8 @@ impl App {
                 }
             }
             NavigateAction::NextReviewAgent => {
-                if let Some((ws_idx, pane_id)) = next_review_agent_target(&self.state) {
-                    self.focus_pane_internal_via_api(ws_idx, pane_id);
+                if let Some(entry) = next_review_agent_entry(&self.state) {
+                    self.focus_agent_panel_entry(entry);
                     self.state.dock_home_focused = false;
                     self.state.dock_diff_focused = false;
                     self.state.dock_files_focused = false;
@@ -1545,14 +1547,6 @@ impl App {
         Some((ws.active_tab as isize + delta).rem_euclid(ws.tabs.len() as isize) as usize)
     }
 
-    fn agent_entry_target(&self, idx: usize) -> Option<(usize, crate::layout::PaneId)> {
-        let entries = crate::ui::agent_panel_entries(&self.state);
-        let target = entries.get(idx)?;
-        target
-            .local_target()
-            .map(|target| (target.ws_idx, target.pane_id))
-    }
-
     fn relative_agent_entry(&self, forward: bool) -> Option<(usize, crate::ui::AgentPanelEntry)> {
         crate::ui::relative_agent_navigation_entry(&self.state, forward)
     }
@@ -2671,23 +2665,17 @@ fn blocked_pane_cycle_in_order(state: &AppState) -> Vec<(BlockedPaneTarget, bool
             ))
         })
         .collect::<Vec<_>>();
-    let include_fleet =
-        state.window_cycle_mode == crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
-    let mut remote = if include_fleet {
-        state
-            .remote_agent_panel_entries
-            .iter()
-            .filter(|entry| entry.snoozed_until.is_none())
-            .map(|entry| {
-                (
-                    BlockedPaneTarget::Remote(entry.agent_ref.clone()),
-                    crate::ui::sidebar::entry_needs_human_attention(entry),
-                )
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    let mut remote = state
+        .remote_agent_panel_entries
+        .iter()
+        .filter(|entry| entry.snoozed_until.is_none())
+        .map(|entry| {
+            (
+                BlockedPaneTarget::Remote(entry.agent_ref.clone()),
+                crate::ui::sidebar::entry_needs_human_attention(entry),
+            )
+        })
+        .collect::<Vec<_>>();
     let mut panes = Vec::with_capacity(local.len() + remote.len());
     for row in rows {
         match row {
@@ -2725,7 +2713,7 @@ fn blocked_pane_cycle_in_order(state: &AppState) -> Vec<(BlockedPaneTarget, bool
                     panes.push(local.remove(index));
                 }
             }
-            crate::ui::SidebarRow::RemoteAgent { entry, .. } if include_fleet => {
+            crate::ui::SidebarRow::RemoteAgent { entry, .. } => {
                 if let Some(index) = remote.iter().position(|(target, _)| {
                     matches!(
                         target,
@@ -2973,13 +2961,16 @@ fn copy_mode_survives_prefix_action(action: NavigateAction) -> bool {
     )
 }
 
-fn next_review_agent_target(state: &AppState) -> Option<(usize, crate::layout::PaneId)> {
-    let review_bindings = state
-        .dock_home_bindings()
+fn next_review_agent_entry(state: &AppState) -> Option<crate::ui::AgentPanelEntry> {
+    let entries = crate::ui::sidebar::all_agent_navigation_entries(state)
         .into_iter()
-        .filter(|binding| binding.role == Some(crate::work_context::PaneWorkRole::Review))
+        .filter(|entry| {
+            crate::ui::sidebar::entry_work_context(state, entry).is_some_and(|context| {
+                context.role == Some(crate::work_context::PaneWorkRole::Review)
+            })
+        })
         .collect::<Vec<_>>();
-    if review_bindings.is_empty() {
+    if entries.is_empty() {
         return None;
     }
 
@@ -2990,17 +2981,17 @@ fn next_review_agent_target(state: &AppState) -> Option<(usize, crate::layout::P
             .and_then(|workspace| workspace.focused_pane_id())
             .map(|pane_id| (ws_idx, pane_id))
     });
-    let next = focused
-        .and_then(|focused| {
-            review_bindings
-                .iter()
-                .position(|binding| (binding.ws_idx, binding.pane_id) == focused)
+    let current = state.sidebar_selected_remote_agent.as_ref().and_then(|selected| {
+        entries.iter().position(|entry| {
+            matches!(&entry.identity, crate::ui::sidebar::AgentPanelIdentity::Remote(agent_ref) if agent_ref == selected)
         })
-        .map(|index| (index + 1) % review_bindings.len())
-        .unwrap_or(0);
-    review_bindings
-        .get(next)
-        .map(|binding| (binding.ws_idx, binding.pane_id))
+    }).or_else(|| entries.iter().position(|entry| {
+        focused.is_some_and(|(ws_idx, pane_id)| {
+            entry.local_target().is_some_and(|target| target.ws_idx == ws_idx && target.pane_id == pane_id)
+        })
+    }));
+    let next = current.map_or(0, |index| (index + 1) % entries.len());
+    entries.into_iter().nth(next)
 }
 
 fn sync_dock_tab_focus(state: &mut AppState) {
@@ -3418,7 +3409,11 @@ pub(super) fn execute_navigate_action_in_context(
             }
         }
         NavigateAction::FocusAgent(idx) => {
-            if state.focus_agent_entry(idx) {
+            if let Some(entry) = crate::ui::sidebar::all_agent_navigation_entries(state)
+                .into_iter()
+                .nth(idx)
+            {
+                focus_agent_entry_in_state(state, &entry);
                 leave_navigate_mode(state);
             }
         }
@@ -3435,16 +3430,20 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::PreviousAgent => {
-            state.previous_agent();
+            if let Some((_, entry)) = crate::ui::relative_agent_navigation_entry(state, false) {
+                focus_agent_entry_in_state(state, &entry);
+            }
             leave_navigate_mode(state);
         }
         NavigateAction::NextAgent => {
-            state.next_agent();
+            if let Some((_, entry)) = crate::ui::relative_agent_navigation_entry(state, true) {
+                focus_agent_entry_in_state(state, &entry);
+            }
             leave_navigate_mode(state);
         }
         NavigateAction::NextReviewAgent => {
-            if let Some((ws_idx, pane_id)) = next_review_agent_target(state) {
-                state.focus_pane_in_workspace(ws_idx, pane_id);
+            if let Some(entry) = next_review_agent_entry(state) {
+                focus_agent_entry_in_state(state, &entry);
                 state.dock_home_focused = false;
                 state.dock_diff_focused = false;
                 state.dock_files_focused = false;
@@ -3920,6 +3919,16 @@ pub(super) fn execute_navigate_action_in_context(
     }
 
     finish_action_context(state, context, previous_mode);
+}
+
+#[cfg(test)]
+fn focus_agent_entry_in_state(state: &mut AppState, entry: &crate::ui::AgentPanelEntry) {
+    if let Some(remote) = entry.remote_entry.as_ref() {
+        state.select_remote_agent_row(remote.agent_ref.clone());
+    } else if let Some(target) = entry.local_target() {
+        state.sidebar_selected_remote_agent = None;
+        state.focus_pane_in_workspace(target.ws_idx, target.pane_id);
+    }
 }
 
 fn workspace_action_target(state: &AppState, context: ActionContext) -> Option<usize> {
@@ -4400,6 +4409,55 @@ mod tests {
         );
         assert_eq!(app.state.confirm_close_remote_agent_ref, Some(agent_ref));
         assert_eq!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
+    }
+
+    #[test]
+    fn indexed_agent_focus_can_target_a_remote_sidebar_entry() {
+        let (mut app, agent_ref) = app_with_remote_agent();
+        let entries = crate::ui::sidebar::all_agent_navigation_entries(&app.state);
+        let remote_index = entries
+            .iter()
+            .position(|entry| entry.remote_entry.is_some())
+            .expect("remote agent in navigation order");
+
+        execute_navigate_action_in_context(
+            &mut app.state,
+            &mut TerminalRuntimeRegistry::new(),
+            NavigateAction::FocusAgent(remote_index),
+            ActionContext::Prefix,
+        );
+
+        assert_eq!(app.state.sidebar_selected_remote_agent, Some(agent_ref));
+    }
+
+    #[test]
+    fn next_agent_cycles_local_remote_local() {
+        let (mut app, agent_ref) = app_with_remote_agent();
+        let local_pane = app.state.workspaces[0].focused_pane_id().unwrap();
+
+        app.execute_tui_navigate_action(NavigateAction::NextAgent, ActionContext::Prefix);
+        assert_eq!(app.state.sidebar_selected_remote_agent, Some(agent_ref));
+
+        app.execute_tui_navigate_action(NavigateAction::NextAgent, ActionContext::Prefix);
+        assert!(app.state.sidebar_selected_remote_agent.is_none());
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(local_pane));
+    }
+
+    #[test]
+    fn blocked_agent_cycle_includes_remote_rows_without_fleet_window_mode() {
+        let mut state = AppState::test_new();
+        state.workspaces = vec![Workspace::test_new("local")];
+        state.ensure_test_terminals();
+        let remote = remote_blocker("ub2", "blocked-worker");
+        let agent_ref = remote.agent_ref.clone();
+        state.remote_agent_panel_entries = vec![remote];
+
+        let order = blocked_pane_cycle_in_order(&state);
+
+        assert!(order.iter().any(|(target, blocked)| {
+            matches!(target, BlockedPaneTarget::Remote(candidate) if candidate == &agent_ref)
+                && *blocked
+        }));
     }
 
     #[test]
@@ -7030,9 +7088,12 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
         let remote = remote_blocker("ub2", "blocked-agent");
+        let agent_ref = remote.agent_ref.clone();
         app.state.remote_agent_panel_entries = vec![remote];
-        assert_eq!(next_blocked_window_target(&app.state), None);
-        app.state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
+        assert_eq!(
+            next_blocked_window_target(&app.state),
+            Some(BlockedPaneTarget::Remote(agent_ref))
+        );
         app.state.fleet_snapshot.hosts = vec![crate::fleet::HostSnapshot {
             name: "ub2".into(),
             target: "remote-ub2".into(),

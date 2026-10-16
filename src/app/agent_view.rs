@@ -1,12 +1,18 @@
+#[cfg(test)]
 use std::cmp::Ordering;
 
+#[cfg(test)]
 use crate::api::schema::{
-    AgentStatus, AgentViewBuiltinField, AgentViewBuiltinSortField, AgentViewContext,
-    AgentViewField, AgentViewFilter, AgentViewSetParams, AgentViewSort, AgentViewSortField,
-    AgentViewSortOrder, AgentViewValue,
+    AgentStatus, AgentViewBuiltinSortField, AgentViewSort, AgentViewSortOrder,
 };
+use crate::api::schema::{
+    AgentViewBuiltinField, AgentViewContext, AgentViewField, AgentViewFilter, AgentViewSetParams,
+    AgentViewSortField, AgentViewValue,
+};
+#[cfg(test)]
 use crate::ui::AgentPanelEntry;
 
+#[cfg(test)]
 use super::{AppState, Mode};
 
 const MAX_FILTER_DEPTH: usize = 8;
@@ -17,6 +23,7 @@ const MAX_SOURCE_CHARS: usize = 120;
 const MAX_LABEL_CHARS: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg(test)]
 enum EvalValue {
     String(String),
     Bool(bool),
@@ -50,6 +57,7 @@ pub(crate) fn validate_agent_view_source(source: &str) -> Result<String, String>
     normalize_source(source)
 }
 
+#[cfg(test)]
 pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry>) {
     if let Some(spec) = app.agent_view_override.as_ref() {
         if let Some(filter) = &spec.filter {
@@ -79,6 +87,7 @@ pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry
     }
 }
 
+#[cfg(test)]
 pub(crate) fn presented_workspace_idx(app: &AppState) -> Option<usize> {
     if app.server_mode() == Mode::Navigate {
         app.workspaces.get(app.selected).map(|_| app.selected)
@@ -234,6 +243,7 @@ fn validate_token(token: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 fn matches_filter(app: &AppState, entry: &AgentPanelEntry, filter: &AgentViewFilter) -> bool {
     match filter {
         AgentViewFilter::All { filters } => filters
@@ -256,6 +266,7 @@ fn matches_filter(app: &AppState, entry: &AgentPanelEntry, filter: &AgentViewFil
     }
 }
 
+#[cfg(test)]
 fn compare_entries(
     app: &AppState,
     left: &AgentPanelEntry,
@@ -273,6 +284,7 @@ fn compare_entries(
     Ordering::Equal
 }
 
+#[cfg(test)]
 fn compare_optional_values(
     left: Option<EvalValue>,
     right: Option<EvalValue>,
@@ -293,6 +305,7 @@ fn compare_optional_values(
     }
 }
 
+#[cfg(test)]
 fn field_value(
     app: &AppState,
     entry: &AgentPanelEntry,
@@ -304,6 +317,7 @@ fn field_value(
     }
 }
 
+#[cfg(test)]
 fn builtin_field_value(
     app: &AppState,
     entry: &AgentPanelEntry,
@@ -330,6 +344,7 @@ fn builtin_field_value(
     }
 }
 
+#[cfg(test)]
 fn operand_value(app: &AppState, value: &AgentViewValue) -> Option<EvalValue> {
     match value {
         AgentViewValue::String(value) => Some(EvalValue::String(value.clone())),
@@ -339,6 +354,7 @@ fn operand_value(app: &AppState, value: &AgentViewValue) -> Option<EvalValue> {
     }
 }
 
+#[cfg(test)]
 fn context_value(app: &AppState, context: AgentViewContext) -> Option<EvalValue> {
     let ws_idx = presented_workspace_idx(app)?;
     let workspace = app.workspaces.get(ws_idx)?;
@@ -353,6 +369,7 @@ fn context_value(app: &AppState, context: AgentViewContext) -> Option<EvalValue>
     }
 }
 
+#[cfg(test)]
 fn sort_value(
     app: &AppState,
     entry: &AgentPanelEntry,
@@ -396,6 +413,7 @@ fn sort_value(
     }
 }
 
+#[cfg(test)]
 fn status_name(state: crate::detect::AgentState, seen: bool, stale: bool) -> String {
     match super::api_helpers::pane_agent_status_with_stale(state, seen, stale) {
         AgentStatus::Idle => "idle",
@@ -408,6 +426,7 @@ fn status_name(state: crate::detect::AgentState, seen: bool, stale: bool) -> Str
     .to_string()
 }
 
+#[cfg(test)]
 fn public_tab_id(app: &AppState, entry: &AgentPanelEntry) -> Option<String> {
     let target = entry.local_target()?;
     let workspace = app.workspaces.get(target.ws_idx)?;
@@ -418,6 +437,7 @@ fn public_tab_id(app: &AppState, entry: &AgentPanelEntry) -> Option<String> {
     ))
 }
 
+#[cfg(test)]
 fn public_pane_id(app: &AppState, entry: &AgentPanelEntry) -> Option<String> {
     let target = entry.local_target()?;
     let workspace = app.workspaces.get(target.ws_idx)?;

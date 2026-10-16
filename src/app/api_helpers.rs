@@ -1,3 +1,4 @@
+#[cfg(test)]
 pub(super) fn tab_attention_priority(state: crate::detect::AgentState, seen: bool) -> u8 {
     match (state, seen) {
         (crate::detect::AgentState::Blocked, _) => 4,
@@ -8,6 +9,7 @@ pub(super) fn tab_attention_priority(state: crate::detect::AgentState, seen: boo
     }
 }
 
+#[cfg(test)]
 pub(super) fn tab_attention_priority_with_stale(
     state: crate::detect::AgentState,
     seen: bool,
