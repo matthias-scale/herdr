@@ -2318,6 +2318,11 @@ mod tests {
     #[tokio::test]
     async fn scheduled_tasks_do_not_start_pending_agent_resume_when_geometry_dirty() {
         let (mut app, pane_id) = test_app_with_pane();
+        // Scratch polling must not load the user's notes and request a redraw.
+        app.state.scratch.dir = std::env::temp_dir().join(format!(
+            "runtime-resume-scratch-{}",
+            crate::config::test_unique_suffix()
+        ));
         app.state.ensure_test_terminals();
         app.state.host_terminal_theme = crate::terminal_theme::TerminalTheme {
             foreground: Some(crate::terminal_theme::RgbColor {
