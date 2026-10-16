@@ -3744,6 +3744,50 @@ mod tests {
     }
 
     #[test]
+    fn report_pane_title_preserves_mobile_tab_name() {
+        for agent in [crate::detect::Agent::Claude, crate::detect::Agent::Codex] {
+            for custom in [false, true] {
+                let app = crate::ui::sidebar::tests::report_title_fixture(agent, custom);
+                let expected = if custom { "Keep label" } else { "Agent task" };
+                for width in [18, 60] {
+                    let mut terminal =
+                        ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 20))
+                            .unwrap();
+                    terminal
+                        .draw(|frame| {
+                            render_mobile_switcher_content(
+                                &app,
+                                &TerminalRuntimeRegistry::new(),
+                                frame,
+                                Rect::new(0, 0, width, 20),
+                            )
+                        })
+                        .unwrap();
+                    let rows = (0..20)
+                        .map(|y| {
+                            (0..width)
+                                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>();
+                    let provider = if agent == crate::detect::Agent::Claude {
+                        "c"
+                    } else {
+                        "x"
+                    };
+                    let row = rows
+                        .iter()
+                        .find(|row| crate::ui::sidebar::has_tag(row, provider))
+                        .unwrap_or_else(|| panic!("missing provider row: {rows:?}"));
+                    eprintln!("mobile {agent:?} custom={custom} width={width}: {row:?}");
+                    assert!(row.contains(expected), "{row:?}");
+                    assert!(!row.contains(".cache"), "{row:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn mobile_tab_rows_follow_field_priority_at_minimum_and_normal_widths() {
         let started = std::time::Instant::now();
         let mut app = crate::app::state::AppState::test_new();

@@ -558,8 +558,11 @@ fn compact_row_title(entry: &AgentPanelEntry, tab: bool) -> &str {
         .terminal_title_stripped
         .as_deref()
         .or(entry.terminal_title.as_deref());
-    let agent_named_tab = tab && entry.tab_has_live_agent_title && !entry.tab_has_custom_name;
-    let candidate = if agent_named_tab {
+    // Tab labels already project the naming pane (including agent focus history).
+    // The representative row may instead carry a report shell's terminal title.
+    let named_tab =
+        tab && (entry.tab_has_custom_name || entry.has_agent || entry.tab_has_live_agent_title);
+    let candidate = if named_tab {
         entry.primary_tab_label.as_deref().or(live_title)
     } else if live_title.is_some() {
         live_title
@@ -20747,6 +20750,170 @@ pub(crate) mod tests {
         row_text(terminal.backend().buffer(), card.rect.y, card.rect.width)
     }
 
+    // Exercise the real projection with a focused report shell beside an agent.
+    pub(crate) fn report_title_fixture(agent: Agent, custom: bool) -> AppState {
+        let mut app = AppState::test_new();
+        app.nerd_font = false;
+        let mut ws = Workspace::test_new("titles");
+        let report = ws.tabs[0].root_pane;
+        let agent_pane = ws.test_split(Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(report);
+        if custom {
+            ws.tabs[0].set_user_custom_name("Keep label".into());
+        }
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let agent_id = app.workspaces[0].tabs[0].panes[&agent_pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&agent_id).unwrap();
+        terminal.detected_agent = Some(agent);
+        terminal.set_terminal_title(Some("Agent task".into()));
+        let report_id = app.workspaces[0].tabs[0].panes[&report]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&report_id)
+            .unwrap()
+            .set_terminal_title(Some(
+                "~/.cache/agent-side-pane/.launch-3748208-18983-3054".into(),
+            ));
+        app.reconcile_sidebar_presentation();
+        app
+    }
+
+    #[test]
+    fn report_pane_title_preserves_desktop_tab_name() {
+        for agent in [Agent::Claude, Agent::Codex] {
+            for custom in [false, true] {
+                let mut app = report_title_fixture(agent, custom);
+                let expected = if custom { "Keep label" } else { "Agent task" };
+                for focus_agent in [false, true, false] {
+                    let pane = if focus_agent {
+                        *app.workspaces[0].tabs[0].layout.pane_ids().last().unwrap()
+                    } else {
+                        app.workspaces[0].tabs[0].root_pane
+                    };
+                    app.workspaces[0].tabs[0].layout.focus_pane(pane);
+                    let report = app.workspaces[0].tabs[0].root_pane;
+                    let report_id = app.workspaces[0].tabs[0].panes[&report]
+                        .attached_terminal_id
+                        .clone();
+                    app.terminals
+                        .get_mut(&report_id)
+                        .unwrap()
+                        .set_terminal_title(Some(format!(
+                            "~/.cache/agent-side-pane/.launch-{focus_agent}"
+                        )));
+                    app.reconcile_sidebar_presentation();
+                    for width in [18, 60] {
+                        let row = render_first_tab_row(&app, width);
+                        eprintln!("desktop {agent:?} custom={custom} agent_focus={focus_agent} width={width}: {row:?}");
+                        assert!(row.contains(expected), "{row:?}");
+                        assert!(!row.contains(".cache"), "{row:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn report_pane_title_tracks_focused_previous_and_recent_agents() {
+        let mut app = report_title_fixture(Agent::Claude, false);
+        let first = *app.workspaces[0].tabs[0].layout.pane_ids().last().unwrap();
+        let report = app.workspaces[0].tabs[0].root_pane;
+        let second = app.workspaces[0].test_split(Direction::Horizontal);
+        let other_shell = app.workspaces[0].test_split(Direction::Horizontal);
+        app.ensure_test_terminals();
+        let now = std::time::Instant::now();
+        for (pane, agent, title, at) in [
+            (first, Agent::Claude, "Agent task", now),
+            (
+                second,
+                Agent::Codex,
+                "Review",
+                now - std::time::Duration::from_secs(60),
+            ),
+        ] {
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.set_detected_state_with_screen_signals_at(
+                Some(agent),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                false,
+                at,
+            );
+            terminal.set_terminal_title(Some(title.into()));
+        }
+        // Focused agent, previous agent, then most recently active agent when
+        // moving between shells (the previous focus can no longer name the tab).
+        for (pane, expected) in [
+            (first, "Agent task"),
+            (second, "Review"),
+            (report, "Review"),
+            (other_shell, "Agent task"),
+        ] {
+            app.workspaces[0].tabs[0].layout.focus_pane(pane);
+            app.reconcile_sidebar_presentation();
+            for width in [18, 60] {
+                let row = render_first_tab_row(&app, width);
+                assert!(row.contains(expected), "{row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn report_pane_title_preserves_empty_and_default_agent_title_fallbacks() {
+        for title in [None, Some(""), Some("Terminal")] {
+            let mut app = report_title_fixture(Agent::Claude, false);
+            let pane = *app.workspaces[0].tabs[0].layout.pane_ids().last().unwrap();
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_terminal_title(title.map(str::to_string));
+            app.reconcile_sidebar_presentation();
+            let entries = sidebar_thread_entries(&app);
+            let aggregated = aggregate_tab_entries(&entries);
+            let entry = aggregated.values().next().unwrap();
+            // A default terminal title keeps the existing generic fallback;
+            // absent/empty titles use the projected agent identity.
+            let expected = if title == Some("Terminal") {
+                DEFAULT_THREAD_TITLE
+            } else {
+                "claude"
+            };
+            assert_eq!(compact_row_title(entry, true), expected, "title={title:?}");
+            for width in [18, 60] {
+                let row = render_first_tab_row(&app, width);
+                assert!(row.contains(expected), "{row:?}");
+                assert!(!row.contains(".cache"), "{row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn report_pane_title_custom_label_survives_agent_detection_exit() {
+        let mut app = report_title_fixture(Agent::Claude, true);
+        for terminal in app.terminals.values_mut() {
+            terminal.detected_agent = None;
+        }
+        app.reconcile_sidebar_presentation();
+        for width in [18, 60] {
+            let row = render_first_tab_row(&app, width);
+            assert!(row.contains("Keep label"), "{row:?}");
+        }
+    }
+
     #[derive(Clone, Copy)]
     enum SpaceTagFixture {
         MatchingHeaders,
@@ -21264,13 +21431,15 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn live_terminal_title_replaces_the_stored_row_title() {
+    fn shell_terminal_title_replaces_the_stored_row_title() {
         let mut entry = aggregation_entry(AgentState::Working, true, None, "working");
+        entry.has_agent = false;
         entry.primary_tab_label = Some("old stored title".into());
         entry.terminal_title = Some("live agent title".into());
         entry.terminal_title_stripped = Some("live agent title".into());
 
         assert_eq!(compact_row_title(&entry, true), "live agent title");
+        assert_eq!(compact_row_title(&entry, false), "live agent title");
     }
 
     fn aggregation_entry(
