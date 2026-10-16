@@ -733,6 +733,7 @@ mod tests {
                 for workspace in &mut app.workspaces {
                     workspace.repo_binding = Some("org/herdr".into());
                 }
+                app.sidebar_sections_layout = true;
                 // Profile populated visible rows as well as pane metadata;
                 // default-hidden folds would otherwise hide the render cost.
                 app.toggle_sidebar_group("fleet-working:org/herdr");
@@ -747,9 +748,9 @@ mod tests {
                     }
                     app.refresh_local_agent_panel_identities();
                 }
-                app.sidebar_sections_layout = true;
                 app.sidebar_width = 28;
                 app.reconcile_sidebar_presentation();
+                assert_eq!(super::super::sidebar_rows(&app).iter().filter(|row| matches!(row, SidebarRow::Tab { entry, .. } if entry.working_shelf)).count(), if active_panes { 1 } else { count });
                 let area = Rect::new(0, 0, 120, 40);
                 let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
                 let mut samples = Vec::new();
