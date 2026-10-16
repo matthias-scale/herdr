@@ -5625,12 +5625,19 @@ impl TerminalState {
         } else if self.waiting_on_agents() {
             (AgentState::Working, "closing_block_subagents")
         } else if self.hook_reports_unknown_with_screen_fallback() {
-            if self.fallback_state != AgentState::Unknown {
+            if matches!(
+                self.fallback_state,
+                AgentState::Working | AgentState::Blocked
+            ) {
                 (self.fallback_state, "screen_over_unknown_hook")
             } else if self.foreground_process_active && self.effective_agent_label().is_some() {
-                (AgentState::Working, "foreground_process_over_unknown_hook")
+                if self.fallback_state == AgentState::Idle {
+                    (AgentState::Idle, "screen_over_unknown_hook")
+                } else {
+                    (AgentState::Working, "foreground_process_over_unknown_hook")
+                }
             } else {
-                (AgentState::Unknown, "unknown_hook")
+                (AgentState::Unknown, "closing_block_report")
             }
         } else if self.closing_block_non_gate_yields_to_screen() {
             (self.fallback_state, "screen")
@@ -5659,6 +5666,10 @@ impl TerminalState {
             authority.state == AgentState::Unknown
                 && authority.retired_at.is_none()
                 && self.hook_authority_is_effective(authority)
+                && (matches!(
+                    self.fallback_state,
+                    AgentState::Working | AgentState::Blocked
+                ) || self.foreground_process_active)
                 && (crate::detect::full_lifecycle_hook_authority(
                     &authority.source,
                     &authority.agent_label,
