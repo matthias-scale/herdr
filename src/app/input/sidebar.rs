@@ -933,6 +933,12 @@ impl AppState {
         let Some(selected) = self.sidebar_selected_work_group.clone() else {
             return SidebarWorkGroupKeyAction::Ignored;
         };
+        if key.code == KeyCode::Enter && key.modifiers.is_empty() {
+            if let Some(group) = selected.strip_prefix("group:fleet-") {
+                self.toggle_sidebar_group(&format!("fleet-{group}"));
+                return SidebarWorkGroupKeyAction::Consumed;
+            }
+        }
         if key.code == KeyCode::Char(' ') && key.modifiers.is_empty() {
             let toggle_key = if let Some(title) = selected.strip_prefix("section:") {
                 Some(title.to_string())
@@ -941,7 +947,10 @@ impl AppState {
                     .iter()
                     .find_map(|row| match row {
                         crate::ui::SidebarRow::NestedHeader { key, dim, .. }
-                            if key == group && (!dim || key.starts_with("device:")) =>
+                            if key == group
+                                && (!dim
+                                    || key.starts_with("device:")
+                                    || key.starts_with("fleet-working:")) =>
                         {
                             Some(key.clone())
                         }
@@ -970,7 +979,11 @@ impl AppState {
                             action_key: Some(action_key),
                             dim,
                             ..
-                        } if action_key == &selected && (!dim || key.starts_with("device:")) => {
+                        } if action_key == &selected
+                            && (!dim
+                                || key.starts_with("device:")
+                                || key.starts_with("fleet-working:")) =>
+                        {
                             Some(key.clone())
                         }
                         _ => None,
@@ -3251,6 +3264,127 @@ mod tests {
         detect::{Agent, AgentState},
         workspace::Workspace,
     };
+
+    #[test]
+    fn fleet_sidebar_local_label_click_focuses_agent_and_working_fold_accepts_enter() {
+        let mut app = sidebar_order_app(false);
+        app.state.sidebar_sections_layout = true;
+        for terminal in app.state.terminals.values_mut() {
+            terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        }
+        app.state.reconcile_sidebar_presentation();
+        let working_keys = crate::ui::sidebar::sidebar_rows(&app.state)
+            .into_iter()
+            .filter_map(|row| match row {
+                crate::ui::SidebarRow::NestedHeader { key, .. }
+                    if key.starts_with("fleet-working:") =>
+                {
+                    Some(key)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for key in working_keys {
+            app.state.toggle_sidebar_group(&key);
+        }
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let target = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
+            .into_iter()
+            .find(|card| card.ws_idx != app.state.active.unwrap_or(usize::MAX))
+            .expect("local agent");
+        let col = target.rect.x + 8;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            col,
+            target.rect.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            col,
+            target.rect.y,
+        ));
+        assert_eq!(app.state.active, Some(target.ws_idx));
+        assert_eq!(
+            app.state.workspaces[target.ws_idx].active_tab,
+            target.tab_idx
+        );
+        assert_eq!(
+            app.state.workspaces[target.ws_idx].focused_pane_id(),
+            Some(target.pane_id)
+        );
+    }
+
+    #[test]
+    fn fleet_sidebar_working_toggle_is_project_local_and_sort_preserves_host_filter() {
+        let mut app = sidebar_order_app(false);
+        app.state.sidebar_sections_layout = true;
+        let key = "fleet-working:org/one";
+        let other = "fleet-working:org/two";
+        app.state.sidebar_selected_work_group = Some(format!("group:{key}"));
+        app.state
+            .handle_sidebar_work_group_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!crate::ui::sidebar::section_is_collapsed(&app.state, key));
+        assert!(crate::ui::sidebar::section_is_collapsed(&app.state, other));
+        app.state
+            .handle_sidebar_work_group_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(crate::ui::sidebar::section_is_collapsed(&app.state, key));
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+        app.state.reconcile_sidebar_presentation();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let (row, real_key) = (0..40)
+            .find_map(|row| {
+                crate::ui::sidebar::sidebar_nested_header_at(&app.state, row)
+                    .filter(|key| key.starts_with("fleet-working:"))
+                    .map(|key| (row, key))
+            })
+            .expect("working fold on screen");
+        assert!(crate::ui::sidebar::section_is_collapsed(
+            &app.state, &real_key
+        ));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 8, row));
+        assert!(!crate::ui::sidebar::section_is_collapsed(
+            &app.state, &real_key
+        ));
+        assert_eq!(
+            app.state.sidebar_selected_work_group,
+            Some(format!("group:{real_key}"))
+        );
+        app.state
+            .handle_sidebar_work_group_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(crate::ui::sidebar::section_is_collapsed(
+            &app.state, &real_key
+        ));
+        app.state.sidebar_presentation.host_filter = Some(app.state.agent_host_name.clone());
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let sort =
+            crate::ui::sidebar::fleet_sort_anchor_rect(&app.state, app.state.view.sidebar_rect);
+        assert!(sort.width > 0);
+        let host = app.state.sidebar_presentation.host_filter.clone();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            sort.x,
+            sort.y,
+        ));
+        assert_eq!(
+            app.state.sidebar_presentation.fleet_sort,
+            crate::app::state::FleetSidebarSort::Activity
+        );
+        assert_eq!(
+            app.state
+                .sidebar_presentation
+                .fleet_sort_persistence_request,
+            Some(crate::app::state::FleetSidebarSort::Activity)
+        );
+        assert_eq!(app.state.sidebar_presentation.host_filter, host);
+    }
 
     #[tokio::test]
     async fn agent_finder_text_and_paste_stay_with_the_sidebar_input_owner() {
@@ -5843,6 +5977,7 @@ mod tests {
         let terminal = app.state.terminals.get_mut(&terminal_id).expect("terminal");
         terminal.detected_agent = Some(Agent::Claude);
         terminal.set_raw_agent_state_for_test(AgentState::Working);
+        app.state.toggle_sidebar_group("fleet-working:herdr");
         let area = Rect::new(0, 0, 106, 40);
         for expected in [Some("ub2"), None] {
             crate::ui::compute_view(&mut app.state, area);

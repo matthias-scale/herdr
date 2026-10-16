@@ -1136,7 +1136,19 @@ fn render_mobile_switcher_content(
                         super::sidebar::SNOOZED_SECTION_TITLE
                             | super::sidebar::SETTLED_SECTION_TITLE
                     );
-                let line = if shelf {
+                let line = if *title == "projects" {
+                    Line::from(Span::styled(
+                        format!(
+                            " {} ▾  {}",
+                            app.sidebar_presentation
+                                .host_filter
+                                .as_deref()
+                                .unwrap_or("all hosts"),
+                            super::sidebar::fleet_sort_label(app)
+                        ),
+                        Style::default().fg(p.overlay0),
+                    ))
+                } else if shelf {
                     let color = if *title == super::sidebar::SNOOZED_SECTION_TITLE {
                         p.peach
                     } else {
@@ -1268,6 +1280,7 @@ fn render_mobile_switcher_content(
                 collapsed,
                 dim,
                 activity_count,
+                count,
                 ..
             } => {
                 let indent = if key.starts_with("fleet:repo:") {
@@ -1283,6 +1296,22 @@ fn render_mobile_switcher_content(
                 if let Some((working, total)) = activity_count {
                     label.push_str(&format!(" ({working} of {total})"));
                 }
+                if key.starts_with("fleet-") {
+                    label = super::sidebar::fleet_header_label(
+                        app,
+                        key,
+                        title,
+                        *count,
+                        *activity_count,
+                        *collapsed,
+                        content.width,
+                    );
+                }
+                let style = if key.starts_with("fleet-project:") {
+                    Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
+                };
                 render_one_line_item(
                     frame,
                     viewport,
@@ -1290,10 +1319,7 @@ fn render_mobile_switcher_content(
                     doc_y,
                     app.mobile_switcher_scroll,
                     p.panel_bg,
-                    Line::from(Span::styled(
-                        label,
-                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
-                    )),
+                    Line::from(Span::styled(label, style)),
                 );
             }
             SidebarRow::SymphonyEmpty => {
@@ -3253,7 +3279,7 @@ mod tests {
         };
         let shown = render(&app);
         assert!(
-            shown.contains("working") && shown.contains("blocked"),
+            shown.contains("working") && shown.contains("Scalable 1 of 2"),
             "{shown}"
         );
         assert!(shown.contains("↳ Choose a layout"), "{shown}");
@@ -3273,14 +3299,23 @@ mod tests {
         app.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::sidebar::RemoteAgentPanelEntry::new(agent_ref, entry),
         )];
-        app.collapsed_sidebar_groups
-            .insert("sections:Working".into());
-        app.collapsed_sidebar_groups
-            .insert("expanded:device:working/ub2".into());
+        assert!(!mobile_sidebar_rows(&app)
+            .iter()
+            .any(|row| matches!(row, SidebarRow::RemoteAgent { .. })));
+        let working = mobile_sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::NestedHeader { key, .. } if key.starts_with("fleet-working:") => {
+                    Some(key)
+                }
+                _ => None,
+            })
+            .expect("working folder");
+        app.toggle_sidebar_group(&working);
         assert!(mobile_sidebar_rows(&app).iter().any(|row| matches!(
             row,
             SidebarRow::RemoteAgent {
-                working_shelf: false,
+                working_shelf: true,
                 ..
             }
         )));
@@ -3305,6 +3340,10 @@ mod tests {
             .map(|x| terminal.backend().buffer()[(x, y)].symbol())
             .collect::<String>();
         assert!(row.contains('●'), "{row}");
+        assert!((0..area.width).any(|x| {
+            let cell = &terminal.backend().buffer()[(x, y)];
+            cell.symbol() == "●" && cell.modifier.contains(Modifier::DIM)
+        }));
     }
 
     #[test]
@@ -3498,7 +3537,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_sections_switcher_has_four_unified_states() {
+    fn mobile_sections_switcher_has_projects_without_state_headers() {
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
         let rows = mobile_sidebar_rows(&app);
@@ -3513,7 +3552,14 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(shelves, ["blocked", "waiting", "working", "done / idle"]);
+        assert!(shelves.is_empty());
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: "projects",
+                ..
+            }
+        )));
         assert!(!rows.iter().any(|row| matches!(
             row,
             SidebarRow::SectionHeader {

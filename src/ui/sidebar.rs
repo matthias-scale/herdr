@@ -1334,7 +1334,11 @@ fn render_remote_compact_agent_row_body(
     } else {
         Style::default().fg(p.subtext0)
     };
-    let dot_color = compact_row_color(remote, p);
+    let (dot, dot_color) = if app.sidebar_sections_layout {
+        fleet_grouping::marker(app, remote)
+    } else {
+        (remote.render_dot, compact_row_color(remote, p))
+    };
     let fade = remote.snoozed_until.is_some()
         || remote.settled
         || blue_working_row(remote, p, dot_color)
@@ -1359,7 +1363,7 @@ fn render_remote_compact_agent_row_body(
 
     let mut x = content_rect.x.saturating_add(widths.prefix as u16);
     frame.render_widget(
-        Paragraph::new(Span::styled(remote.render_dot, row_style(dot_style))),
+        Paragraph::new(Span::styled(dot, row_style(dot_style))),
         Rect::new(x, rect.y, SIDEBAR_DOT_FIELD_WIDTH as u16, rect.height),
     );
     x = x.saturating_add(SIDEBAR_DOT_FIELD_WIDTH as u16);
@@ -1551,7 +1555,13 @@ fn render_compact_agent_row_body(
         .saturating_sub(controls_width);
     let title_text = truncate_end(&layout.title, title_text_width);
     let title_pad = " ".repeat(title_text_width.saturating_sub(display_width(&title_text)));
-    let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
+    let marker = app
+        .sidebar_sections_layout
+        .then(|| fleet_grouping::marker(app, entry));
+    let dot = pad_right(
+        marker.map_or(layout.dot.as_str(), |(dot, _)| dot),
+        SIDEBAR_DOT_FIELD_WIDTH,
+    );
     // The device character gets the host tag colour, so it stays a separate
     // span from the provider icon it is glued to.
     let provider = pad_left(
@@ -1578,7 +1588,7 @@ fn render_compact_agent_row_body(
     } else {
         Style::default().fg(p.subtext0)
     };
-    let dot_color = compact_row_color(entry, p);
+    let dot_color = marker.map_or_else(|| compact_row_color(entry, p), |(_, color)| color);
     let fade = blue_working_row(entry, p, dot_color) || entry.working_shelf;
     let row_style = |style| {
         let style = working_row_style(app, fade, style, bg);
@@ -3966,7 +3976,9 @@ pub(super) fn section_header_glyph_for_app(app: &AppState, title: &str) -> &'sta
 pub(crate) fn section_is_collapsed(app: &AppState, title: &str) -> bool {
     if app.sidebar_sections_layout {
         let key = format!("sections:{title}");
-        return if title != WORKING_SECTION_TITLE && section_title_defaults_to_collapsed(title) {
+        return if title.starts_with("fleet-working:")
+            || (title != WORKING_SECTION_TITLE && section_title_defaults_to_collapsed(title))
+        {
             !app.collapsed_sidebar_groups.contains(&key)
         } else {
             app.collapsed_sidebar_groups.contains(&key)
@@ -4109,10 +4121,7 @@ fn collapsed_sidebar_placement(
         && (!entry.pinned || !working_collapsed);
     if working_shelf {
         if section_is_collapsed(app, WORKING_SECTION_TITLE) {
-            return Some((
-                WORKING_SECTION_TITLE.to_string(),
-                WORKING_SECTION_TITLE.to_string(),
-            ));
+            return Some((WORKING_SECTION_TITLE.to_string(), "herdr".to_string()));
         }
         if devices::group_is_collapsed(app, "working", &app.agent_host_name, true, true) {
             return Some((
@@ -9882,6 +9891,23 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
         .flatten();
 
     let mut targets = Vec::new();
+    for header in compute_sidebar_section_header_areas_from_layout(app, layout) {
+        if header.title == fleet_grouping::PROJECTS {
+            let (host, sort) = fleet_toolbar_rects(app, header.rect);
+            targets.push(crate::app::state::SidebarHoverTarget {
+                rect: sort,
+                label: "Sort projects and agents by status or activity".into(),
+                action: None,
+                row_hover: false,
+            });
+            targets.push(crate::app::state::SidebarHoverTarget {
+                rect: host,
+                label: "Filter agents by host".into(),
+                action: None,
+                row_hover: false,
+            });
+        }
+    }
     let mut host_actions = std::collections::HashMap::<&str, std::sync::Arc<str>>::new();
     for (row, row_y) in &visible {
         let (label, row_hover) = match row {
@@ -10025,7 +10051,7 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                 let Some(rect) = clamp_row_cells(content_body, row_y, prefix, 1) else {
                     continue;
                 };
-                if !entry.working_shelf {
+                if !entry.working_shelf || app.sidebar_sections_layout {
                     targets.push(crate::app::state::SidebarHoverTarget {
                         rect,
                         label: agent_dot_tooltip(entry),
@@ -10256,7 +10282,7 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                     row_width,
                     requested_prefix,
                 );
-                if !working_shelf {
+                if !working_shelf || app.sidebar_sections_layout {
                     if let Some(rect) = clamp_row_cells(content_body, row_y, widths.prefix, 1) {
                         targets.push(crate::app::state::SidebarHoverTarget {
                             rect,
@@ -10501,7 +10527,7 @@ pub(crate) fn sidebar_nested_header_at(app: &AppState, row: u16) -> Option<Strin
 }
 
 fn nested_header_is_toggleable(header: &NestedHeaderArea) -> bool {
-    !header.dim || header.key.starts_with("device:")
+    !header.dim || header.key.starts_with("device:") || header.key.starts_with("fleet-working:")
 }
 
 /// Canonical provider object on a nested-header row, independent of its
@@ -10510,7 +10536,13 @@ pub(crate) fn sidebar_object_at(app: &AppState, row: u16) -> Option<String> {
     compute_sidebar_nested_header_areas(app, app.view.sidebar_rect)
         .into_iter()
         .find(|header| row >= header.rect.y && row < header.rect.bottom())
-        .and_then(|header| header.action_key)
+        .and_then(|header| {
+            if header.key.starts_with("fleet-") {
+                Some(format!("group:{}", header.key))
+            } else {
+                header.action_key
+            }
+        })
 }
 
 /// The trailing ellipsis cell of a Linear, GitHub, or Missive object row.
@@ -12778,6 +12810,19 @@ fn render_section_header(
     if header.rect.width == 0 || header.rect.height == 0 {
         return;
     }
+    if header.title == fleet_grouping::PROJECTS {
+        let (host, sort) = fleet_toolbar_rects(app, header.rect);
+        frame.render_widget(
+            Paragraph::new(format!("{} ▾", fleet_grouping::host_label(app)))
+                .style(Style::default().fg(app.palette.overlay0)),
+            host,
+        );
+        frame.render_widget(
+            Paragraph::new(fleet_sort_label(app)).style(Style::default().fg(app.palette.overlay0)),
+            sort,
+        );
+        return;
+    }
     let rect = sidebar_row_content_rect(header.rect);
     let p = &app.palette;
     if app.sidebar_sections_layout
@@ -13027,8 +13072,83 @@ fn nested_header_sort_col(header: &NestedHeaderArea) -> Option<u16> {
     (col < header.rect.right()).then_some(col)
 }
 
+pub(super) fn fleet_header_label(
+    app: &AppState,
+    key: &str,
+    title: &str,
+    count: usize,
+    activity_count: Option<(usize, usize)>,
+    collapsed: bool,
+    width: u16,
+) -> String {
+    let chevron = if collapsed { "▸" } else { "▾" };
+    let working = key.starts_with("fleet-working:");
+    let marker = if app.nerd_font { "●" } else { "~" };
+    let count_label = match activity_count {
+        Some((n, _)) if working => format!(" {marker} {n} working"),
+        Some((n, total)) if n > 0 => format!(" {} of {total}", total - n),
+        _ => format!(" {}", count),
+    };
+    if working && activity_count.is_none() {
+        format!("    {marker} {count} working {chevron}")
+    } else {
+        let title = truncate_end(
+            title,
+            usize::from(width).saturating_sub(4 + display_width(&count_label)),
+        );
+        format!(" {chevron} {title}{count_label}")
+    }
+}
+
+fn render_fleet_header(app: &AppState, frame: &mut Frame, header: &NestedHeaderArea) {
+    let rect = sidebar_row_content_rect(header.rect);
+    let p = &app.palette;
+    let working = header.key.starts_with("fleet-working:");
+    let text = fleet_header_label(
+        app,
+        &header.key,
+        &header.title,
+        header.count,
+        header.activity_count,
+        header.collapsed,
+        rect.width,
+    );
+    let selected = app
+        .sidebar_selected_work_group
+        .as_deref()
+        .is_some_and(|key| key.strip_prefix("group:") == Some(header.key.as_str()));
+    let mut style = Style::default().fg(if working { p.overlay0 } else { p.subtext0 });
+    if working {
+        style = style.add_modifier(Modifier::DIM);
+    } else {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if selected {
+        style = style.bg(p.surface1);
+    }
+    if working {
+        let marker = if app.nerd_font { "●" } else { "~" };
+        if let Some((before, after)) = text.split_once(marker) {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(before, style),
+                    Span::styled(marker, style.fg(p.blue)),
+                    Span::styled(after, style),
+                ])),
+                rect,
+            );
+            return;
+        }
+    }
+    frame.render_widget(Paragraph::new(text).style(style), rect);
+}
+
 fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeaderArea) {
     if header.rect.width == 0 || header.rect.height == 0 {
+        return;
+    }
+    if header.key.starts_with("fleet-") {
+        render_fleet_header(app, frame, header);
         return;
     }
     let rect = sidebar_row_content_rect(header.rect);
@@ -14060,28 +14180,38 @@ pub(crate) fn sidebar_filter_anchor_rect(app: &AppState, area: Rect) -> Rect {
     Rect::new(x, mode_anchor.y, width, 1)
 }
 
-pub(crate) fn sidebar_blocker_scope_anchor_rect(app: &AppState, area: Rect) -> Rect {
-    let Some(header) = compute_sidebar_section_header_areas(app, area)
+pub(super) fn fleet_sort_label(app: &AppState) -> &'static str {
+    match app.sidebar_presentation.fleet_sort {
+        crate::app::state::FleetSidebarSort::Status => "status ⇅",
+        crate::app::state::FleetSidebarSort::Activity => "activity ⇅",
+    }
+}
+
+fn fleet_toolbar_rects(app: &AppState, area: Rect) -> (Rect, Rect) {
+    let rect = sidebar_row_content_rect(area);
+    let width = (display_width(fleet_sort_label(app)) as u16).min(rect.width);
+    let sort = Rect::new(rect.right().saturating_sub(width), rect.y, width, 1);
+    let width = (display_width(&format!("{} ▾", fleet_grouping::host_label(app))) as u16)
+        .min(sort.x.saturating_sub(rect.x + 1));
+    (Rect::new(rect.x + 1, rect.y, width, 1), sort)
+}
+
+pub(crate) fn fleet_sort_anchor_rect(app: &AppState, area: Rect) -> Rect {
+    compute_sidebar_section_header_areas(app, area)
         .into_iter()
-        .find(|header| header.title == BLOCKERS_SECTION_TITLE)
-    else {
-        return Rect::default();
-    };
-    let glyph = section_header_glyph_for_app(app, BLOCKERS_SECTION_TITLE);
-    let prefix_width = 3
-        + display_width(glyph)
-        + usize::from(!glyph.is_empty())
-        + display_width(BLOCKERS_SECTION_TITLE)
-        + 2;
-    let label = format!("{} ▾", fleet_grouping::host_label(app));
-    let x = header
-        .rect
-        .x
-        .saturating_add(u16::try_from(prefix_width).unwrap_or(u16::MAX));
-    let width = u16::try_from(display_width(&label))
-        .unwrap_or(u16::MAX)
-        .min(header.rect.right().saturating_sub(x));
-    Rect::new(x, header.rect.y, width, 1)
+        .find(|header| header.title == fleet_grouping::PROJECTS)
+        .map_or(Rect::default(), |header| {
+            fleet_toolbar_rects(app, header.rect).1
+        })
+}
+
+pub(crate) fn sidebar_blocker_scope_anchor_rect(app: &AppState, area: Rect) -> Rect {
+    compute_sidebar_section_header_areas(app, area)
+        .into_iter()
+        .find(|header| header.title == fleet_grouping::PROJECTS)
+        .map_or(Rect::default(), |header| {
+            fleet_toolbar_rects(app, header.rect).0
+        })
 }
 
 pub(crate) fn sidebar_blocker_scope_menu_layout(
@@ -21507,7 +21637,7 @@ pub(crate) mod tests {
 
     /// A latched gate stays blocking while work runs and after work stops.
     #[test]
-    fn the_blocked_section_counts_a_latched_gate_while_working_and_after() {
+    fn project_keeps_a_latched_gate_visible_while_working_and_after() {
         let mut app = app_with_agents(&["one"]);
         app.sidebar_sections_layout = true;
         let pane = app.workspaces[0].tabs[0].root_pane;
@@ -21550,7 +21680,14 @@ pub(crate) mod tests {
                 .filter(|red| *red)
                 .count();
             let has_blocked_header = rows.iter().any(|row| {
-                matches!(row, SidebarRow::SectionHeader { title, .. } if *title == BLOCKERS_SECTION_TITLE)
+                matches!(
+                    row,
+                    SidebarRow::NestedHeader {
+                        count: 1,
+                        dim: false,
+                        ..
+                    }
+                )
             });
             (has_blocked_header, red_rows)
         };
@@ -24970,8 +25107,20 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     crate::app::state::ViewLayout::Desktop
                 };
                 app.reconcile_sidebar_presentation();
+                let key = sidebar_rows(&app)
+                    .into_iter()
+                    .find_map(|row| match row {
+                        SidebarRow::NestedHeader { key, .. }
+                            if key.starts_with("fleet-working:") =>
+                        {
+                            Some(key)
+                        }
+                        _ => None,
+                    })
+                    .expect("working fold");
+                app.toggle_sidebar_group(&key);
                 let rows = sidebar_rows(&app);
-                let mut tabs = rows.iter().filter_map(|row| match row {
+                let tabs = rows.iter().filter_map(|row| match row {
                     SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
                         if entry.local_target().is_some() =>
                     {
@@ -24979,8 +25128,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     }
                     _ => None,
                 });
-                let primary = tabs.next().expect("active window row");
-                let child = tabs.next().expect("snoozed pane projection");
+                let entries = tabs.collect::<Vec<_>>();
+                let primary = entries
+                    .iter()
+                    .find(|entry| entry.pin_allowed)
+                    .expect("active window row");
+                let child = entries
+                    .iter()
+                    .find(|entry| !entry.pin_allowed)
+                    .expect("snoozed pane projection");
                 assert!(primary.pin_allowed, "primary window must be pinnable");
                 assert!(!child.pin_allowed, "snoozed child is not a window");
                 assert_eq!(child.local_target().unwrap().pane_id, snoozed_pane);
@@ -33110,7 +33266,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn sidebar_sections_show_working_above_lifecycle_shelves() {
+    fn sidebar_sections_show_projects_above_lifecycle_shelves() {
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
         let rows = sidebar_rows(&app);
@@ -33123,46 +33279,21 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .collect::<Vec<_>>();
         assert_eq!(
             titles,
-            [
-                BLOCKERS_SECTION_TITLE,
-                WAITING_SECTION_TITLE,
-                WORKING_SECTION_TITLE,
-                DONE_IDLE_SECTION_TITLE,
-                "No repo yet",
-                "Symphony"
-            ]
+            [fleet_grouping::PROJECTS, "No repo yet", "Symphony"]
         );
-        assert!(rows.iter().any(|row| matches!(
-            row,
-            SidebarRow::SectionHeader {
-                title: WORKING_SECTION_TITLE,
-                collapsed: false,
-                ..
-            }
-        )));
-        assert!(rows.iter().any(|row| matches!(
-            row,
-            SidebarRow::SectionHeader {
-                title: DONE_IDLE_SECTION_TITLE,
-                collapsed: true,
-                ..
-            }
-        )));
-        assert!(rows.iter().any(|row| matches!(
-            row,
-            SidebarRow::SectionHeader {
-                title: DONE_IDLE_SECTION_TITLE,
-                collapsed: true,
-                ..
-            }
-        )));
     }
 
     #[test]
     fn focusing_working_pane_targets_collapsed_working_header() {
         let mut app = sort_app(&[sort_tab("build", "owner/herdr", AgentState::Working, 1)]);
         app.sidebar_sections_layout = true;
-        set_sections_group_collapsed(&mut app, WORKING_SECTION_TITLE, true);
+        let project_name = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::NestedHeader { title, .. } => Some(title),
+                _ => None,
+            })
+            .expect("project header");
         let entry = sidebar_thread_entries(&app)
             .into_iter()
             .next()
@@ -33170,10 +33301,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         assert_eq!(
             collapsed_sidebar_placement(&app, &entry, "main"),
-            Some((
-                WORKING_SECTION_TITLE.to_string(),
-                WORKING_SECTION_TITLE.to_string()
-            ))
+            Some((WORKING_SECTION_TITLE.to_string(), project_name))
         );
     }
 
@@ -33194,9 +33322,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         assert!(rows.iter().any(|row| matches!(
             row,
-            SidebarRow::SectionHeader {
-                title: WORKING_SECTION_TITLE,
-                count: 1,
+            SidebarRow::NestedHeader {
+                activity_count: Some((1, 1)),
+                collapsed: true,
                 ..
             }
         )));
@@ -33488,44 +33616,20 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.reconcile_sidebar_presentation();
 
         let rows = sidebar_rows(&app);
-        assert!(rows.iter().any(|row| matches!(
-            row,
-            SidebarRow::SectionHeader {
-                title: BLOCKERS_SECTION_TITLE,
-                count: 1,
-                ..
-            }
-        )));
-        assert!(rows.iter().any(|row| matches!(
-            row,
-            SidebarRow::SectionHeader {
-                title: WORKING_SECTION_TITLE,
-                count: 1,
-                collapsed: false,
-                ..
-            }
-        )));
-        assert!(rows.iter().any(|row| matches!(
-            row,
-            SidebarRow::Tab { entry, .. }
-                if entry.state == AgentState::Blocked && !entry.working_shelf
-        )));
-        assert!(!rows.iter().any(|row| matches!(
-            row,
-            SidebarRow::Tab { entry, .. } if entry.state == AgentState::Idle
-        )));
-
-        app.toggle_sidebar_group(WORKING_SECTION_TITLE);
+        assert!(rows.iter().any(|row| matches!(row, SidebarRow::NestedHeader { title, activity_count: Some((1, 1)), collapsed: true, .. } if title == "working")));
+        assert!(rows
+            .iter()
+            .any(|row| matches!(row, SidebarRow::Tab { entry, .. } if entry_is_blocked(entry))));
+        assert!(!rows.iter().any(
+            |row| matches!(row, SidebarRow::Tab { entry, .. } if entry.state == AgentState::Working)
+        ));
+        app.toggle_sidebar_group("fleet-working:working");
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(row, SidebarRow::Tab { entry, .. } if entry.state == AgentState::Working && entry.working_shelf)));
+        app.toggle_sidebar_group("fleet-working:working");
         assert!(!sidebar_rows(&app).iter().any(
             |row| matches!(row, SidebarRow::Tab { entry, .. } if entry.state == AgentState::Working)
         ));
-        app.toggle_sidebar_group(WORKING_SECTION_TITLE);
-        let rows = sidebar_rows(&app);
-        assert!(rows.iter().any(|row| matches!(
-            row,
-            SidebarRow::Tab { entry, .. }
-                if entry.state == AgentState::Working && !entry.working_shelf
-        )));
     }
 
     #[test]
@@ -33646,18 +33750,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .iter()
             .position(|row| matches!(row, SidebarRow::Tab { entry, .. } if entry_is_blocked(entry)))
             .expect("Needs You strip");
-        let active = rows
-            .iter()
-            .position(|row| {
-                matches!(
-                    row,
-                    SidebarRow::SectionHeader {
-                        title: WORKING_SECTION_TITLE,
-                        ..
-                    }
-                )
-            })
-            .expect("working section");
         assert!(!rows.iter().any(|row| matches!(
             row,
             SidebarRow::SectionHeader {
@@ -33665,18 +33757,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 ..
             }
         )));
-        let settled = rows
-            .iter()
-            .position(|row| {
-                matches!(
-                    row,
-                    SidebarRow::SectionHeader {
-                        title: DONE_IDLE_SECTION_TITLE,
-                        ..
-                    }
-                )
-            })
-            .expect("done / idle section");
         let pods = rows
             .iter()
             .position(|row| matches!(row, SidebarRow::SectionHeader { title, .. } if *title == PODS_SECTION_TITLE))
@@ -33697,8 +33777,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .iter()
             .position(|row| matches!(row, SidebarRow::SymphonyJob { .. }))
             .expect("Symphony row");
-        assert!(needs_you < active && active < settled);
-        assert!(settled < pods && pods < unassigned && unassigned < run && run < loop_row);
+        assert!(needs_you < pods && pods < unassigned && unassigned < run && run < loop_row);
         assert!(loop_row < symphony);
     }
 
@@ -33768,6 +33847,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn sections_working_shelf_tabs_keep_shared_hover_actions_at_normal_width() {
         let mut app = app_with_agents(&["alpha"]);
         app.sidebar_sections_layout = true;
+        app.toggle_sidebar_group("fleet-working:alpha");
         app.nerd_font = false;
         let area = Rect::new(0, 0, 60, 25);
         let tab = compute_tab_card_areas(&app, area)
@@ -34136,7 +34216,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_group_mode = SidebarGroupMode::RepoPr;
         let area = Rect::new(0, 0, 60, 30);
         let targets = compute_sidebar_hover_targets(&app, area);
-        for label in [DONE_IDLE_SECTION_TITLE, "GitHub"] {
+        for label in ["Sort projects and agents by status or activity", "GitHub"] {
             assert!(
                 targets.iter().any(|target| target.label == label),
                 "missing {label} tooltip"

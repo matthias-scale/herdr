@@ -1013,6 +1013,8 @@ impl App {
         let sidebar_presentation = state::SidebarPresentationState {
             spawn_dock_client_id: Some(crate::platform::client_presentation_identity()),
             blocker_scope: sidebar_blocker_scope,
+            #[cfg(not(test))]
+            fleet_sort: crate::client::presentation::load_fleet_sidebar_sort(),
             ..Default::default()
         };
         #[cfg(test)]
@@ -2502,6 +2504,14 @@ impl App {
                 crate::client::presentation::save_sidebar_blocker_scope(scope);
             }
 
+            if let Some(sort) = self
+                .state
+                .sidebar_presentation
+                .fleet_sort_persistence_request
+                .take()
+            {
+                crate::client::presentation::save_fleet_sidebar_sort(sort);
+            }
             if needs_render && self.can_render_now(now) {
                 self.reconcile_client_interaction(true);
                 self.sync_status_context_before_render();

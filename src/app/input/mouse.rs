@@ -1492,6 +1492,20 @@ impl AppState {
                         self.toggle_sidebar_group(crate::ui::sidebar::NEEDS_YOU_SECTION_TITLE);
                         return None;
                     }
+                    if crate::ui::sidebar::fleet_sort_anchor_rect(self, self.view.sidebar_rect)
+                        .contains((mouse.column, mouse.row).into())
+                    {
+                        use crate::app::state::FleetSidebarSort;
+                        self.sidebar_presentation.fleet_sort =
+                            match self.sidebar_presentation.fleet_sort {
+                                FleetSidebarSort::Status => FleetSidebarSort::Activity,
+                                FleetSidebarSort::Activity => FleetSidebarSort::Status,
+                            };
+                        self.sidebar_presentation.fleet_sort_persistence_request =
+                            Some(self.sidebar_presentation.fleet_sort);
+                        self.mark_sidebar_projection_changed();
+                        return None;
+                    }
                     if crate::ui::sidebar_blocker_scope_anchor_rect(self, self.view.sidebar_rect)
                         .contains((mouse.column, mouse.row).into())
                     {
@@ -1663,6 +1677,23 @@ impl AppState {
                             );
                         }
                         return None;
+                    }
+
+                    // The unified projection emits normal local windows as Tab
+                    // rows, without a surrounding Workspace/Agent click target.
+                    if self.sidebar_sections_layout {
+                        if let Some(card) =
+                            crate::ui::compute_tab_card_areas(self, self.view.sidebar_rect)
+                                .into_iter()
+                                .find(|card| card.rect.contains((mouse.column, mouse.row).into()))
+                        {
+                            self.sidebar_selected_work_group = None;
+                            self.set_server_mode(Mode::Terminal);
+                            return Some(MouseAction::FocusPane {
+                                ws_idx: card.ws_idx,
+                                pane_id: card.pane_id,
+                            });
+                        }
                     }
 
                     if let Some((ws_idx, _tab_idx, pane_id)) =

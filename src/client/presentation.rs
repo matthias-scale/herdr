@@ -49,6 +49,8 @@ struct ClientPresentationFile {
     #[serde(default)]
     sidebar_blocker_scope: Option<crate::app::state::BlockerScope>,
     #[serde(default)]
+    fleet_sidebar_sort: Option<crate::app::state::FleetSidebarSort>,
+    #[serde(default)]
     sidebar_group_sorts:
         Option<std::collections::HashMap<String, crate::app::state::SidebarSortMode>>,
     #[serde(default)]
@@ -316,6 +318,25 @@ fn save_sidebar_work_filter_to_path(
 ) -> std::io::Result<()> {
     filter.query.clear();
     update_path(path, |state| state.sidebar_work_filter = Some(filter))
+}
+
+#[cfg(not(test))]
+pub(crate) fn load_fleet_sidebar_sort() -> crate::app::state::FleetSidebarSort {
+    let path = presentation_path();
+    match load_from_path(&path) {
+        Ok(state) => state.fleet_sidebar_sort.unwrap_or_default(),
+        Err(err) => {
+            warn!(path = %path.display(), err = %err, "failed to load client presentation state");
+            crate::app::state::FleetSidebarSort::default()
+        }
+    }
+}
+
+pub(crate) fn save_fleet_sidebar_sort(sort: crate::app::state::FleetSidebarSort) {
+    let path = presentation_path();
+    if let Err(err) = update_path(&path, |state| state.fleet_sidebar_sort = Some(sort)) {
+        warn!(path = %path.display(), err = %err, "failed to save client presentation state");
+    }
 }
 
 #[cfg(not(test))]
@@ -629,6 +650,25 @@ mod tests {
         assert_eq!(
             state.sidebar_group_mode,
             Some(crate::app::state::SidebarGroupMode::RepoPr)
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn fleet_sidebar_sort_round_trips_and_legacy_defaults_to_status() {
+        use crate::app::state::FleetSidebarSort;
+        let path = temp_path();
+        for sort in [FleetSidebarSort::Activity, FleetSidebarSort::Status] {
+            update_path(&path, |state| state.fleet_sidebar_sort = Some(sort)).expect("save sort");
+            assert_eq!(
+                load_from_path(&path).expect("load sort").fleet_sidebar_sort,
+                Some(sort)
+            );
+        }
+        let legacy: ClientPresentationFile = serde_json::from_str("{}").expect("legacy");
+        assert_eq!(
+            legacy.fleet_sidebar_sort.unwrap_or_default(),
+            FleetSidebarSort::Status
         );
         let _ = std::fs::remove_file(path);
     }

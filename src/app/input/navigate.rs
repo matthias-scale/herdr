@@ -5089,10 +5089,8 @@ mod tests {
             }
         }
 
-        let working = "working";
-        app.state.toggle_sidebar_group(working);
-        app.state
-            .toggle_sidebar_group(crate::ui::sidebar::DONE_IDLE_SECTION_TITLE);
+        let working = "fleet-working:working";
+
         assert!(crate::ui::sidebar::section_is_collapsed(
             &app.state, working
         ));
@@ -5118,7 +5116,7 @@ mod tests {
         assert_eq!(app.state.selected, 1, "down stays at the final visible row");
 
         app.state.toggle_sidebar_group(working);
-        assert_eq!(app.state.visible_workspace_order(), vec![0, 2, 1]);
+        assert_eq!(app.state.visible_workspace_order(), vec![0, 1, 2]);
         let third_workspace = navigate_reserved_action_for_key(
             &app.state,
             &TerminalKey::new(KeyCode::Char('3'), KeyModifiers::empty()),
@@ -5127,7 +5125,7 @@ mod tests {
         execute_navigate_action(&mut app.state, third_workspace);
         assert_eq!(
             app.state.active,
-            Some(1),
+            Some(2),
             "expanded Working summary does not duplicate jump numbers"
         );
 
@@ -5143,7 +5141,7 @@ mod tests {
         execute_navigate_action(&mut app.state, second_workspace);
         assert_eq!(
             app.state.active,
-            Some(1),
+            Some(2),
             "filtered workspaces have no jump number"
         );
         let first_workspace = navigate_reserved_action_for_key(
@@ -5381,7 +5379,9 @@ mod tests {
         let project = crate::ui::sidebar_rows(&state)
             .into_iter()
             .find_map(|row| match row {
-                crate::ui::SidebarRow::NestedHeader { key, .. } if key.starts_with("fleet:") => {
+                crate::ui::SidebarRow::NestedHeader { key, .. }
+                    if key.starts_with("fleet-project:") =>
+                {
                     Some(key)
                 }
                 _ => None,
@@ -5428,11 +5428,23 @@ mod tests {
     }
 
     #[test]
-    fn next_window_skips_remote_agent_in_collapsed_state() {
+    fn next_window_skips_remote_agent_in_collapsed_project() {
         let (mut app, agent_ref) = app_with_remote_agent();
         app.state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
         app.state.skip_collapsed_cycle = true;
         app.state.sidebar_sections_layout = true;
+        let project = crate::ui::sidebar_rows(&app.state)
+            .into_iter()
+            .find_map(|row| match row {
+                crate::ui::SidebarRow::NestedHeader { key, .. }
+                    if key.starts_with("fleet-project:") =>
+                {
+                    Some(key)
+                }
+                _ => None,
+            })
+            .expect("project folder");
+        app.state.toggle_sidebar_group(&project);
         assert!(!crate::ui::sidebar_rows(&app.state)
             .iter()
             .any(|row| matches!(
@@ -5491,14 +5503,23 @@ mod tests {
     }
 
     #[test]
-    fn next_agent_opens_remote_agent_hidden_in_collapsed_device_group() {
+    fn next_agent_opens_remote_agent_hidden_in_collapsed_project() {
         let (mut app, agent_ref) = app_with_remote_agent();
         app.state.sidebar_sections_layout = true;
         app.state.remote_agent_device_groups =
             Some(crate::ui::sidebar::remote_agent_device_groups(&app.state));
-        app.state
-            .collapsed_sidebar_groups
-            .insert(format!("device:main/{}", agent_ref.host));
+        let project = crate::ui::sidebar_rows(&app.state)
+            .into_iter()
+            .find_map(|row| match row {
+                crate::ui::SidebarRow::NestedHeader { key, .. }
+                    if key.starts_with("fleet-project:") =>
+                {
+                    Some(key)
+                }
+                _ => None,
+            })
+            .expect("project folder");
+        app.state.toggle_sidebar_group(&project);
 
         assert!(!crate::ui::sidebar_rows(&app.state)
             .iter()

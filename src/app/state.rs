@@ -1499,6 +1499,15 @@ impl SidebarGroupMode {
     }
 }
 
+/// Attach-local ordering for the unified project list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FleetSidebarSort {
+    #[default]
+    Status,
+    Activity,
+}
+
 /// How one sidebar group orders its rows. `Default` is the canonical order the
 /// projection already builds; every other mode re-sorts only the rows of the
 /// group the operator picked. Persisted per group key in the client-local
@@ -1578,6 +1587,8 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) filter_menu_selected: usize,
     /// Attach-local host filter for the unified agent list.
     pub(crate) host_filter: Option<String>,
+    pub(crate) fleet_sort: FleetSidebarSort,
+    pub(crate) fleet_sort_persistence_request: Option<FleetSidebarSort>,
     pub(crate) blocker_scope: BlockerScope,
     pub(crate) blocker_scope_menu_open: bool,
     pub(crate) blocker_scope_menu_selected: usize,
@@ -6592,6 +6603,14 @@ impl AppState {
         std::mem::swap(
             &mut self.sidebar_presentation.host_filter,
             &mut other.host_filter,
+        );
+        std::mem::swap(
+            &mut self.sidebar_presentation.fleet_sort,
+            &mut other.fleet_sort,
+        );
+        std::mem::swap(
+            &mut self.sidebar_presentation.fleet_sort_persistence_request,
+            &mut other.fleet_sort_persistence_request,
         );
         std::mem::swap(&mut self.sidebar_focused, &mut other.focused);
         std::mem::swap(&mut self.client_focus_intent, &mut other.focus_intent);
