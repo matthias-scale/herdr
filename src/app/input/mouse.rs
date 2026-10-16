@@ -694,6 +694,10 @@ impl AppState {
         let star_filter_hit =
             group_menu_enabled && self.point_in_rect(star_filter_anchor, mouse.column, mouse.row);
         let group_anchor = self.sidebar_group_mode_anchor_rect();
+        let display_settings_anchor =
+            crate::ui::sidebar_display_settings_anchor_rect(self, self.view.sidebar_rect);
+        let display_settings_hit = group_menu_enabled
+            && self.point_in_rect(display_settings_anchor, mouse.column, mouse.row);
         let filter_anchor = self.sidebar_filter_anchor_rect();
         let filter_anchor_hit =
             group_menu_enabled && self.point_in_rect(filter_anchor, mouse.column, mouse.row);
@@ -761,6 +765,10 @@ impl AppState {
         }
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && project_anchor_hit {
             self.open_sidebar_project_menu();
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && display_settings_hit {
+            self.open_sidebar_display_settings();
             return None;
         }
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && filter_anchor_hit {
@@ -2611,6 +2619,15 @@ impl AppState {
                     match self.sidebar_blocker_scope_menu_item_at(mouse.column, mouse.row) {
                         Some(index) => self.select_sidebar_blocker_scope_option(index),
                         None => self.sidebar_blocker_scope_menu_open = false,
+                    }
+                }
+                None
+            }
+            ClientInputOwner::SidebarDisplaySettings => {
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    match self.sidebar_display_settings_item_at(mouse.column, mouse.row) {
+                        Some(index) => self.select_sidebar_display_settings_item(index),
+                        None => self.sidebar_display_settings_open = false,
                     }
                 }
                 None

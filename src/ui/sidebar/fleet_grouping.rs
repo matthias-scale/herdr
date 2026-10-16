@@ -41,22 +41,19 @@ fn working_key(project: &str) -> String {
 
 pub(super) fn marker(app: &AppState, entry: &AgentPanelEntry) -> (&'static str, Color) {
     let state = state_index(app, entry);
-    let glyph = if state == 2 {
-        "?"
-    } else if app.nerd_font {
-        "●"
+    let glyph = if app.nerd_font {
+        compact_dot_for_state(
+            sidebar_entry_display_state(entry),
+            entry.seen,
+            entry.has_agent,
+            entry_has_gate(entry),
+            entry.usage_limited,
+            entry.working_while_blocked,
+        )
     } else {
         ["!", "+", "?", "~"][state]
     };
-    (
-        glyph,
-        [
-            app.palette.red,
-            app.palette.green,
-            app.palette.overlay0,
-            app.palette.blue,
-        ][state],
-    )
+    (glyph, compact_row_color(entry, &app.palette))
 }
 
 pub(super) fn host_label(app: &AppState) -> &str {
@@ -176,18 +173,15 @@ pub(super) fn rows<'a>(
         .workspaces
         .iter()
         .enumerate()
-        .map(|(index, workspace)| {
+        .map(|(index, _workspace)| {
             workspace_declared_repo(app, index)
                 .map(|(repo, _)| {
                     let (key, title) = project(repo);
                     (key.to_string(), title.to_string())
                 })
                 .unwrap_or_else(|| {
-                    let name = workspace
-                        .custom_name
-                        .as_deref()
-                        .unwrap_or(&workspace.cached_auto_label);
-                    (name.to_string(), name.to_string())
+                    let title = NO_REPO_YET_SECTION_TITLE;
+                    (title.to_string(), title.to_string())
                 })
         })
         .collect::<Vec<_>>();
@@ -212,7 +206,7 @@ pub(super) fn rows<'a>(
                 .repo
                 .as_deref()
                 .map(project)
-                .unwrap_or((entry.space_label.as_str(), entry.space_label.as_str()))
+                .unwrap_or((NO_REPO_YET_SECTION_TITLE, NO_REPO_YET_SECTION_TITLE))
         } else if let Some(target) = entry.local_target() {
             let Some(project) = projects.get(target.ws_idx) else {
                 continue;
@@ -295,11 +289,7 @@ pub(super) fn rows<'a>(
             title: name.into(),
             count: visible,
             activity_count: Some((working, total)),
-            collapsed: if only_working {
-                working_collapsed
-            } else {
-                collapsed
-            },
+            collapsed: if only_working { true } else { collapsed },
             dim: only_working,
             status: None,
             spawn: false,
@@ -342,13 +332,10 @@ pub(super) fn rows<'a>(
                     spawn: false,
                 });
             }
-            if !working_collapsed {
+            if !working_collapsed && !only_working {
                 append(&mut rows, working_entries, true);
             }
         }
-    }
-    if rows.len() > 1 {
-        rows.push(SidebarRow::ShelfDivider);
     }
     rows
 }

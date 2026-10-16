@@ -191,6 +191,10 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
             super::sidebar_header_star_filter_rect(view.sidebar_rect),
         ),
         (
+            ControlId::SidebarDisplaySettings,
+            super::sidebar_display_settings_anchor_rect(app, view.sidebar_rect),
+        ),
+        (
             ControlId::SidebarNewThread,
             super::sidebar_header_new_thread_rect(view.sidebar_rect),
         ),
@@ -398,6 +402,10 @@ fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> 
             } else {
                 "Show only starred sessions".into()
             },
+        ),
+        ControlId::SidebarDisplaySettings => (
+            super::sidebar_display_settings_anchor_rect(app, view.sidebar_rect),
+            "Sidebar display settings".into(),
         ),
         ControlId::SidebarNewThread => (
             super::sidebar_header_new_thread_rect(view.sidebar_rect),

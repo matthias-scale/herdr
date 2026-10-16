@@ -1592,6 +1592,9 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) blocker_scope: BlockerScope,
     pub(crate) blocker_scope_menu_open: bool,
     pub(crate) blocker_scope_menu_selected: usize,
+    pub(crate) display_settings_open: bool,
+    pub(crate) hide_provider_icon: bool,
+    pub(crate) hide_machine_name: bool,
     pub(crate) search_active: bool,
     pub(crate) agent_finder_saved_query: Option<String>,
     pub(crate) agent_finder_history: Vec<String>,
@@ -1671,6 +1674,7 @@ pub(crate) enum ClientInputOwner {
     SidebarGroupMenu,
     SidebarFilterMenu,
     SidebarBlockerScopeMenu,
+    SidebarDisplaySettings,
     SidebarNewMenu,
     SidebarNewThread,
     SidebarProjectMenu,
@@ -4793,6 +4797,9 @@ pub struct AppState {
     pub(crate) sidebar_blocker_scope: BlockerScope,
     pub(crate) sidebar_blocker_scope_menu_open: bool,
     pub(crate) sidebar_blocker_scope_menu_selected: usize,
+    pub(crate) sidebar_display_settings_open: bool,
+    pub(crate) sidebar_hide_provider_icon: bool,
+    pub(crate) sidebar_hide_machine_name: bool,
     /// Typed input goes to the persisted sidebar row query while this is set.
     pub(crate) sidebar_search_active: bool,
     pub(crate) agent_finder_saved_query: Option<String>,
@@ -5283,6 +5290,7 @@ struct ClientInputOwnerState {
     new_menu_open: bool,
     filter_menu_open: bool,
     blocker_scope_menu_open: bool,
+    display_settings_open: bool,
     group_menu_open: bool,
     pr_confirmation_open: bool,
     dock_surface_menu_open: bool,
@@ -5309,6 +5317,7 @@ impl ClientInputOwnerState {
             new_menu_open: app.sidebar_new_menu.is_some(),
             filter_menu_open: app.sidebar_filter_menu_open,
             blocker_scope_menu_open: app.sidebar_blocker_scope_menu_open,
+            display_settings_open: app.sidebar_display_settings_open,
             group_menu_open: app.sidebar_group_menu_open,
             pr_confirmation_open: app.pr_action_confirmation.is_some(),
             dock_surface_menu_open: app.dock_surface_menu.is_some(),
@@ -5339,6 +5348,7 @@ impl ClientInputOwnerState {
             new_menu_open: sidebar.new_menu.is_some(),
             filter_menu_open: sidebar.filter_menu_open,
             blocker_scope_menu_open: sidebar.blocker_scope_menu_open,
+            display_settings_open: sidebar.display_settings_open,
             group_menu_open: sidebar.group_menu_open,
             pr_confirmation_open: dock.pr_action_confirmation.is_some(),
             dock_surface_menu_open: dock.surface_menu.is_some(),
@@ -5390,6 +5400,9 @@ impl ClientInputOwnerState {
         }
         if self.blocker_scope_menu_open {
             return Some(ClientInputOwner::SidebarBlockerScopeMenu);
+        }
+        if self.display_settings_open {
+            return Some(ClientInputOwner::SidebarDisplaySettings);
         }
         if self.group_menu_open {
             return Some(ClientInputOwner::SidebarGroupMenu);
@@ -5687,6 +5700,7 @@ pub(crate) enum ControlId {
     ConfigDiagnostic,
     SidebarNewThread,
     SidebarStarFilter,
+    SidebarDisplaySettings,
     SidebarNewMenu,
     SidebarMore,
     SidebarFooter(SidebarFooterItem),
@@ -6669,6 +6683,18 @@ impl AppState {
         std::mem::swap(
             &mut self.sidebar_blocker_scope_menu_selected,
             &mut other.blocker_scope_menu_selected,
+        );
+        std::mem::swap(
+            &mut self.sidebar_display_settings_open,
+            &mut other.display_settings_open,
+        );
+        std::mem::swap(
+            &mut self.sidebar_hide_provider_icon,
+            &mut other.hide_provider_icon,
+        );
+        std::mem::swap(
+            &mut self.sidebar_hide_machine_name,
+            &mut other.hide_machine_name,
         );
         std::mem::swap(&mut self.sidebar_search_active, &mut other.search_active);
         std::mem::swap(
@@ -8329,6 +8355,9 @@ impl AppState {
             sidebar_blocker_scope: BlockerScope::default(),
             sidebar_blocker_scope_menu_open: false,
             sidebar_blocker_scope_menu_selected: 0,
+            sidebar_display_settings_open: false,
+            sidebar_hide_provider_icon: false,
+            sidebar_hide_machine_name: false,
             sidebar_search_active: false,
             agent_finder_saved_query: None,
             agent_finder_history: Vec::new(),
@@ -9222,6 +9251,9 @@ mod tests {
             ClientInputOwner::SidebarBlockerScopeMenu => {
                 state.sidebar_blocker_scope_menu_open = true;
             }
+            ClientInputOwner::SidebarDisplaySettings => {
+                state.sidebar_display_settings_open = true;
+            }
             ClientInputOwner::SidebarNewMenu => {
                 state.sidebar_new_menu = Some(SidebarNewMenuState::default());
             }
@@ -9349,6 +9381,7 @@ mod tests {
             ClientInputOwner::SidebarGroupMenu,
             ClientInputOwner::SidebarFilterMenu,
             ClientInputOwner::SidebarBlockerScopeMenu,
+            ClientInputOwner::SidebarDisplaySettings,
             ClientInputOwner::SidebarNewMenu,
             ClientInputOwner::SidebarNewThread,
             ClientInputOwner::SidebarProjectMenu,

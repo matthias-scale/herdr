@@ -1039,6 +1039,9 @@ impl App {
                 .iter()
                 .position(|scope| *scope == sidebar_blocker_scope)
                 .unwrap_or(1),
+            sidebar_display_settings_open: false,
+            sidebar_hide_provider_icon: false,
+            sidebar_hide_machine_name: false,
             sidebar_search_active: false,
             agent_finder_saved_query: None,
             agent_finder_history: Vec::new(),
@@ -4092,6 +4095,9 @@ impl App {
                 }
                 state::ClientInputOwner::SidebarBlockerScopeMenu => {
                     self.state.handle_sidebar_blocker_scope_menu_key(key_event);
+                }
+                state::ClientInputOwner::SidebarDisplaySettings => {
+                    self.state.handle_sidebar_display_settings_key(key_event);
                 }
                 state::ClientInputOwner::SidebarNewMenu => {
                     self.state.handle_sidebar_new_menu_key(key_event);

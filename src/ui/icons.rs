@@ -366,7 +366,7 @@ pub(crate) fn child_badge_icon<'a>(
         .then_some(child_icon)
 }
 
-fn builtin_repo_icon(name: &str) -> Option<&'static str> {
+pub(crate) fn builtin_repo_icon(name: &str) -> Option<&'static str> {
     if matches_any(name, &["inbox", "agent-inbox"]) {
         Some(INBOX)
     } else if name.eq_ignore_ascii_case("scalablev2") {

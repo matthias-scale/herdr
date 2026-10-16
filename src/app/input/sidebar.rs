@@ -783,6 +783,50 @@ impl AppState {
         self.sidebar_blocker_scope_menu_open = true;
     }
 
+    pub(crate) fn open_sidebar_display_settings(&mut self) {
+        self.sidebar_display_settings_open = true;
+        self.sidebar_group_menu_open = false;
+        self.sidebar_filter_menu_open = false;
+        self.sidebar_blocker_scope_menu_open = false;
+    }
+
+    pub(crate) fn sidebar_display_settings_item_at(&self, col: u16, row: u16) -> Option<usize> {
+        crate::ui::sidebar_display_settings_menu_item_at(self, self.screen_rect(), col, row)
+    }
+
+    pub(crate) fn select_sidebar_display_settings_item(&mut self, index: usize) {
+        match index {
+            0 => self.sidebar_hide_provider_icon = !self.sidebar_hide_provider_icon,
+            1 => self.sidebar_hide_machine_name = !self.sidebar_hide_machine_name,
+            2 => {
+                self.sidebar_display_settings_open = false;
+                self.open_sidebar_blocker_scope_menu();
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn handle_sidebar_display_settings_key(&mut self, key: KeyEvent) -> bool {
+        if !self.sidebar_display_settings_open {
+            return false;
+        }
+        match key.code {
+            KeyCode::Esc => self.sidebar_display_settings_open = false,
+            KeyCode::Char('p' | 'P') => {
+                self.sidebar_hide_provider_icon = !self.sidebar_hide_provider_icon
+            }
+            KeyCode::Char('m' | 'M') => {
+                self.sidebar_hide_machine_name = !self.sidebar_hide_machine_name
+            }
+            KeyCode::Char('h' | 'H') | KeyCode::Enter => {
+                self.sidebar_display_settings_open = false;
+                self.open_sidebar_blocker_scope_menu();
+            }
+            _ => {}
+        }
+        true
+    }
+
     pub(crate) fn sidebar_blocker_scope_menu_item_at(&self, col: u16, row: u16) -> Option<usize> {
         let layout = crate::ui::sidebar_blocker_scope_menu_layout(self, self.screen_rect())?;
         crate::ui::dropdown::hit_test(&layout, col, row)
