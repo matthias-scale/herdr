@@ -233,7 +233,11 @@ impl SidebarCoverageRecorder {
     }
 
     pub(super) fn finish(&mut self, app: &AppState, rows: &[SidebarRow]) {
-        let main_key = devices::group_key("main", &app.agent_host_name);
+        let main_key = if app.sidebar_sections_layout {
+            "fleet:coverage".to_string()
+        } else {
+            devices::group_key("main", &app.agent_host_name)
+        };
         let working_key = devices::group_key("working", &app.agent_host_name);
         let mut section = "main".to_string();
         let mut group = devices::device_title(app, &app.agent_host_name, true);
@@ -325,6 +329,7 @@ impl SidebarCoverageRecorder {
         let hidden = self
             .records
             .iter()
+            .filter(|record| record.report.dropped_by.as_deref() != Some("host_filter"))
             .filter(|record| {
                 record.report.dropped_by.is_some() || record.report.placement.is_none()
             })
@@ -341,7 +346,11 @@ impl SidebarCoverageRecorder {
             return;
         }
 
-        let main_key = devices::group_key("main", &app.agent_host_name);
+        let main_key = if app.sidebar_sections_layout {
+            "fleet:coverage".to_string()
+        } else {
+            devices::group_key("main", &app.agent_host_name)
+        };
         let root_index = rows.iter().position(
             |row| matches!(row, SidebarRow::NestedHeader { key, .. } if key == &main_key),
         );
@@ -367,16 +376,21 @@ impl SidebarCoverageRecorder {
                         action_key: None,
                         sort_key: None,
                         sort_mode: SidebarSortMode::Default,
-                        title: devices::device_title(app, &app.agent_host_name, true),
+                        title: if app.sidebar_sections_layout {
+                            NO_REPO_YET_SECTION_TITLE.to_string()
+                        } else {
+                            devices::device_title(app, &app.agent_host_name, true)
+                        },
                         count: 0,
                         activity_count: None,
-                        collapsed: devices::group_is_collapsed(
-                            app,
-                            "main",
-                            &app.agent_host_name,
-                            true,
-                            true,
-                        ),
+                        collapsed: !app.sidebar_sections_layout
+                            && devices::group_is_collapsed(
+                                app,
+                                "main",
+                                &app.agent_host_name,
+                                true,
+                                true,
+                            ),
                         dim: false,
                         status: None,
                         spawn: false,
@@ -454,6 +468,7 @@ pub fn sidebar_coverage(
         Some(terminal_runtimes),
         false,
         true,
+        false,
         false,
         Some(&mut coverage),
     );

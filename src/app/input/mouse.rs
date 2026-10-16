@@ -968,6 +968,10 @@ impl AppState {
                 .and_then(|target| target.action.clone())
             {
                 return Some(match action {
+                    crate::app::state::SidebarHoverAction::FilterHost { host } => {
+                        self.toggle_sidebar_host_filter(host.to_string());
+                        return None;
+                    }
                     crate::app::state::SidebarHoverAction::Pin { ws_idx, tab_idx } => {
                         self.request_pin_toggle = Some((ws_idx, tab_idx));
                         return None;
@@ -1416,6 +1420,18 @@ impl AppState {
 
                 if in_sidebar {
                     self.sidebar_selected_settled = None;
+                    if !self.sidebar_collapsed {
+                        if let Some(index) =
+                            crate::ui::sidebar::fleet_panels::row_at(self, mouse.column, mouse.row)
+                        {
+                            if crate::ui::sidebar::fleet_panels::token_at(self, index, mouse.column)
+                                .is_none()
+                            {
+                                crate::ui::sidebar::fleet_panels::toggle(self, index);
+                            }
+                            return None;
+                        }
+                    }
                     if self.on_sidebar_toggle(mouse.column, mouse.row) {
                         self.toggle_sidebar_collapsed();
                         return None;
@@ -2167,6 +2183,19 @@ impl AppState {
                     self.forward_pane_reported_wheel(terminal_runtimes, &info, mouse);
                 }
             }
+
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if in_sidebar
+                    && crate::ui::sidebar::fleet_panels::scroll(
+                        self,
+                        mouse.column,
+                        mouse.row,
+                        if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                            -1
+                        } else {
+                            1
+                        },
+                    ) => {}
 
             MouseEventKind::ScrollUp if in_sidebar => {
                 if !self.scroll_collapsed_sidebar(-1) {
@@ -7100,9 +7129,10 @@ mod tests {
         app.state.reconcile_sidebar_presentation();
         let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
         assert!(app.state.snooze_pane_at(0, snoozed_pane, deadline));
-        app.state
-            .collapsed_sidebar_groups
-            .insert("sections:Snoozed".into());
+        app.state.collapsed_sidebar_groups.insert(format!(
+            "sections:{}",
+            crate::ui::sidebar::DONE_IDLE_SECTION_TITLE
+        ));
         let sidebar = Rect::new(0, 0, 44, 40);
         app.state.view.sidebar_rect = sidebar;
         let tab_cards = crate::ui::compute_tab_card_areas(&app.state, sidebar);

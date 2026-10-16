@@ -8,24 +8,18 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const STALE_AFTER: Duration = Duration::from_secs(3);
-const FIRST_RETRY: Duration = Duration::from_millis(250);
-const MAX_RETRY: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 struct Reconnect {
     disconnected_at: Option<Instant>,
     retry_at: Option<Instant>,
-    failures: u32,
+    retry: super::RetryBackoff,
 }
 
 impl Reconnect {
     fn failed(&mut self, now: Instant) {
         self.disconnected_at.get_or_insert(now);
-        let delay = FIRST_RETRY
-            .saturating_mul(1_u32.checked_shl(self.failures).unwrap_or(u32::MAX))
-            .min(MAX_RETRY);
-        self.retry_at = Some(now + delay);
-        self.failures = self.failures.saturating_add(1);
+        self.retry_at = Some(now + self.retry.next_delay());
     }
 
     fn ready(&self, now: Instant) -> bool {
@@ -326,6 +320,84 @@ mod tests {
         assert!(retain(&mut state, failed, now + Duration::from_secs(3))
             .agents
             .is_err());
+    }
+
+    #[test]
+    fn capability_probe_reuses_warm_channel_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = PathBuf::from("/tmp").join(format!(
+            "hc-probe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        crate::platform::create_remote_private_dir(&root).expect("fixture directory");
+        let program = root.join("ssh");
+        std::fs::write(&program, r#"#!/bin/sh
+socket=''
+operation=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -S) socket="$2"; shift 2 ;;
+    -O) operation="$2"; shift 2 ;;
+    -o) shift 2 ;;
+    -fN) operation=start; shift ;;
+    *) shift ;;
+  esac
+done
+case "$operation" in
+  start) echo master >> "${socket}.starts"; touch "$socket" ;;
+  exit) rm -f "$socket" ;;
+  *)
+    test -f "$socket" || exit 255
+    cat >> "${socket}.requests"
+    echo '{"id":"fleet-agent-events-capability","result":{"type":"pong","version":"test","protocol":1,"capabilities":{"live_handoff":false,"fleet_agent_events":true,"session_events":false}}}'
+    ;;
+esac
+"#).expect("fake ssh");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+            .expect("executable");
+        let target = format!("capability-probe-{}", root.display());
+        let channel = Arc::new(HostChannel::new(&target, program.into(), &root).expect("channel"));
+        CHANNELS
+            .get_or_init(Mutex::default)
+            .lock()
+            .expect("channels")
+            .insert(target.clone(), Arc::clone(&channel));
+        let host = crate::config::FleetHostConfig {
+            name: "probe".into(),
+            target: target.clone(),
+            socket: Some("/test/socket".into()),
+            session: Some("test-session".into()),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                super::super::remote_host_event_capabilities(&host, Duration::from_secs(2))
+                    .expect("capabilities over injected channel"),
+                (true, false)
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(channel.directory.join("control.starts"))
+                .expect("master count"),
+            "master\n"
+        );
+        let requests =
+            std::fs::read_to_string(channel.directory.join("control.requests")).expect("requests");
+        assert_eq!(requests.matches("fleet-agent-events-capability").count(), 2);
+        assert!(requests.contains("HERDR_SOCKET_PATH='/test/socket'"));
+        assert!(requests.contains("HERDR_SESSION='test-session'"));
+        CHANNELS
+            .get()
+            .expect("channels")
+            .lock()
+            .expect("channels")
+            .remove(&target);
+        drop(channel);
+        std::fs::remove_dir_all(root).expect("fixture cleanup");
     }
 
     #[test]

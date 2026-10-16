@@ -31,7 +31,8 @@ const RETURN_LABEL: &str = " ← focus ";
 ///
 /// Left: one icon per view (Home, Focus, Orchestration, Board, Scratch), the
 /// one on screen highlighted. Centre: view name and focused pane title. Right:
-/// CPU, memory, disk and `⋯`; host details and actions live in the popover.
+/// `⋯`; host details and actions live in the popover. Fleet resources are
+/// shown in the sidebar.
 ///
 /// Layout: spans the full client width above the sidebar. The right-hand
 /// segments are fitted first; the icons yield to them rather than overlapping,
@@ -398,9 +399,22 @@ fn segment_width(segments: &[Segment]) -> usize {
         .sum()
 }
 
-/// The narrowest bar that still keeps all three metric dots and `⋯`.
+/// The narrowest bar that still keeps `⋯`.
 pub(crate) fn minimum_required_status_width(app: &AppState) -> usize {
-    display_width(" ●  ●  ● ") + display_width(crate::ui::icons::more_label(app.nerd_font)) + 2
+    let fallback = if fleet_resources_available(app) {
+        0
+    } else {
+        display_width(" ●  ●  ● ")
+    };
+    fallback + display_width(crate::ui::icons::more_label(app.nerd_font)) + 2
+}
+
+fn fleet_resources_available(app: &AppState) -> bool {
+    crate::ui::sidebar::fleet_panels::available(app)
+        && !app.sidebar_collapsed
+        && app.view.sidebar_rect.width >= 18
+        && app.view.sidebar_rect.height >= 8
+        && crate::ui::sidebar::fleet_panels::resources_visible(app, app.view.sidebar_rect)
 }
 
 const WARN_PERCENT: u8 = 80;
@@ -444,15 +458,19 @@ fn status_segments(
     p: &Palette,
 ) -> Vec<Segment> {
     let mut out = Vec::new();
-    let cpu = metrics.cpu_percent.filter(|value| *value <= 100);
-    let memory = memory_percent(metrics);
-    let disk = metrics.disk_percent.filter(|value| *value <= 100);
-    for (kind, percent, was_visible) in [
-        (StatusSegmentKind::Cpu, cpu, app.status_cpu_visible),
-        (StatusSegmentKind::Memory, memory, app.status_mem_visible),
-        (StatusSegmentKind::Disk, disk, app.status_disk_visible),
-    ] {
-        out.push(compact_metric_segment(kind, percent, was_visible, p));
+    // In a collapsed or hidden sidebar, the local metric controls remain the
+    // only resource view. Once the fleet panel fits, it owns the resource dots.
+    if !fleet_resources_available(app) {
+        let cpu = metrics.cpu_percent.filter(|value| *value <= 100);
+        let memory = memory_percent(metrics);
+        let disk = metrics.disk_percent.filter(|value| *value <= 100);
+        for (kind, percent, was_visible) in [
+            (StatusSegmentKind::Cpu, cpu, app.status_cpu_visible),
+            (StatusSegmentKind::Memory, memory, app.status_mem_visible),
+            (StatusSegmentKind::Disk, disk, app.status_disk_visible),
+        ] {
+            out.push(compact_metric_segment(kind, percent, was_visible, p));
+        }
     }
     out.push(Segment {
         text: format!(" {} ", crate::ui::icons::more_label(app.nerd_font)),
@@ -1766,6 +1784,45 @@ mod tests {
                 StatusSegmentKind::Disk,
                 StatusSegmentKind::More
             ]
+        );
+    }
+
+    #[test]
+    fn fleet_resources_replace_top_metric_dots_only_while_sidebar_is_available() {
+        let mut app = AppState::test_new();
+        app.view.sidebar_rect = Rect::new(0, 1, 25, 30);
+        assert_eq!(
+            status_segments(&app, &StatusMetrics::default(), &app.palette).len(),
+            4
+        );
+        app.fleet_snapshot.hosts.push(fleet_host_fixture());
+        let visible = status_segments(&app, &StatusMetrics::default(), &app.palette);
+        assert_eq!(
+            visible
+                .iter()
+                .map(|segment| segment.kind)
+                .collect::<Vec<_>>(),
+            vec![StatusSegmentKind::More]
+        );
+        app.sidebar_collapsed = true;
+        let collapsed = status_segments(&app, &StatusMetrics::default(), &app.palette);
+        assert_eq!(collapsed.len(), 4);
+        app.sidebar_collapsed = false;
+        app.view.sidebar_rect = Rect::new(0, 1, 17, 30);
+        assert_eq!(
+            status_segments(&app, &StatusMetrics::default(), &app.palette).len(),
+            4
+        );
+        app.view.sidebar_rect = Rect::new(0, 1, 25, 8);
+        for index in 0..4 {
+            let mut host = fleet_host_fixture();
+            host.name = format!("workbox-{index}");
+            app.fleet_snapshot.hosts.push(host);
+        }
+        assert_eq!(
+            status_segments(&app, &StatusMetrics::default(), &app.palette).len(),
+            4,
+            "the top dots stay until every machine row fits below"
         );
     }
 

@@ -183,6 +183,7 @@ fn mobile_switcher_target_for_row(
     };
     if let Some(control) = control {
         return Some(match control {
+            crate::app::state::SidebarHoverAction::FilterHost { .. } => return None,
             crate::app::state::SidebarHoverAction::Pin { ws_idx, tab_idx } => {
                 MobileSwitcherTarget::Pin { ws_idx, tab_idx }
             }
@@ -230,7 +231,6 @@ fn mobile_switcher_target_for_row(
         SidebarRow::NestedHeader { key, .. } => MobileSwitcherTarget::NestedHeader(key.clone()),
         SidebarRow::NeedsYou { target, .. } => MobileSwitcherTarget::NeedsYou(target.clone()),
         SidebarRow::NeedsYouMore { .. } => MobileSwitcherTarget::NeedsYouMore,
-        SidebarRow::BlockersOtherDevices { .. } => return None,
         SidebarRow::AgentRun {
             host,
             summary: Some(summary),
@@ -291,7 +291,6 @@ fn mobile_sidebar_row_height(app: &AppState, row: &SidebarRow) -> usize {
         | SidebarRow::Divider
         | SidebarRow::ShelfDivider
         | SidebarRow::NeedsYouMore { .. }
-        | SidebarRow::BlockersOtherDevices { .. }
         | SidebarRow::NestedHeader { .. }
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
@@ -1552,20 +1551,7 @@ fn render_mobile_switcher_content(
                     Line::from(Span::styled(label, Style::default().fg(p.overlay0))),
                 );
             }
-            SidebarRow::BlockersOtherDevices { count } => {
-                render_one_line_item(
-                    frame,
-                    viewport,
-                    content,
-                    doc_y,
-                    app.mobile_switcher_scroll,
-                    p.panel_bg,
-                    Line::from(Span::styled(
-                        format!("{count} more on other devices"),
-                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
-                    )),
-                );
-            }
+
             SidebarRow::Notes(line) => {
                 let mut label = super::sidebar::notes::label(app, line, usize::from(content.width));
                 if matches!(line, super::sidebar::notes::NotesLine::Header) {
@@ -2952,15 +2938,15 @@ mod tests {
             let rows = mobile_sidebar_rows(&app);
             let ask_index = rows
                 .iter()
-                .position(|row| matches!(row, SidebarRow::NeedsYou { .. }))
+                .position(|row| matches!(row, SidebarRow::Tab { .. }))
                 .expect("mobile top ask row");
-            let SidebarRow::NeedsYou {
-                subtitle: Some(ask),
-                ..
-            } = &rows[ask_index]
-            else {
-                panic!("mobile top ask has its subtitle");
+            let SidebarRow::Tab { entry, .. } = &rows[ask_index] else {
+                panic!("mobile ask tab");
             };
+            let ask = entry
+                .pending_ask
+                .as_deref()
+                .expect("mobile tab ask subtitle");
             assert_eq!(ask, "Choose one");
             assert_eq!(mobile_sidebar_row_height(&app, &rows[ask_index]), 2);
 
@@ -2990,9 +2976,12 @@ mod tests {
             let second_line = (1..width)
                 .map(|x| rendered.backend().buffer()[(x, ask_y + 1)].symbol())
                 .collect::<String>();
-            assert!(first_line.contains('○'), "width={width}: {first_line:?}");
+            assert!(
+                first_line.contains('○') || first_line.contains('●'),
+                "width={width}: {first_line:?}"
+            );
             let marker_x = (1..width)
-                .find(|x| rendered.backend().buffer()[(*x, ask_y)].symbol() == "○")
+                .find(|x| matches!(rendered.backend().buffer()[(*x, ask_y)].symbol(), "○" | "●"))
                 .expect("red ask dot");
             assert_eq!(
                 rendered.backend().buffer()[(marker_x, ask_y)].style().fg,
@@ -3263,14 +3252,17 @@ mod tests {
                 .join("\n")
         };
         let shown = render(&app);
-        assert!(shown.contains("1 of 2"), "{shown}");
+        assert!(
+            shown.contains("working") && shown.contains("blocked"),
+            "{shown}"
+        );
         assert!(shown.contains("↳ Choose a layout"), "{shown}");
         app.sidebar_show_ask_subtitles = false;
         assert!(!render(&app).contains("↳ Choose a layout"));
     }
 
     #[test]
-    fn mobile_expanded_remote_working_row_is_dim_and_keeps_its_status_dot() {
+    fn mobile_unified_remote_working_row_keeps_its_status_dot() {
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
         app.view.layout = crate::app::state::ViewLayout::Mobile;
@@ -3288,7 +3280,7 @@ mod tests {
         assert!(mobile_sidebar_rows(&app).iter().any(|row| matches!(
             row,
             SidebarRow::RemoteAgent {
-                working_shelf: true,
+                working_shelf: false,
                 ..
             }
         )));
@@ -3313,13 +3305,6 @@ mod tests {
             .map(|x| terminal.backend().buffer()[(x, y)].symbol())
             .collect::<String>();
         assert!(row.contains('●'), "{row}");
-        let title_x = (0..area.width)
-            .find(|x| terminal.backend().buffer()[(*x, y)].symbol() == "N")
-            .expect("remote title");
-        assert!(terminal.backend().buffer()[(title_x, y)]
-            .style()
-            .add_modifier
-            .contains(Modifier::DIM));
     }
 
     #[test]
@@ -3513,7 +3498,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_sections_switcher_has_active_spaces_then_two_shelves() {
+    fn mobile_sections_switcher_has_four_unified_states() {
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
         let rows = mobile_sidebar_rows(&app);
@@ -3521,14 +3506,14 @@ mod tests {
             .iter()
             .filter_map(|row| match row {
                 SidebarRow::SectionHeader { title, .. }
-                    if matches!(*title, "Snoozed" | "Settled") =>
+                    if matches!(*title, "blocked" | "waiting" | "working" | "done / idle") =>
                 {
                     Some(*title)
                 }
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(shelves, ["Snoozed", "Settled"]);
+        assert_eq!(shelves, ["blocked", "waiting", "working", "done / idle"]);
         assert!(!rows.iter().any(|row| matches!(
             row,
             SidebarRow::SectionHeader {

@@ -228,6 +228,22 @@ pub(crate) fn usage_label(provider: QuotaProvider, nerd_font: bool) -> &'static 
     }
 }
 
+/// Color font glyphs carry their own ink, independently of the span tint.
+pub(crate) fn themed_usage_label(
+    provider: QuotaProvider,
+    nerd_font: bool,
+    palette: &Palette,
+) -> &'static str {
+    if nerd_font && is_dark(palette) {
+        match provider {
+            QuotaProvider::Kimi => return "\u{F6035}",
+            QuotaProvider::OpenCode => return "\u{F6038}",
+            _ => {}
+        }
+    }
+    usage_label(provider, nerd_font)
+}
+
 pub(crate) fn space_icon<'a>(
     repo_binding: Option<&str>,
     repo_root: Option<&Path>,

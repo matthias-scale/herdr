@@ -52,7 +52,7 @@ Reload applies most UI settings without restarting panes. Startup-only settings 
 
 Themes, sidebar layouts, copy behavior, and other presentation settings come from the client's local config, including when viewing an SSH machine. Pane defaults, worktrees, integrations, and custom commands belong to the server where the panes run. The UI's `reload config` action reloads both the client's local settings and the selected server's config. Local keybindings reload too; `--remote-keybindings server` instead uses the selected server's keybindings.
 
-The sidebar starts with this device expanded and other devices collapsed; devices without agents stay hidden. Device expansion choices survive restart and client handoff. Working, Snoozed, Settled, and usage start collapsed; Runs and Aloops start hidden, while the inbox stays visible. Collapsed usage shows the selected account for each connected provider, and expanded usage groups all accounts by provider. The panel fits its rows and returns spare space to the workspace list. Remote pane titles include their host.
+The sections sidebar groups agents across hosts by state (blocked, waiting, working, and done / idle), then project. Done / idle starts collapsed. Each agent shows its provider and device character; click the device character to toggle a host filter, or choose a host from the all hosts selector. Reconnecting hosts keep their last-known rows with a dimmed device character and a reconnecting tooltip. Usage starts collapsed; Runs and Aloops start hidden, while the inbox stays visible. Collapsed usage shows the selected account for each connected provider, and expanded usage groups all accounts by provider. The panel fits its rows and returns spare space to the workspace list. Remote pane titles include their host.
 
 Usage pairs each account’s 5h and 7d quota bars on one line. Yellow starts at 80%, red at 90%, and `⊘` marks an exhausted window. A `~` marks stale data; a lock (or `!` without Nerd Fonts) marks locally detected expired Claude authentication. Hover an account for its profile, email, windows, and connection reason; hover the usage title or device label for refresh and pane details. Clicking an account opens the usage dashboard. Disconnected providers without active panes stay hidden, and OpenCode appears only when expanded because it has no quota source.
 
@@ -310,7 +310,11 @@ The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](
 
 The cycle control beside the notification icon sets `ui.window_cycle_mode` to `"this-machine"` or `"this-machine-and-fleet"`. Next/previous follows visible sidebar rows, including working and non-working rows. Next-blocked remains limited to attention targets; its `Skip collapsed` option is stored as `ui.skip_collapsed_cycle`.
 
-With `ui.nerd_font = true` (the default), agent badges, Space headers, usage providers, and file kinds use Nerd Font glyphs. Set it to `false` to restore text badges, bare Space names, and the `CC` / `CX` / `KI` / `AG` usage labels. Override a Space icon by repo name, `owner/repo` binding, or Space label:
+With `ui.nerd_font = true` (the default), agent badges, Space headers, usage providers, and file kinds use Nerd Font glyphs. Set it to `false` to restore text badges, bare Space names, and the `CC` / `CX` / `KI` / `AG` usage labels.
+
+`ui.subscript_glyphs = false` is the compatibility default. Set it to `true` only after every client displaying this server has the companion Herdr Icons font containing the subscript alphabet (U+F6100–U+F613D). This renders compact account tags and machine aliases as smaller, lowered letters. Herdr does not discover client font coverage or negotiate it over the server protocol. Without this opt-in, labels remain readable ordinary text; that fallback does not reproduce the subscript design. `ui.nerd_font = false` also keeps ordinary text labels.
+
+Override a Space icon by repo name, `owner/repo` binding, or Space label:
 
 ```toml
 [ui.icons.spaces]
