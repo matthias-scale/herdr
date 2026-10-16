@@ -5595,6 +5595,7 @@ impl TerminalState {
         if detected_state == AgentState::Unknown
             && self.foreground_process_active
             && self.effective_agent_label().is_some()
+            && !self.live_full_lifecycle_hook_authority()
         {
             (
                 AgentState::Working,
@@ -5624,7 +5625,7 @@ impl TerminalState {
             (AgentState::Blocked, "closing_block_gate")
         } else if self.waiting_on_agents() {
             (AgentState::Working, "closing_block_subagents")
-        } else if self.hook_reports_unknown_with_screen_fallback() {
+        } else if self.closing_block_reports_unknown_with_screen_fallback() {
             if matches!(
                 self.fallback_state,
                 AgentState::Working | AgentState::Blocked
@@ -5661,7 +5662,7 @@ impl TerminalState {
         }
     }
 
-    fn hook_reports_unknown_with_screen_fallback(&self) -> bool {
+    fn closing_block_reports_unknown_with_screen_fallback(&self) -> bool {
         self.hook_authority.as_ref().is_some_and(|authority| {
             authority.state == AgentState::Unknown
                 && authority.retired_at.is_none()
@@ -5670,13 +5671,7 @@ impl TerminalState {
                     self.fallback_state,
                     AgentState::Working | AgentState::Blocked
                 ) || self.foreground_process_active)
-                && (crate::detect::full_lifecycle_hook_authority(
-                    &authority.source,
-                    &authority.agent_label,
-                ) || crate::detect::is_closing_block_source(
-                    &authority.source,
-                    &authority.agent_label,
-                ))
+                && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
         })
     }
 
