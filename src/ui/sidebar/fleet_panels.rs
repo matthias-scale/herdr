@@ -273,7 +273,28 @@ fn accounts(app: &AppState, now: i64) -> Vec<Account> {
             entry.account.usage.seven_day = Some(*window);
         }
     }
-    by_identity.into_values().collect()
+    let mut accounts: Vec<_> = by_identity.into_values().collect();
+    accounts.sort_by(|left, right| {
+        let left_name = left
+            .account
+            .usage
+            .account
+            .as_deref()
+            .unwrap_or(&left.account.label);
+        let right_name = right
+            .account
+            .usage
+            .account
+            .as_deref()
+            .unwrap_or(&right.account.label);
+        left_name
+            .to_lowercase()
+            .cmp(&right_name.to_lowercase())
+            .then_with(|| left_name.cmp(right_name))
+            .then_with(|| left.account.provider.cmp(&right.account.provider))
+            .then_with(|| left.source_host.cmp(&right.source_host))
+    });
+    accounts
 }
 
 fn severity(usage: &AccountUsage, fresh: bool) -> Option<u8> {
@@ -720,7 +741,13 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
         row.pinned = true;
         row
     }));
-    let hosts = &app.fleet_snapshot.hosts;
+    let mut hosts: Vec<_> = app.fleet_snapshot.hosts.iter().collect();
+    hosts.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.name.cmp(&right.name))
+    });
     let mut resource_header = Row::styled(
         vec![(
             format!(
@@ -749,7 +776,7 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
             .map(|host| host.name.clone())
             .collect::<Vec<_>>(),
     );
-    for host in hosts {
+    for host in &hosts {
         let fleet_observation = app
             .fleet_snapshot
             .observations
@@ -1211,6 +1238,57 @@ mod tests {
             metrics: Default::default(),
             usage: snapshot,
         }
+    }
+
+    #[test]
+    fn usage_and_resource_rows_keep_name_order_when_active_machine_changes() {
+        let mut app = AppState::test_new();
+        let now = 1_000_000;
+        app.status_now_unix = Some(now);
+        app.agent_host_name = "zulu".into();
+        app.provider_usage.accounts = ["beta", "ALPHA", "Alpha"]
+            .map(|name| account(QuotaProvider::Claude, name, usage(20, now)))
+            .into();
+        app.provider_usage.collected_unix = Some(now);
+        app.fleet_snapshot.hosts = ["zulu", "Beta", "alpha"]
+            .map(|name| host(name, HostState::Reachable))
+            .into();
+
+        let row_order = |app: &AppState| {
+            rows(app, 80)
+                .into_iter()
+                .filter(|row| row.tooltip.starts_with("Claude · "))
+                .map(|row| row.tooltip.lines().next().unwrap_or_default().to_string())
+                .collect::<Vec<_>>()
+        };
+        let resource_order = |app: &AppState| {
+            rows(app, 80)
+                .into_iter()
+                .filter(|row| row.tooltip.ends_with("no resource sample available"))
+                .map(|row| {
+                    row.tooltip
+                        .split(" · ")
+                        .next()
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let usage_before = row_order(&app);
+        let resources_before = resource_order(&app);
+        app.agent_host_name = "alpha".into();
+        let usage_after = row_order(&app);
+        let resources_after = resource_order(&app);
+
+        assert_eq!(usage_before, usage_after);
+        assert_eq!(resources_before, resources_after);
+        assert!(usage_before[0].contains("ALPHA"));
+        assert!(usage_before[1].contains("Alpha"));
+        assert!(usage_before[2].contains("beta"));
+        assert!(resources_before[0].contains("alpha"));
+        assert!(resources_before[1].contains("Beta"));
+        assert!(resources_before[2].contains("zulu"));
     }
 
     #[test]
