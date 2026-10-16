@@ -482,7 +482,7 @@ fn login_rows(app: &AppState, now: i64) -> Vec<Row> {
             } else {
                 "⌛"
             };
-            let icon = crate::ui::icons::usage_label(provider, app.nerd_font);
+            let icon = crate::ui::icons::themed_usage_label(provider, app.nerd_font, &app.palette);
             let color = if stop {
                 app.palette.red
             } else {
@@ -567,11 +567,12 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
         let mut compact = vec![usage_header];
         for account in &accounts {
             let value = severity(&account.account.usage, account.fresh);
-            let token = format!(
-                " {}{}",
-                crate::ui::icons::usage_label(account.account.provider, app.nerd_font),
-                severity_dot(value)
+            let icon = crate::ui::icons::themed_usage_label(
+                account.account.provider,
+                app.nerd_font,
+                &app.palette,
             );
+            let token = format!(" {icon} {}", severity_dot(value));
             if display_width(&compact.last().unwrap().text) + display_width(&token) > width as usize
             {
                 compact.push(Row::styled(
@@ -586,10 +587,7 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
                 account_tip(account, now),
             ));
             line.spans.push((
-                format!(
-                    " {}",
-                    crate::ui::icons::usage_label(account.account.provider, app.nerd_font)
-                ),
+                format!(" {icon} "),
                 provider_color(account.account.provider, app),
             ));
             line.spans
@@ -623,7 +621,11 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
             if *count > 1 {
                 label = format!("{}#{count}", truncate_end(&label, 1));
             }
-            let icon = crate::ui::icons::usage_label(account.account.provider, app.nerd_font);
+            let icon = crate::ui::icons::themed_usage_label(
+                account.account.provider,
+                app.nerd_font,
+                &app.palette,
+            );
             let value = severity(&account.account.usage, account.fresh);
             let dual = matches!(
                 account.account.provider,
@@ -879,7 +881,11 @@ fn row_count(app: &AppState, width: u16) -> usize {
         });
         for (provider, _) in &identities {
             let token =
-                1 + display_width(crate::ui::icons::usage_label(*provider, app.nerd_font)) + 1;
+                1 + display_width(crate::ui::icons::themed_usage_label(
+                    *provider,
+                    app.nerd_font,
+                    &app.palette,
+                )) + 2;
             if used + token > width as usize {
                 lines += 1;
                 used = 2;
@@ -1537,6 +1543,30 @@ mod tests {
         assert!(compact.len() > 2);
         assert_eq!(compact.len(), row_count(&app, 17));
         assert!(compact.iter().all(|row| display_width(&row.text) <= 17));
+        for row in compact.iter().filter(|row| {
+            row.targets
+                .iter()
+                .any(|(_, _, tip)| tip.contains("Profile: profile"))
+        }) {
+            assert_eq!(
+                row.text,
+                row.spans
+                    .iter()
+                    .map(|(part, _)| part.as_str())
+                    .collect::<String>()
+            );
+            for (start, width, tip) in &row.targets {
+                if tip.contains("Profile: profile") {
+                    let token: String = row
+                        .text
+                        .chars()
+                        .skip(usize::from(*start))
+                        .take(usize::from(*width))
+                        .collect();
+                    assert_eq!(token, " \u{EC82} ●");
+                }
+            }
+        }
         assert_eq!(
             compact
                 .iter()

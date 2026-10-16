@@ -26,10 +26,10 @@ const MIN_NOTEPAD_ROWS: u16 = 2;
 /// below its header and three-row content floor.
 pub(crate) fn notepad_height(app: &AppState, content: Rect) -> u16 {
     // The fleet usage shelf supersedes the legacy host-local Usage tab. Keep
-    // stored tab preferences intact so notes, context and agent tabs retain
-    // their behavior when selected.
+    // stored tab preferences intact, and keep the tab strip reachable when
+    // notes, context or agent tabs are also visible.
     if super::sidebar::fleet_panels::available(app)
-        && app.notepad.active_tab_target() == Some(crate::notepad::NotepadTabTarget::Usage)
+        && app.notepad.visible_tab_targets() == [crate::notepad::NotepadTabTarget::Usage]
     {
         return 0;
     }
@@ -486,6 +486,40 @@ mod tests {
         assert!(!app.notepad.enabled);
         assert_eq!(app.notepad.visible_tabs, vec!["usage".to_string()]);
         assert_eq!(notepad_height(&app, Rect::new(0, 0, 26, 40)), 2);
+    }
+
+    #[test]
+    fn fleet_usage_hides_only_a_usage_only_notepad() {
+        let mut app = state();
+        app.fleet_snapshot.hosts.push(crate::fleet::HostSnapshot {
+            name: "ub1".into(),
+            target: "ub1".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            remote_identity: None,
+            sessions: None,
+            reachable: true,
+            last_seen_unix_ms: None,
+            entries: Vec::new(),
+        });
+        app.notepad.select_usage_tab();
+        let content = Rect::new(0, 0, 26, 40);
+        let panel = notepad_panel_rect(&app, content);
+        assert!(panel.height > 0);
+        let targets = notepad_tab_hit_areas(&app, panel);
+        assert!(targets
+            .iter()
+            .any(|(target, _)| *target == NotepadTabTarget::Context));
+        assert!(targets
+            .iter()
+            .any(|(target, _)| *target == NotepadTabTarget::Agent));
+        app.notepad.set_visible_tabs(vec!["usage".into()]);
+        assert_eq!(notepad_height(&app, content), 0);
     }
 
     #[test]
