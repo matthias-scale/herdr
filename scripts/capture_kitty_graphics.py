@@ -33,6 +33,8 @@ FIXTURE_ROW = 12
 FIXTURE_COLUMN = 1
 FIXTURE_COLUMNS = 8
 FIXTURE_ROWS = 4
+MARKER_ROW = 6
+MARKER_COLUMN = 1
 PIXEL_MIN_COMPONENT = 16
 COLOR_TOLERANCE = 75
 FIXTURE_COLORS = (
@@ -71,12 +73,26 @@ def fixture_rgba(colors: tuple[tuple[int, int, int], ...]) -> bytes:
     return bytes(pixels)
 
 
-def kitty_display_sequence(colors: tuple[tuple[int, int, int], ...]) -> bytes:
+def kitty_marker_sequence(marker: str) -> bytes:
+    if not re.fullmatch(r"[A-Z0-9-]{8,48}", marker):
+        raise ValueError("fixture marker must be unique printable ASCII")
+    return (
+        f"\x1b[2J\x1b[{MARKER_ROW};{MARKER_COLUMN}H{marker}"
+        f"\x1b[{FIXTURE_ROW};{FIXTURE_COLUMN}H"
+    ).encode("ascii")
+
+
+def kitty_display_sequence(
+    colors: tuple[tuple[int, int, int], ...], marker: str | None = None
+) -> bytes:
     payload = base64.b64encode(fixture_rgba(colors)).decode("ascii")
     control = "a=T,f=32,t=d,i=4242,p=1,s=64,v=64,c=8,r=4,q=2"
-    return f"\x1b[2J\x1b[{FIXTURE_ROW};{FIXTURE_COLUMN}H\x1b_G{control};{payload}\x1b\\".encode(
-        "ascii"
+    prefix = (
+        kitty_marker_sequence(marker)
+        if marker is not None
+        else f"\x1b[2J\x1b[{FIXTURE_ROW};{FIXTURE_COLUMN}H".encode("ascii")
     )
+    return prefix + f"\x1b_G{control};{payload}\x1b\\".encode("ascii")
 
 
 def kitty_symbols_sequence(colors: tuple[tuple[int, int, int], ...]) -> bytes:
@@ -84,8 +100,9 @@ def kitty_symbols_sequence(colors: tuple[tuple[int, int, int], ...]) -> bytes:
     return repr(kitty_display_sequence(colors)).encode("ascii")
 
 
-def kitty_delete_sequence() -> bytes:
-    return b"\x1b_Ga=d,d=I,i=4242,q=2;\x1b\\"
+def kitty_delete_sequence(marker: str | None = None) -> bytes:
+    prefix = kitty_marker_sequence(marker) if marker is not None else b""
+    return prefix + b"\x1b_Ga=d,d=I,i=4242,q=2;\x1b\\"
 
 
 def nearest_color(
@@ -328,20 +345,260 @@ def validate_build_provenance(
     return validated
 
 
-def verify_client_workspace_evidence(
-    evidence: dict | None, expected: dict[str, str]
-) -> dict[str, str]:
-    """Require client-scoped runtime state; global focus and client IDs are insufficient."""
+def select_wezterm_pane(output: str) -> dict:
+    try:
+        panes = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise CaptureError("WezTerm list returned invalid JSON") from error
+    if not isinstance(panes, list) or len(panes) != 1 or not isinstance(panes[0], dict):
+        raise CaptureError("private WezTerm GUI must expose exactly one outer pane")
+    pane = panes[0]
+    for field in ("pane_id", "window_id", "tab_id", "tty_name"):
+        value = pane.get(field)
+        if value is None or not str(value).strip():
+            raise CaptureError(f"WezTerm outer pane lacks {field}")
+    for field in ("rows", "cols", "pixel_width", "pixel_height"):
+        value = pane.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise CaptureError(f"WezTerm outer pane has invalid {field}")
+    return pane
+
+
+def single_herdr_pane_id(response: dict, workspace_id: str) -> str:
+    panes = response.get("result", {}).get("panes", [])
+    if not isinstance(panes, list) or len(panes) != 1 or not isinstance(panes[0], dict):
+        raise CaptureError(
+            f"workspace {workspace_id} must have exactly one fixture pane"
+        )
+    pane_id = panes[0].get("pane_id")
+    if not isinstance(pane_id, str) or not pane_id:
+        raise CaptureError(f"workspace {workspace_id} pane list has no pane id")
+    return pane_id
+
+
+def validate_wezterm_geometry(pane: dict, layout: dict, pane_id: str) -> None:
+    body = layout.get("result", {}).get("layout", layout.get("result", {}))
+    area = body.get("area")
+    selected = next(
+        (item for item in body.get("panes", []) if item.get("pane_id") == pane_id),
+        None,
+    )
+    rect = selected.get("rect") if selected else None
+    if not area or not rect:
+        raise CaptureError("Herdr pane layout lacks geometry for the selected pane")
+    if pane["cols"] != area.get("width") or pane["rows"] != area.get("height"):
+        raise CaptureError(
+            "WezTerm outer pane and Herdr layout geometry mismatch; refusing stale coordinates"
+        )
     if (
-        not isinstance(evidence, dict)
-        or evidence.get("source") != "client-workspace-runtime-v1"
-        or evidence.get("workspaces") != expected
+        rect.get("x", -1) < 0
+        or rect.get("y", -1) < 0
+        or rect.get("width", 0) <= 0
+        or rect.get("height", 0) <= 0
+        or rect["x"] + rect["width"] > pane["cols"]
+        or rect["y"] + rect["height"] > pane["rows"]
+    ):
+        raise CaptureError("Herdr pane rectangle is outside the current outer geometry")
+
+
+def validate_owned_window(window: dict, app_id: str) -> dict:
+    if window.get("app_id") != app_id or window.get("type") != "con":
+        raise CaptureError("compositor window does not match the owned app id")
+    rect = window.get("rect", {})
+    if rect.get("width", 0) <= 0 or rect.get("height", 0) <= 0:
+        raise CaptureError("owned compositor window has invalid geometry")
+    return rect
+
+
+def require_visible_marker(
+    screen: str,
+    marker: str,
+    excluded_marker: str,
+    layout: dict,
+    pane_id: str,
+) -> dict:
+    if excluded_marker in screen:
+        raise CaptureError("wrong workspace marker is visible in this client")
+    body = layout.get("result", {}).get("layout", layout.get("result", {}))
+    selected = next(
+        (item for item in body.get("panes", []) if item.get("pane_id") == pane_id),
+        None,
+    )
+    if not selected:
+        raise CaptureError("marker evidence has no selected Herdr pane geometry")
+    rect = selected.get("rect", {})
+    x = rect.get("x", -1) + MARKER_COLUMN - 1
+    y = rect.get("y", -1) + MARKER_ROW - 1
+    if x + len(marker) > rect.get("x", 0) + rect.get("width", 0):
+        raise CaptureError(
+            "fixture marker does not fit in the selected pane content region"
+        )
+    if screen.count(marker) != 1:
+        raise CaptureError("expected fixture marker is absent or ambiguous")
+    lines = screen.splitlines()
+    if y < 0 or y >= len(lines) or lines[y].find(marker) != x:
+        raise CaptureError("fixture marker is outside the selected pane content region")
+    return {
+        "source": "wezterm-visible-terminal-lines",
+        "marker": marker,
+        "marker_position": {"x": x, "y": y},
+        "screen_sha256": hashlib.sha256(screen.encode("utf-8")).hexdigest(),
+    }
+
+
+def require_marker_stays_visible(
+    before: str,
+    after: str,
+    marker: str,
+    excluded_marker: str,
+    layout: dict,
+    pane_id: str,
+) -> dict:
+    before_evidence = require_visible_marker(
+        before, marker, excluded_marker, layout, pane_id
+    )
+    after_evidence = require_visible_marker(
+        after, marker, excluded_marker, layout, pane_id
+    )
+    if before_evidence["marker_position"] != after_evidence["marker_position"]:
+        raise CaptureError(
+            "client content marker moved during the other client's navigation"
+        )
+    return after_evidence
+
+
+def validate_owned_wezterm_socket(
+    value: str | None,
+    private_runtime: Path,
+    owner: ProcessIdentity,
+    process_lookup: Callable[[int], ProcessIdentity | None] | None = None,
+) -> tuple[Path, ProcessIdentity]:
+    if not value or not Path(value).is_absolute():
+        raise CaptureError("owned WezTerm child has no explicit absolute socket path")
+    runtime = private_runtime.resolve(strict=True)
+    runtime_metadata = runtime.stat()
+    if (
+        runtime_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(runtime_metadata.st_mode) & 0o077
+    ):
+        raise CaptureError("WezTerm runtime is not private to the current user")
+    supplied = Path(value)
+    try:
+        socket_path = supplied.resolve(strict=True)
+        parent = socket_path.parent.resolve(strict=True)
+    except OSError as error:
+        raise CaptureError("owned WezTerm socket path is unavailable") from error
+    if supplied != socket_path or parent != runtime / "wezterm":
+        raise CaptureError("WezTerm socket is outside the task-private runtime")
+    match = re.fullmatch(r"gui-sock-(\d+)", socket_path.name)
+    if match is None:
+        raise CaptureError("WezTerm socket path does not identify its GUI process")
+    try:
+        metadata = socket_path.lstat()
+    except OSError as error:
+        raise CaptureError("WezTerm socket path is unavailable") from error
+    if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.getuid():
+        raise CaptureError("WezTerm endpoint is not an owned Unix socket")
+    if process_lookup is None:
+        process_lookup = read_process_identity
+    gui = process_lookup(int(match.group(1)))
+    if (
+        gui is None
+        or gui.state == "Z"
+        or Path(gui.executable).name != "wezterm-gui"
+        or gui.home != owner.home
+        or gui.pgid != owner.pgid
+        or gui.session_id != owner.session_id
     ):
         raise CaptureError(
-            "BLOCKED: no supported structured client-scoped workspace evidence; "
-            "refusing to capture from a global-focus assumption"
+            "WezTerm GUI does not match the recorded owned process group"
         )
-    return evidence["workspaces"]
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(0.5)
+    try:
+        probe.connect(str(socket_path))
+    except OSError as error:
+        raise CaptureError("owned WezTerm socket is not listening") from error
+    finally:
+        probe.close()
+    return socket_path, gui
+
+
+def wezterm_cli(
+    executable: str,
+    config: Path,
+    base_env: dict[str, str],
+    socket_path: Path,
+    args: list[str],
+    timeout: float = 5,
+) -> str:
+    if not str(socket_path) or not socket_path.is_absolute():
+        raise CaptureError("WezTerm CLI requires an explicit private socket")
+    env = dict(base_env)
+    env.pop("WEZTERM_PANE", None)
+    env["WEZTERM_UNIX_SOCKET"] = str(socket_path)
+    command = [
+        executable,
+        "--config-file",
+        str(config),
+        "cli",
+        "--no-auto-start",
+        *args,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise CaptureError(f"WezTerm CLI failed with no fallback: {error}") from error
+    if result.returncode:
+        raise CaptureError(
+            f"WezTerm CLI failed with no fallback (exit {result.returncode})"
+        )
+    return result.stdout
+
+
+def wezterm_start_command(
+    executable: str,
+    config: Path,
+    app_id: str,
+    cwd: Path,
+    binary: Path,
+    session: str,
+) -> list[str]:
+    return [
+        executable,
+        "--config-file",
+        str(config),
+        "start",
+        "--always-new-process",
+        "--no-auto-connect",
+        "--class",
+        app_id,
+        "--cwd",
+        str(cwd),
+        "--",
+        str(binary),
+        "--session",
+        session,
+        "client",
+    ]
+
+
+def private_wezterm_config() -> str:
+    return (
+        "return { enable_wayland = true, unix_domains = {}, ssh_domains = {}, "
+        "tls_clients = {}, default_gui_startup_args = {'start'}, "
+        "enable_tab_bar = false, window_decorations = 'NONE', "
+        "window_padding = { left = 0, right = 0, top = 0, bottom = 0 }, "
+        "window_background_opacity = 1.0, font_size = 14.0, "
+        "warn_about_missing_glyphs = false }\n"
+    )
 
 
 def tool_version(executable: str | None) -> str | None:
@@ -390,6 +647,8 @@ class ProcessIdentity:
     herdr_session: str
     command_line: tuple[str, ...]
     state: str = "?"
+    tty_nr: int = 0
+    foreground_pgid: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -397,6 +656,19 @@ class StopResult:
     returncode: int
     stdout: str
     stderr: str
+
+
+def read_process_environment_value(pid: int, name: str) -> str | None:
+    """Read one named Linux process environment value without exposing its siblings."""
+    prefix = name.encode("ascii") + b"="
+    try:
+        values = (Path("/proc") / str(pid) / "environ").read_bytes().split(b"\0")
+        for value in values:
+            if value.startswith(prefix):
+                return value[len(prefix) :].decode("utf-8", "replace")
+    except OSError:
+        return None
+    return None
 
 
 def read_process_identity(pid: int) -> ProcessIdentity | None:
@@ -411,9 +683,8 @@ def read_process_identity(pid: int) -> ProcessIdentity | None:
         for field in (proc / "environ").read_bytes().split(b"\0"):
             if b"=" in field:
                 key, value = field.split(b"=", 1)
-                process_env[key.decode("utf-8", "replace")] = value.decode(
-                    "utf-8", "replace"
-                )
+                if key in (b"HOME", b"HERDR_SESSION"):
+                    process_env[key.decode("ascii")] = value.decode("utf-8", "replace")
         command_line = tuple(
             part.decode("utf-8", "replace")
             for part in (proc / "cmdline").read_bytes().split(b"\0")
@@ -429,9 +700,53 @@ def read_process_identity(pid: int) -> ProcessIdentity | None:
             herdr_session=process_env.get("HERDR_SESSION", ""),
             command_line=command_line,
             state=fields[0],
+            tty_nr=int(fields[4]),
+            foreground_pgid=int(fields[5]),
         )
     except (OSError, ValueError, IndexError):
         return None
+
+
+def validate_client_process(
+    identity: ProcessIdentity,
+    private_cwd: Path,
+    pane: dict,
+    proc_root: Path = Path("/proc"),
+    process_lookup: Callable[[int], ProcessIdentity | None] | None = None,
+) -> dict:
+    if process_lookup is None:
+        process_lookup = read_process_identity
+    current = process_lookup(identity.pid)
+    if (
+        current is None
+        or current.state == "Z"
+        or not identity_matches(identity, current)
+    ):
+        raise CaptureError(
+            "owned Herdr client identity changed before input or capture"
+        )
+    proc = proc_root / str(identity.pid)
+    try:
+        uid = proc.stat().st_uid
+        cwd = (proc / "cwd").resolve(strict=True)
+        tty_name = os.readlink(proc / "fd" / "0")
+    except OSError as error:
+        raise CaptureError("owned Herdr client cwd or TTY is unavailable") from error
+    if uid != os.getuid():
+        raise CaptureError("owned Herdr client belongs to a different user")
+    if cwd != private_cwd.resolve(strict=True):
+        raise CaptureError("owned Herdr client cwd is outside its private workdir")
+    if tty_name != pane.get("tty_name") or current.tty_nr == 0:
+        raise CaptureError("WezTerm pane TTY does not match the owned Herdr client")
+    if current.foreground_pgid != identity.pgid:
+        raise CaptureError("owned Herdr client is not foreground on its WezTerm TTY")
+    return {
+        "host": os.uname().nodename,
+        "uid": uid,
+        "cwd": str(cwd),
+        "tty_name": tty_name,
+        "foreground_pgid": current.foreground_pgid,
+    }
 
 
 def identity_matches(
@@ -996,6 +1311,16 @@ class HerdrScenario:
         self.workdir = run.temp_root / label / "work"
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.client_processes: dict[str, ProcessIdentity] = {}
+        self.outer_clients: dict[str, dict] = {}
+        self.workspace_markers = {
+            "a": f"MAT354-A-{run.run_id[:10].upper()}",
+            "d": f"MAT354-D-{run.run_id[:10].upper()}",
+        }
+        self.workspace_layouts: dict[str, dict] = {}
+        self.workspace_a: str | None = None
+        self.workspace_d: str | None = None
+        self.pane_a: str | None = None
+        self.pane_d: str | None = None
 
     def cli(self, *args: str, timeout: float = 12, log_name: str = "cli") -> dict:
         log_path = (
@@ -1032,21 +1357,14 @@ class HerdrScenario:
         return response
 
     def start_client(self, app_id: str, label: str) -> OwnedProcess:
-        command = [
+        command = wezterm_start_command(
             self.run.tools["wezterm"],
-            "--config-file",
-            str(self.run.wezterm_config),
-            "start",
-            "--always-new-process",
-            "--class",
+            self.run.wezterm_config,
             app_id,
-            "--cwd",
-            str(self.workdir),
-            "--",
-            str(self.binary),
-            "--session",
+            self.workdir,
+            self.binary,
             self.session,
-        ]
+        )
         process = OwnedProcess(
             f"{self.label}-{label}",
             command,
@@ -1064,8 +1382,40 @@ class HerdrScenario:
                 pgid=process.pgid,
             )
             if len(clients) == 1:
-                self.client_processes[app_id] = clients[0]
-                self.run.record_client_process(self, app_id, clients[0])
+                identity = clients[0]
+                current = read_process_identity(identity.pid)
+                if not identity_matches(identity, current):
+                    raise CaptureError(
+                        f"Herdr client identity changed during startup for {app_id}"
+                    )
+                socket_value = read_process_environment_value(
+                    identity.pid, "WEZTERM_UNIX_SOCKET"
+                )
+                socket_path, gui_identity = validate_owned_wezterm_socket(
+                    socket_value, self.runtime, identity
+                )
+                self.client_processes[app_id] = identity
+                self.run.record_client_process(self, app_id, identity)
+                pane = select_wezterm_pane(
+                    wezterm_cli(
+                        self.run.tools["wezterm"],
+                        self.run.wezterm_config,
+                        self.env,
+                        socket_path,
+                        ["list", "--format", "json"],
+                    )
+                )
+                process_ownership = validate_client_process(
+                    identity, self.workdir, pane
+                )
+                window = self.run.sway.window(app_id)
+                self.outer_clients[app_id] = {
+                    "socket_path": socket_path,
+                    "gui_identity": gui_identity,
+                    "pane": pane,
+                    "window_rect": validate_owned_window(window, app_id),
+                    "process_ownership": process_ownership,
+                }
                 return process
             if len(clients) > 1:
                 raise CaptureError(
@@ -1082,12 +1432,183 @@ class HerdrScenario:
 
     def workspace_id(self, response: dict, focused: bool) -> str:
         workspaces = response.get("result", {}).get("workspaces", [])
-        match = next((row for row in workspaces if row.get("focused") is focused), None)
-        if match is None:
+        matches = [row for row in workspaces if row.get("focused") is focused]
+        if len(matches) != 1:
             raise CaptureError(f"workspace list did not identify focused={focused}")
-        return match["workspace_id"]
+        workspace = matches[0].get("workspace_id")
+        if not isinstance(workspace, str) or not workspace:
+            raise CaptureError("focused workspace row has no workspace id")
+        return workspace
 
-    def create_pair(self) -> tuple[str, str, str]:
+    def outer_pane(self, app_id: str) -> dict:
+        client = self.outer_clients.get(app_id)
+        if client is None:
+            raise CaptureError(f"no owned WezTerm endpoint recorded for {app_id}")
+        current = select_wezterm_pane(
+            self.wezterm(app_id, ["list", "--format", "json"])
+        )
+        previous = client["pane"]
+        if any(
+            current[field] != previous[field]
+            for field in ("pane_id", "window_id", "tab_id", "tty_name")
+        ):
+            raise CaptureError("owned WezTerm pane identity changed during capture")
+        rect = validate_owned_window(self.run.sway.window(app_id), app_id)
+        client["pane"] = current
+        client["window_rect"] = rect
+        return current
+
+    def wezterm(self, app_id: str, args: list[str]) -> str:
+        client = self.outer_clients.get(app_id)
+        expected = self.client_processes.get(app_id)
+        if client is None or expected is None:
+            raise CaptureError(f"no recorded WezTerm process identity for {app_id}")
+        client["process_ownership"] = validate_client_process(
+            expected, self.workdir, client["pane"]
+        )
+        socket_path, gui = validate_owned_wezterm_socket(
+            read_process_environment_value(expected.pid, "WEZTERM_UNIX_SOCKET"),
+            self.runtime,
+            expected,
+        )
+        if socket_path != client["socket_path"] or not identity_matches(
+            client["gui_identity"], gui
+        ):
+            raise CaptureError("owned WezTerm socket or GUI identity changed")
+        return wezterm_cli(
+            self.run.tools["wezterm"],
+            self.run.wezterm_config,
+            self.env,
+            socket_path,
+            args,
+        )
+
+    def visible_screen(
+        self,
+        app_id: str,
+        marker: str,
+        excluded_marker: str,
+        layout: dict,
+        inner_pane_id: str,
+    ) -> tuple[str, dict]:
+        client = self.outer_clients[app_id]
+        pane = self.outer_pane(app_id)
+        validate_wezterm_geometry(pane, layout, inner_pane_id)
+        screen = self.wezterm(
+            app_id,
+            [
+                "get-text",
+                "--pane-id",
+                str(pane["pane_id"]),
+                "--start-line",
+                "0",
+                "--end-line",
+                str(pane["rows"] - 1),
+            ],
+        )
+        evidence = require_visible_marker(
+            screen, marker, excluded_marker, layout, inner_pane_id
+        )
+        evidence.update(
+            {
+                "app_id": app_id,
+                "socket_path": str(client["socket_path"]),
+                "gui_pid": client["gui_identity"].pid,
+                "outer_pane_id": pane["pane_id"],
+                "outer_window_id": pane["window_id"],
+                "outer_tab_id": pane["tab_id"],
+                "tty_name": pane["tty_name"],
+                "rows": pane["rows"],
+                "cols": pane["cols"],
+                "pixel_width": pane["pixel_width"],
+                "pixel_height": pane["pixel_height"],
+                "window_rect": client["window_rect"],
+                "process_ownership": client["process_ownership"],
+                "inner_pane_id": inner_pane_id,
+            }
+        )
+        self.run.manifest.setdefault("client_screen_evidence", []).append(evidence)
+        return screen, evidence
+
+    def wait_for_marker(
+        self,
+        app_id: str,
+        marker: str,
+        excluded_marker: str,
+        layout: dict,
+        inner_pane_id: str,
+        timeout: float = 10,
+    ) -> tuple[str, dict]:
+        deadline = time.monotonic() + timeout
+        last_error = "marker not observed"
+        while time.monotonic() < deadline:
+            try:
+                return self.visible_screen(
+                    app_id, marker, excluded_marker, layout, inner_pane_id
+                )
+            except CaptureError as error:
+                last_error = str(error)
+                time.sleep(0.1)
+        raise CaptureError(
+            f"client {app_id} did not show its expected content marker: {last_error}"
+        )
+
+    def inject_wire(self, pane_id: str, wire: bytes, log_name: str) -> None:
+        payload_code = (
+            'import base64,os;os.write(1,base64.b64decode("'
+            + base64.b64encode(wire).decode("ascii")
+            + '"))'
+        )
+        self.cli(
+            "pane",
+            "run",
+            pane_id,
+            f"python3 -c '{payload_code}'",
+            log_name=log_name,
+        )
+
+    def emit_marker(self, pane_id: str, marker: str) -> None:
+        self.inject_wire(pane_id, kitty_marker_sequence(marker), "fixture-marker")
+
+    def verify_pair_markers(self, stage: str) -> dict:
+        if not all((self.workspace_a, self.workspace_d, self.pane_a, self.pane_d)):
+            raise CaptureError("workspace marker verification lacks pair identities")
+        _d_screen, d_evidence = self.wait_for_marker(
+            self.d_id,
+            self.workspace_markers["d"],
+            self.workspace_markers["a"],
+            self.workspace_layouts["d"],
+            self.pane_d,
+        )
+        _a_screen, a_evidence = self.visible_screen(
+            self.a_id,
+            self.workspace_markers["a"],
+            self.workspace_markers["d"],
+            self.workspace_layouts["a"],
+            self.pane_a,
+        )
+        focused = self.workspace_id(self.cli("workspace", "list"), True)
+        if focused != self.workspace_a:
+            raise CaptureError("client D activity changed the shared workspace focus")
+        evidence = {
+            "session": self.session,
+            "stage": stage,
+            "shared_focused_workspace": focused,
+            "client_a": a_evidence,
+            "client_d": d_evidence,
+            "predicates": {
+                "a_content_marker_visible": a_evidence["marker"]
+                == self.workspace_markers["a"],
+                "d_content_marker_visible": d_evidence["marker"]
+                == self.workspace_markers["d"],
+                "other_workspace_markers_excluded": True,
+                "shared_workspace_focus_stayed_a": True,
+            },
+        }
+        self.run.manifest.setdefault("workspace_content_checks", []).append(evidence)
+        return evidence
+
+    def create_pair(self) -> tuple[str, str, str, str]:
         self.start_client(self.a_id, "client-a")
         deadline = time.monotonic() + 20
         response = None
@@ -1104,6 +1625,9 @@ class HerdrScenario:
         if response is None:
             raise CaptureError("Herdr API did not become ready before its deadline")
         a_workspace = self.workspace_id(response, True)
+        a_pane = single_herdr_pane_id(
+            self.cli("pane", "list", "--workspace", a_workspace), a_workspace
+        )
         created = self.cli(
             "workspace",
             "create",
@@ -1111,43 +1635,127 @@ class HerdrScenario:
             str(self.workdir),
             "--label",
             "graphics D",
+            "--no-focus",
             log_name="workspace-create-d",
         )
         d_workspace = created.get("result", {}).get("workspace", {}).get("workspace_id")
         if not d_workspace:
             raise CaptureError("workspace create response lacks workspace id")
+        if self.workspace_id(self.cli("workspace", "list"), True) != a_workspace:
+            raise CaptureError("workspace D creation unexpectedly moved shared focus")
+        d_pane = single_herdr_pane_id(
+            self.cli("pane", "list", "--workspace", d_workspace), d_workspace
+        )
+        self.workspace_a = a_workspace
+        self.workspace_d = d_workspace
+        self.pane_a = a_pane
+        self.pane_d = d_pane
         self.start_client(self.d_id, "client-d")
-        # There is no existing client-scoped workspace query or CLI navigation
-        # interface. A shared API focus request would move both clients, so stop.
-        verify_client_workspace_evidence(
-            None,
-            {self.a_id: a_workspace, self.d_id: d_workspace},
+        a_layout = self.cli("pane", "layout", "--pane", a_pane)
+        d_layout = self.cli("pane", "layout", "--pane", d_pane)
+        self.workspace_layouts = {"a": a_layout, "d": d_layout}
+        self.emit_marker(a_pane, self.workspace_markers["a"])
+        self.emit_marker(d_pane, self.workspace_markers["d"])
+        a_before_screen, a_before_evidence = self.wait_for_marker(
+            self.a_id,
+            self.workspace_markers["a"],
+            self.workspace_markers["d"],
+            a_layout,
+            a_pane,
         )
-        panes = self.cli(
-            "pane", "list", "--workspace", d_workspace, log_name="pane-list-d"
+        _d_before_screen, d_before_evidence = self.wait_for_marker(
+            self.d_id,
+            self.workspace_markers["a"],
+            self.workspace_markers["d"],
+            a_layout,
+            a_pane,
         )
-        pane_rows = panes.get("result", {}).get("panes", [])
-        if not pane_rows:
-            raise CaptureError("workspace D has no pane to host the Kitty fixture")
-        return a_workspace, d_workspace, pane_rows[0]["pane_id"]
+        self.wezterm(
+            self.d_id,
+            [
+                "send-text",
+                "--pane-id",
+                str(self.outer_pane(self.d_id)["pane_id"]),
+                "--no-paste",
+                "\x1b[17~",
+            ],
+        )
+        _d_screen, d_evidence = self.wait_for_marker(
+            self.d_id,
+            self.workspace_markers["d"],
+            self.workspace_markers["a"],
+            d_layout,
+            d_pane,
+        )
+        a_after_screen, a_evidence = self.wait_for_marker(
+            self.a_id,
+            self.workspace_markers["a"],
+            self.workspace_markers["d"],
+            a_layout,
+            a_pane,
+        )
+        require_marker_stays_visible(
+            a_before_screen,
+            a_after_screen,
+            self.workspace_markers["a"],
+            self.workspace_markers["d"],
+            a_layout,
+            a_pane,
+        )
+        if self.workspace_id(self.cli("workspace", "list"), True) != a_workspace:
+            raise CaptureError("client D navigation changed the shared workspace focus")
+        self.run.manifest.setdefault("workspace_navigation", []).append(
+            {
+                "session": self.session,
+                "shared_focused_workspace": a_workspace,
+                "workspace_markers": {
+                    a_workspace: self.workspace_markers["a"],
+                    d_workspace: self.workspace_markers["d"],
+                },
+                "navigation_input": {
+                    "source": "wezterm-cli-send-text",
+                    "app_id": self.d_id,
+                    "outer_pane_id": self.outer_clients[self.d_id]["pane"]["pane_id"],
+                    "key": "F6",
+                    "bytes_hex": "1b5b31377e",
+                },
+                "client_a_still_shows_a": a_evidence,
+                "client_a_before_f6": a_before_evidence,
+                "client_d_before_f6": d_before_evidence,
+                "client_d_shows_d": d_evidence,
+                "predicates": {
+                    "both_clients_attached_to_a_before_d_f6": True,
+                    "only_d_received_f6": True,
+                    "a_marker_unchanged": a_evidence["marker"]
+                    == a_before_evidence["marker"]
+                    == self.workspace_markers["a"],
+                    "a_marker_position_unchanged": a_evidence["marker_position"]
+                    == a_before_evidence["marker_position"],
+                    "d_was_on_a_before_f6": d_before_evidence["marker"]
+                    == self.workspace_markers["a"],
+                    "d_content_marker_visible": d_evidence["marker"]
+                    == self.workspace_markers["d"],
+                    "shared_workspace_focus_stayed_a": True,
+                },
+            }
+        )
+        return a_workspace, d_workspace, a_pane, d_pane
 
     def emit(
-        self, pane_id: str, colors: tuple[tuple[int, int, int], ...] | None
+        self,
+        pane_id: str,
+        marker: str,
+        colors: tuple[tuple[int, int, int], ...] | None,
     ) -> None:
         if colors is None:
-            wire = kitty_delete_sequence()
+            wire = kitty_delete_sequence(marker)
         else:
-            wire = kitty_display_sequence(colors)
-        payload_code = (
-            'import base64,os;os.write(1,base64.b64decode("'
-            + base64.b64encode(wire).decode("ascii")
-            + '"))'
-        )
-        shell_command = f"python3 -c '{payload_code}'"
-        self.cli("pane", "run", pane_id, shell_command, log_name="fixture-inject")
+            wire = kitty_display_sequence(colors, marker)
+        self.inject_wire(pane_id, wire, "fixture-inject")
 
     def capture_region(self, pane_id: str, app_id: str) -> tuple[int, int, int, int]:
         layout = self.cli("pane", "layout", "--pane", pane_id, log_name="pane-layout")
+        validate_wezterm_geometry(self.outer_pane(app_id), layout, pane_id)
         return pane_region(self.run.sway.window(app_id), layout, pane_id)
 
     def stop_server(self) -> None:
@@ -1393,12 +2001,7 @@ class Harness:
             "output * mode 1600x1000\n",
             encoding="utf-8",
         )
-        self.wezterm_config.write_text(
-            "return { enable_wayland = true, window_decorations = 'NONE', "
-            "window_background_opacity = 1.0, font_size = 14.0, "
-            "warn_about_missing_glyphs = false }\n",
-            encoding="utf-8",
-        )
+        self.wezterm_config.write_text(private_wezterm_config(), encoding="utf-8")
         compositor = OwnedProcess(
             "private-sway",
             [self.tools["sway"], "--config", str(sway_config), "--verbose"],
@@ -1428,6 +2031,7 @@ class Harness:
             str(self.wezterm_config),
             "start",
             "--always-new-process",
+            "--no-auto-connect",
             "--class",
             app_id,
             "--cwd",
@@ -1509,18 +2113,48 @@ class Harness:
         self.manifest.setdefault("owned_sessions", []).append(
             {"name": scenario.session, "binary": str(binary), "state": "running"}
         )
-        a_workspace, d_workspace, pane_id = scenario.create_pair()
+        a_workspace, d_workspace, pane_a, pane_d = scenario.create_pair()
         self.manifest.setdefault("client_processes", {})[binary_label] = {
             "client_a": dataclasses.asdict(scenario.client_processes[scenario.a_id]),
             "client_d": dataclasses.asdict(scenario.client_processes[scenario.d_id]),
             "client_a_app_id": scenario.a_id,
             "client_d_app_id": scenario.d_id,
-            "pane_id": pane_id,
+            "outer_client_a": {
+                "socket_path": str(
+                    scenario.outer_clients[scenario.a_id]["socket_path"]
+                ),
+                "gui_identity": dataclasses.asdict(
+                    scenario.outer_clients[scenario.a_id]["gui_identity"]
+                ),
+                "process_ownership": scenario.outer_clients[scenario.a_id][
+                    "process_ownership"
+                ],
+                "pane": scenario.outer_clients[scenario.a_id]["pane"],
+                "window_rect": scenario.outer_clients[scenario.a_id]["window_rect"],
+            },
+            "outer_client_d": {
+                "socket_path": str(
+                    scenario.outer_clients[scenario.d_id]["socket_path"]
+                ),
+                "gui_identity": dataclasses.asdict(
+                    scenario.outer_clients[scenario.d_id]["gui_identity"]
+                ),
+                "process_ownership": scenario.outer_clients[scenario.d_id][
+                    "process_ownership"
+                ],
+                "pane": scenario.outer_clients[scenario.d_id]["pane"],
+                "window_rect": scenario.outer_clients[scenario.d_id]["window_rect"],
+            },
+            "pane_a": pane_a,
+            "pane_d": pane_d,
             "workspace_a": a_workspace,
             "workspace_d": d_workspace,
+            "workspace_markers": scenario.workspace_markers,
         }
-        scenario.emit(pane_id, FIXTURE_COLORS)
-        region = scenario.capture_region(pane_id, scenario.d_id)
+        marker_d = scenario.workspace_markers["d"]
+        scenario.emit(pane_d, marker_d, FIXTURE_COLORS)
+        scenario.verify_pair_markers("fixture-injected")
+        region = scenario.capture_region(pane_d, scenario.d_id)
         if binary_label == "baseline":
             result = self.capture_run.expect_stable(
                 "baseline-mismatched-client-d", scenario.d_id, False
@@ -1546,7 +2180,8 @@ class Harness:
                     {"case": "candidate-client-a-no-leak", **result_a},
                 ]
             )
-            scenario.emit(pane_id, REPLACEMENT_COLORS)
+            scenario.emit(pane_d, marker_d, REPLACEMENT_COLORS)
+            scenario.verify_pair_markers("fixture-replaced")
             replacement = self.capture_run.expect_stable(
                 "candidate-image-replacement",
                 scenario.d_id,
@@ -1563,7 +2198,8 @@ class Harness:
                     {"case": "candidate-old-image-gone", **old_gone},
                 ]
             )
-            scenario.emit(pane_id, None)
+            scenario.emit(pane_d, marker_d, None)
+            scenario.verify_pair_markers("fixture-removed")
             removed = self.capture_run.expect_stable(
                 "candidate-image-removal",
                 scenario.d_id,

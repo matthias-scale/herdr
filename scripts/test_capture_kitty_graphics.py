@@ -144,6 +144,7 @@ class IsolationTests(unittest.TestCase):
                         "WAYLAND_DISPLAY": "wayland-live",
                         "SWAYSOCK": "/tmp/parent-sway.sock",
                         "WEZTERM_PANE": "99",
+                        "WEZTERM_UNIX_SOCKET": "/tmp/parent-wezterm.sock",
                         "TMUX": "/tmp/parent-tmux",
                     },
                     clear=False,
@@ -163,6 +164,7 @@ class IsolationTests(unittest.TestCase):
                 "DISPLAY",
                 "SWAYSOCK",
                 "WEZTERM_PANE",
+                "WEZTERM_UNIX_SOCKET",
                 "TMUX",
             ):
                 self.assertNotIn(name, env)
@@ -212,12 +214,6 @@ class IsolationTests(unittest.TestCase):
             self.assertEqual(
                 observation["capture_sha256"],
                 capture.sha256_file(root / observation["full_capture"]),
-            )
-
-    def test_client_workspace_state_without_client_scoped_evidence_is_blocked(self):
-        with self.assertRaisesRegex(capture.CaptureError, "BLOCKED:.*client-scoped"):
-            capture.verify_client_workspace_evidence(
-                None, {"a": "workspace-a", "d": "workspace-d"}
             )
 
     def test_build_provenance_rejects_identical_binaries_and_mismatched_source(self):
@@ -398,6 +394,361 @@ class IsolationTests(unittest.TestCase):
             capture.pane_region(smaller_client, smaller_layout, "wD:p1"),
             (16, 192, 64, 64),
         )
+
+
+class WezTermEvidenceTests(unittest.TestCase):
+    def pane(self, pane_id=7):
+        return {
+            "pane_id": pane_id,
+            "window_id": 2,
+            "tab_id": 3,
+            "tty_name": "/dev/pts/42",
+            "rows": 30,
+            "cols": 80,
+            "pixel_width": 800,
+            "pixel_height": 600,
+        }
+
+    def layout(self):
+        return {
+            "result": {
+                "layout": {
+                    "area": {"width": 80, "height": 30},
+                    "panes": [
+                        {
+                            "pane_id": "herdr:D:p1",
+                            "rect": {"x": 10, "y": 4, "width": 60, "height": 20},
+                        }
+                    ],
+                }
+            }
+        }
+
+    def screen(self, marker, layout=None, *, at=None):
+        layout = layout or self.layout()
+        body = layout["result"]["layout"]
+        pane = body["panes"][0]["rect"]
+        x = pane["x"] if at is None else at[0]
+        y = pane["y"] + capture.MARKER_ROW - 1 if at is None else at[1]
+        rows = [" " * 80 for _ in range(body["area"]["height"])]
+        rows[y] = rows[y][:x] + marker + rows[y][x + len(marker) :]
+        return "\n".join(rows)
+
+    def test_wezterm_list_requires_one_complete_outer_pane(self):
+        pane = self.pane()
+        selected = capture.select_wezterm_pane(json.dumps([pane]))
+        self.assertEqual(selected["pane_id"], 7)
+        with self.assertRaisesRegex(capture.CaptureError, "exactly one"):
+            capture.select_wezterm_pane(json.dumps([]))
+        with self.assertRaisesRegex(capture.CaptureError, "exactly one"):
+            capture.select_wezterm_pane(json.dumps([pane, self.pane(8)]))
+        incomplete = self.pane()
+        del incomplete["tty_name"]
+        with self.assertRaisesRegex(capture.CaptureError, "tty_name"):
+            capture.select_wezterm_pane(json.dumps([incomplete]))
+
+    def test_live_socket_outside_private_runtime_and_wrong_owner_are_refused(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            socket_dir = runtime / "wezterm"
+            socket_dir.mkdir(parents=True)
+            os.chmod(runtime, 0o700)
+            expected_home = root / "home"
+            expected_home.mkdir()
+            owner = capture.ProcessIdentity(
+                pid=100,
+                start_ticks=12,
+                executable="/usr/bin/herdr",
+                pgid=100,
+                session_id=100,
+                home=str(expected_home),
+                herdr_session="capture-a",
+                command_line=("herdr", "--session", "capture-a", "client"),
+            )
+            gui = capture.ProcessIdentity(
+                pid=200,
+                start_ticks=30,
+                executable="/usr/bin/wezterm-gui",
+                pgid=100,
+                session_id=100,
+                home=str(expected_home),
+                herdr_session="",
+                command_line=("wezterm-gui",),
+            )
+            endpoint = socket_dir / "gui-sock-200"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(endpoint))
+            listener.listen(1)
+            try:
+                validated, gui_identity = capture.validate_owned_wezterm_socket(
+                    str(endpoint),
+                    runtime,
+                    owner,
+                    lambda pid: gui if pid == 200 else None,
+                )
+                self.assertEqual(validated, endpoint)
+                self.assertEqual(gui_identity, gui)
+                with self.assertRaisesRegex(capture.CaptureError, "private runtime"):
+                    capture.validate_owned_wezterm_socket(
+                        str(endpoint), root, owner, lambda _pid: gui
+                    )
+                wrong_gui = capture.dataclasses.replace(gui, pgid=201)
+                with self.assertRaisesRegex(
+                    capture.CaptureError, "owned process group"
+                ):
+                    capture.validate_owned_wezterm_socket(
+                        str(endpoint), runtime, owner, lambda _pid: wrong_gui
+                    )
+                with self.assertRaisesRegex(capture.CaptureError, "socket path"):
+                    capture.validate_owned_wezterm_socket(
+                        "", runtime, owner, lambda _pid: gui
+                    )
+                external_dir = root / "external"
+                external_dir.mkdir()
+                external = external_dir / "gui-sock-201"
+                external_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                external_listener.bind(str(external))
+                external_listener.listen(1)
+                try:
+                    with self.assertRaisesRegex(
+                        capture.CaptureError, "private runtime"
+                    ):
+                        capture.validate_owned_wezterm_socket(
+                            str(external), runtime, owner, lambda _pid: gui
+                        )
+                finally:
+                    external_listener.close()
+            finally:
+                listener.close()
+
+    def test_input_ownership_checks_user_private_cwd_tty_and_foreground_group(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            proc_root = root / "proc"
+            proc = proc_root / "3456"
+            workdir = root / "work"
+            workdir.mkdir()
+            (proc / "fd").mkdir(parents=True)
+            (proc / "cwd").symlink_to(workdir, target_is_directory=True)
+            (proc / "fd" / "0").symlink_to("/dev/pts/42")
+            identity = capture.ProcessIdentity(
+                pid=3456,
+                start_ticks=200,
+                executable="/usr/bin/herdr",
+                pgid=3456,
+                session_id=3456,
+                home=str(root),
+                herdr_session="capture-b",
+                command_line=("herdr", "--session", "capture-b", "client"),
+                state="S",
+                tty_nr=34816,
+                foreground_pgid=3456,
+            )
+            pane = {"tty_name": "/dev/pts/42"}
+            evidence = capture.validate_client_process(
+                identity, workdir, pane, proc_root, lambda _pid: identity
+            )
+            self.assertEqual(evidence["uid"], os.getuid())
+            self.assertEqual(evidence["cwd"], str(workdir))
+            self.assertEqual(evidence["tty_name"], "/dev/pts/42")
+            self.assertEqual(evidence["foreground_pgid"], identity.pgid)
+            with self.assertRaisesRegex(capture.CaptureError, "private workdir"):
+                capture.validate_client_process(
+                    identity, root, pane, proc_root, lambda _pid: identity
+                )
+            with (
+                mock.patch.object(capture.os, "getuid", return_value=os.getuid() + 1),
+                self.assertRaisesRegex(capture.CaptureError, "different user"),
+            ):
+                capture.validate_client_process(
+                    identity, workdir, pane, proc_root, lambda _pid: identity
+                )
+            with self.assertRaisesRegex(capture.CaptureError, "TTY"):
+                capture.validate_client_process(
+                    identity,
+                    workdir,
+                    {"tty_name": "/dev/pts/43"},
+                    proc_root,
+                    lambda _pid: identity,
+                )
+            wrong_foreground = capture.dataclasses.replace(
+                identity, foreground_pgid=999
+            )
+            with self.assertRaisesRegex(capture.CaptureError, "not foreground"):
+                capture.validate_client_process(
+                    wrong_foreground,
+                    workdir,
+                    pane,
+                    proc_root,
+                    lambda _pid: wrong_foreground,
+                )
+            replaced = capture.dataclasses.replace(
+                identity, executable="/usr/bin/other"
+            )
+            with self.assertRaisesRegex(capture.CaptureError, "identity changed"):
+                capture.validate_client_process(
+                    identity,
+                    workdir,
+                    pane,
+                    proc_root,
+                    lambda _pid: replaced,
+                )
+
+    def test_wezterm_cli_is_explicit_and_failure_has_no_fallback(self):
+        env = {"HOME": "/tmp/private-home", "WEZTERM_PANE": "parent-pane"}
+        failed = SimpleNamespace(returncode=1, stdout="", stderr="socket rejected")
+        with (
+            mock.patch.object(capture.subprocess, "run", return_value=failed) as run,
+            self.assertRaisesRegex(capture.CaptureError, "no fallback"),
+        ):
+            capture.wezterm_cli(
+                "/usr/bin/wezterm",
+                Path("/tmp/private.lua"),
+                env,
+                Path("/tmp/private/wezterm/gui-sock-200"),
+                ["list", "--format", "json"],
+            )
+        self.assertEqual(run.call_count, 1)
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command[1:5],
+            ["--config-file", "/tmp/private.lua", "cli", "--no-auto-start"],
+        )
+        self.assertEqual(command[-3:], ["list", "--format", "json"])
+        self.assertEqual(
+            run.call_args.kwargs["env"]["WEZTERM_UNIX_SOCKET"],
+            "/tmp/private/wezterm/gui-sock-200",
+        )
+        self.assertNotIn("WEZTERM_PANE", run.call_args.kwargs["env"])
+
+    def test_start_and_config_disable_auto_connect_and_inherit_no_tabs_or_padding(self):
+        command = capture.wezterm_start_command(
+            "/usr/bin/wezterm",
+            Path("/tmp/private.lua"),
+            "herdr-private-d",
+            Path("/tmp/private-work"),
+            Path("/tmp/herdr"),
+            "owned-session",
+        )
+        self.assertIn("--no-auto-connect", command)
+        self.assertIn("--always-new-process", command)
+        self.assertIn("herdr-private-d", command)
+        config = capture.private_wezterm_config()
+        for setting in (
+            "unix_domains = {}",
+            "ssh_domains = {}",
+            "tls_clients = {}",
+            "default_gui_startup_args = {'start'}",
+            "enable_tab_bar = false",
+            "window_decorations = 'NONE'",
+            "left = 0",
+            "right = 0",
+        ):
+            self.assertIn(setting, config)
+
+    def test_visible_marker_must_be_unique_in_selected_pane_content(self):
+        layout = self.layout()
+        marker_a = "MAT354-A-ABC123"
+        marker_d = "MAT354-D-ABC123"
+        valid_a = capture.require_visible_marker(
+            self.screen(marker_a, layout), marker_a, marker_d, layout, "herdr:D:p1"
+        )
+        valid_d = capture.require_visible_marker(
+            self.screen(marker_d, layout), marker_d, marker_a, layout, "herdr:D:p1"
+        )
+        self.assertEqual(valid_a["source"], "wezterm-visible-terminal-lines")
+        self.assertTrue(valid_d["screen_sha256"])
+        for bad_screen in (
+            self.screen(marker_d, layout),
+            self.screen("", layout),
+            self.screen(marker_a, layout, at=(2, 2)),
+            self.screen(marker_a + " " + marker_a, layout),
+        ):
+            with self.assertRaises(capture.CaptureError):
+                capture.require_visible_marker(
+                    bad_screen, marker_a, marker_d, layout, "herdr:D:p1"
+                )
+        with self.assertRaisesRegex(capture.CaptureError, "wrong workspace marker"):
+            capture.require_visible_marker(
+                self.screen(marker_a + marker_d, layout),
+                marker_a,
+                marker_d,
+                layout,
+                "herdr:D:p1",
+            )
+
+    def test_a_marker_remains_visible_when_d_switches_and_d_is_excluded_from_a(self):
+        layout = self.layout()
+        a = "MAT354-A-ABC123"
+        d = "MAT354-D-ABC123"
+        before = self.screen(a, layout)
+        after = self.screen(a, layout)
+        after_d = self.screen(d, layout)
+        before_evidence = capture.require_visible_marker(
+            before, a, d, layout, "herdr:D:p1"
+        )
+        after_evidence = capture.require_marker_stays_visible(
+            before, after, a, d, layout, "herdr:D:p1"
+        )
+        self.assertEqual(
+            before_evidence["marker_position"], after_evidence["marker_position"]
+        )
+        d_evidence = capture.require_visible_marker(after_d, d, a, layout, "herdr:D:p1")
+        self.assertNotEqual(
+            before_evidence["screen_sha256"], d_evidence["screen_sha256"]
+        )
+        with self.assertRaises(capture.CaptureError):
+            capture.require_marker_stays_visible(
+                before, after_d, a, d, layout, "herdr:D:p1"
+            )
+
+    def test_client_geometry_must_match_current_outer_terminal_size(self):
+        pane = self.pane()
+        layout = self.layout()
+        capture.validate_wezterm_geometry(pane, layout, "herdr:D:p1")
+        pane["cols"] = 79
+        with self.assertRaisesRegex(capture.CaptureError, "geometry mismatch"):
+            capture.validate_wezterm_geometry(pane, layout, "herdr:D:p1")
+
+    def test_compositor_geometry_must_match_the_owned_app_id(self):
+        window = {
+            "app_id": "herdr-private-d",
+            "type": "con",
+            "rect": {"x": 10, "y": 20, "width": 800, "height": 600},
+        }
+        self.assertEqual(
+            capture.validate_owned_window(window, "herdr-private-d"), window["rect"]
+        )
+        with self.assertRaisesRegex(capture.CaptureError, "owned app id"):
+            capture.validate_owned_window(window, "another-window")
+        window["rect"]["width"] = 0
+        with self.assertRaisesRegex(capture.CaptureError, "invalid geometry"):
+            capture.validate_owned_window(window, "herdr-private-d")
+
+    def test_marker_that_would_wrap_out_of_the_fixture_pane_is_refused(self):
+        layout = self.layout()
+        layout["result"]["layout"]["panes"][0]["rect"]["width"] = 12
+        with self.assertRaisesRegex(capture.CaptureError, "does not fit"):
+            capture.require_visible_marker(
+                self.screen("MAT354-D-ABC123", self.layout()),
+                "MAT354-D-ABC123",
+                "MAT354-A-ABC123",
+                layout,
+                "herdr:D:p1",
+            )
+
+    def test_marker_survives_fixture_replacement_and_removal_sequences(self):
+        marker = "MAT354-D-ABC123"
+        for sequence in (
+            capture.kitty_display_sequence(capture.FIXTURE_COLORS, marker),
+            capture.kitty_display_sequence(capture.REPLACEMENT_COLORS, marker),
+            capture.kitty_delete_sequence(marker),
+        ):
+            self.assertIn(marker.encode("ascii"), sequence)
+            self.assertIn(
+                f"\x1b[{capture.MARKER_ROW};{capture.MARKER_COLUMN}H".encode(), sequence
+            )
 
 
 if __name__ == "__main__":
