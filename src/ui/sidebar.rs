@@ -3764,7 +3764,6 @@ pub(crate) enum SidebarRow {
         collapsed: bool,
     },
     Divider,
-    ShelfDivider,
     NestedHeader {
         key: String,
         /// Canonical provider object key for the trailing action menu.
@@ -8625,7 +8624,6 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
         | SidebarRow::NeedsYouMore { .. }
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::Divider
-        | SidebarRow::ShelfDivider
         | SidebarRow::NestedHeader { .. }
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
@@ -8699,7 +8697,6 @@ fn sidebar_row_gap(
                 | SidebarRow::NestedHeader { .. }
                 | SidebarRow::SectionHeader { .. }
                 | SidebarRow::Divider
-                | SidebarRow::ShelfDivider
         )
     {
         return u16::from(
@@ -8710,8 +8707,7 @@ fn sidebar_row_gap(
         );
     }
     match (row, next) {
-        (SidebarRow::Divider | SidebarRow::ShelfDivider, _)
-        | (_, SidebarRow::Divider | SidebarRow::ShelfDivider) => 0,
+        (SidebarRow::Divider, _) | (_, SidebarRow::Divider) => 0,
         (SidebarRow::Workspace { .. }, SidebarRow::Tab { .. }) => 0,
         (SidebarRow::Workspace { .. }, SidebarRow::NestedHeader { .. }) => 0,
         (SidebarRow::NestedHeader { .. }, SidebarRow::Tab { .. }) => 0,
@@ -9016,7 +9012,7 @@ pub(crate) fn sidebar_row_belongs_to_workspace(row: &SidebarRow, ws_idx: usize) 
         SidebarRow::SectionHeader { .. } => false,
         // Strip rows duplicate a row the workspace owns further down.
         SidebarRow::NeedsYou { .. } | SidebarRow::NeedsYouMore { .. } => false,
-        SidebarRow::Divider | SidebarRow::ShelfDivider => false,
+        SidebarRow::Divider => false,
         SidebarRow::NestedHeader { .. } => false,
         // A Symphony workflow runs on a worker, not in a workspace.
         SidebarRow::SymphonyJob { .. }
@@ -9184,7 +9180,6 @@ pub(crate) fn compute_sidebar_row_areas_from_layout(
             | SidebarRow::PodMember { .. }
             | SidebarRow::SectionHeader { .. }
             | SidebarRow::Divider
-            | SidebarRow::ShelfDivider
             | SidebarRow::NestedHeader { .. }
             | SidebarRow::SymphonyJob { .. }
             | SidebarRow::SymphonyEmpty
@@ -11244,11 +11239,8 @@ fn compute_sidebar_divider_areas(
         if y.saturating_add(height) > body.bottom() {
             break;
         }
-        if matches!(row, SidebarRow::Divider | SidebarRow::ShelfDivider) {
-            out.push((
-                Rect::new(body.x, y, body.width, height),
-                matches!(row, SidebarRow::ShelfDivider),
-            ));
+        if matches!(row, SidebarRow::Divider) {
+            out.push((Rect::new(body.x, y, body.width, height), false));
         }
         y = y.saturating_add(height).saturating_add(sidebar_row_gap(
             app,
@@ -11707,26 +11699,11 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     row_rect,
                 );
             }
-            SidebarRow::Divider | SidebarRow::ShelfDivider => {
+            SidebarRow::Divider => {
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
-                        if matches!(row, SidebarRow::ShelfDivider) {
-                            if app.nerd_font {
-                                "┄"
-                            } else {
-                                "-"
-                            }
-                        } else {
-                            "─"
-                        }
-                        .repeat(usize::from(row_rect.width)),
-                        if matches!(row, SidebarRow::ShelfDivider) {
-                            Style::default()
-                                .fg(p.surface_dim)
-                                .add_modifier(Modifier::DIM)
-                        } else {
-                            Style::default().fg(p.surface_dim)
-                        },
+                        "─".repeat(usize::from(row_rect.width)),
+                        Style::default().fg(p.surface_dim),
                     ))),
                     row_rect,
                 );
@@ -21370,7 +21347,6 @@ pub(crate) mod tests {
                 | SidebarRow::PodHeader { .. }
                 | SidebarRow::PodMember { .. }
                 | SidebarRow::Divider
-                | SidebarRow::ShelfDivider
                 | SidebarRow::NeedsYou { .. }
                 | SidebarRow::NeedsYouMore { .. }
                 | SidebarRow::SymphonyJob { .. }
@@ -22811,7 +22787,6 @@ pub(crate) mod tests {
                 | SidebarRow::PodMember { .. }
                 | SidebarRow::SectionHeader { .. }
                 | SidebarRow::Divider
-                | SidebarRow::ShelfDivider
                 | SidebarRow::NestedHeader { .. }
                 | SidebarRow::NeedsYou { .. }
                 | SidebarRow::NeedsYouMore { .. }
@@ -22874,7 +22849,7 @@ pub(crate) mod tests {
                     SidebarRow::PodHeader { .. } => ("pod", 0, None, None),
                     SidebarRow::PodMember { .. } => ("pod-member", 0, None, None),
                     SidebarRow::SectionHeader { .. } => ("section", 0, None, None),
-                    SidebarRow::Divider | SidebarRow::ShelfDivider => ("divider", 0, None, None),
+                    SidebarRow::Divider => ("divider", 0, None, None),
                     SidebarRow::NestedHeader { .. } => ("section", 0, None, None),
                     SidebarRow::NeedsYou { .. } => ("needs-you", 0, None, None),
                     SidebarRow::NeedsYouMore { .. } => ("needs-you-more", 0, None, None),
@@ -25159,7 +25134,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 | SidebarRow::PodHeader { .. }
                 | SidebarRow::PodMember { .. }
                 | SidebarRow::Divider
-                | SidebarRow::ShelfDivider
                 | SidebarRow::NeedsYou { .. }
                 | SidebarRow::NeedsYouMore { .. }
                 | SidebarRow::SymphonyJob { .. }
@@ -32723,7 +32697,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 | SidebarRow::PodHeader { .. }
                 | SidebarRow::PodMember { .. }
                 | SidebarRow::Divider
-                | SidebarRow::ShelfDivider
                 | SidebarRow::NeedsYou { .. }
                 | SidebarRow::NeedsYouMore { .. }
                 | SidebarRow::SymphonyJob { .. }
@@ -33843,7 +33816,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let x = find_symbol_x(buffer, 0, width, "h");
         assert_eq!(
             buffer[(x, 0)].fg,
-            opacity_style(&app, 50, Style::default().fg(app.palette.overlay0), None,).fg
+            opacity_style(&app, 50, Style::default().fg(app.palette.overlay0), None,)
+                .fg
+                .expect("opacity preserves the foreground color")
         );
         assert!(row_text(buffer, 0, width).contains("herdr ● 1 working"));
     }
