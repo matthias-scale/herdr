@@ -2485,6 +2485,44 @@ class StopHookTranscriptTests(unittest.TestCase):
             )
         self.assertEqual(state, "unknown")
 
+    def test_unreadable_transcript_is_not_idle(self):
+        import os
+        import tempfile
+
+        hook = self._hook_module()
+        with tempfile.TemporaryDirectory() as directory:
+            rows, readable = hook._read_rows(directory)
+        self.assertEqual(rows, [])
+        self.assertFalse(readable)
+        with mock.patch.object(hook, "pane_activity", return_value=(0, False)):
+            state = hook._no_record_activity(
+                {}, "w1:p1", "/tmp/herdr.sock", rows, transcript_known=readable
+            )
+        self.assertEqual(state, "unknown")
+
+    def test_malformed_middle_transcript_row_is_not_idle(self):
+        hook = self._hook_module()
+        path = self._write_transcript(['{"type":"user"}', '{broken', '{"type":"user"}'])
+        rows, readable = hook._read_rows(path)
+        self.assertFalse(readable)
+        with mock.patch.object(hook, "pane_activity", return_value=(0, False)):
+            state = hook._no_record_activity(
+                {}, "w1:p1", "/tmp/herdr.sock", rows, transcript_known=readable
+            )
+        self.assertEqual(state, "unknown")
+
+    def test_torn_trailing_non_tool_row_preserves_complete_prior_turn(self):
+        hook = self._hook_module()
+        path = self._write_transcript(['{"type":"user"}', self._ASSISTANT_ROW, '{torn'])
+        rows, readable = hook._read_rows(path)
+        self.assertTrue(readable)
+        self.assertEqual(hook._scan_turn(rows)[0], "Done here.")
+        with mock.patch.object(hook, "pane_activity", return_value=(0, False)):
+            state = hook._no_record_activity(
+                {}, "w1:p1", "/tmp/herdr.sock", rows, transcript_known=readable
+            )
+        self.assertEqual(state, "idle")
+
     def test_needs_you_reply_reaches_report_rpc_as_one_approve_gate(self):
         import json
         import tempfile

@@ -42,21 +42,34 @@ FLUSH_WAIT_SECONDS = 1.0
 FLUSH_POLL_INTERVAL = 0.15
 
 
-def _read_rows(transcript_path: str) -> list[dict]:
+def _read_rows(transcript_path: str) -> tuple[list[dict], bool]:
     rows: list[dict] = []
+    complete = True
     try:
         with open(transcript_path, encoding="utf-8") as fh:
-            for line in fh:
+            lines = fh.readlines()
+            for index, line in enumerate(lines):
                 if not line.strip():
                     continue
                 try:
-                    rows.append(json.loads(line))
-                except ValueError:
-                    # A torn trailing line mid-flush must not discard the file.
+                    row = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    # Only a torn final non-tool row is safe to ignore. A bad
+                    # middle row or possible tool row could hide live work.
+                    tool_row = '"type"' in line and (
+                        '"tool_use"' in line or '"tool_result"' in line
+                    )
+                    if index == len(lines) - 1 and not tool_row:
+                        continue
+                    complete = False
                     continue
-    except OSError:
-        return []
-    return rows
+                if not isinstance(row, dict):
+                    complete = False
+                    continue
+                rows.append(row)
+    except (OSError, UnicodeDecodeError):
+        return rows, False
+    return rows, complete
 
 
 def _scan_turn(rows: list[dict]) -> tuple[str | None, bool, str | None]:
@@ -178,7 +191,8 @@ def last_assistant_turn(transcript_path: str) -> tuple[str | None, str | None]:
         return None, None
     deadline = time.monotonic() + FLUSH_WAIT_SECONDS
     while True:
-        text, fresh, timestamp = _scan_turn(_read_rows(transcript_path))
+        rows, _readable = _read_rows(transcript_path)
+        text, fresh, timestamp = _scan_turn(rows)
         if text is not None and fresh:
             return text, timestamp
         if time.monotonic() >= deadline:
@@ -244,9 +258,8 @@ def main() -> int:
         return 0
     invocation_time = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     if last_turn_at is None:
-        _transcript_text, _fresh, transcript_timestamp = _scan_turn(
-            _read_rows(payload.get("transcript_path") or "")
-        )
+        rows, _readable = _read_rows(payload.get("transcript_path") or "")
+        _transcript_text, _fresh, transcript_timestamp = _scan_turn(rows)
         last_turn_at = transcript_timestamp
     last_turn_at = last_turn_at or invocation_time
     if lint_result_blocks(payload.get("session_id"), last_turn_at, invocation_time):
@@ -260,12 +273,13 @@ def main() -> int:
     no_record_activity = "unknown"
     if not has_record and block.parse_status == "missing":
         transcript_path = payload.get("transcript_path") or ""
+        rows, transcript_readable = _read_rows(transcript_path)
         no_record_activity = _no_record_activity(
             payload,
             os.environ.get("HERDR_PANE_ID") or "",
             os.environ.get("HERDR_SOCKET_PATH") or "",
-            _read_rows(transcript_path),
-            transcript_known=bool(transcript_path and os.path.isfile(transcript_path)),
+            rows,
+            transcript_known=transcript_readable,
         )
 
     outcome = report(
