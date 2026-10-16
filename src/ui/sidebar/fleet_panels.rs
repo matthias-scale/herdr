@@ -384,6 +384,10 @@ fn window_parts(
 
 fn account_tip(account: &Account, now: i64) -> String {
     let usage = &account.account.usage;
+    let dual = matches!(
+        account.account.provider,
+        QuotaProvider::Claude | QuotaProvider::Codex
+    );
     let mut lines = vec![
         format!(
             "{} · {}",
@@ -401,8 +405,20 @@ fn account_tip(account: &Account, now: i64) -> String {
         lines.push("Login expiry: not reported by current Codex collector".into());
     }
     for (name, window, source) in [
-        ("5h", usage.five_hour, &account.five_source),
-        ("weekly", usage.seven_day, &account.weekly_source),
+        (
+            if dual { "5h" } else { "Quota" },
+            usage.five_hour,
+            &account.five_source,
+        ),
+        (
+            if dual {
+                "weekly"
+            } else {
+                "Additional allowance"
+            },
+            usage.seven_day,
+            &account.weekly_source,
+        ),
     ] {
         if let Some(window) = window {
             let provenance = source.as_ref().map_or_else(
@@ -419,7 +435,7 @@ fn account_tip(account: &Account, now: i64) -> String {
                     .resets_at
                     .map_or("not reported".into(), |at| reset_exact(at, now))
             ));
-        } else {
+        } else if dual || name == "Quota" {
             lines.push(format!("{name}: not reported"));
         }
     }
@@ -427,10 +443,13 @@ fn account_tip(account: &Account, now: i64) -> String {
         lines.push(format!("Credits: {credits}"));
     }
     if let Some(cost) = usage.cost_usd {
-        lines.push(format!("5h cost: ${cost:.2}"));
+        lines.push(format!("{}cost: ${cost:.2}", if dual { "5h " } else { "" }));
     }
     if let Some(minutes) = usage.remaining_minutes {
-        lines.push(format!("5h remaining time: {minutes}m"));
+        lines.push(format!(
+            "{}remaining time: {minutes}m",
+            if dual { "5h " } else { "" }
+        ));
     }
     if let Some(reason) = usage.unavailable {
         lines.push(format!("Unavailable: {reason:?}"));
@@ -643,7 +662,17 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
             let narrow = width < 27;
             let cells = if narrow { 1 } else { 3 };
             let five = window_parts(
-                if narrow { "5" } else { "5h" },
+                if dual {
+                    if narrow {
+                        "5"
+                    } else {
+                        "5h"
+                    }
+                } else if narrow {
+                    "Q"
+                } else {
+                    "quota"
+                },
                 account.account.usage.five_hour,
                 now,
                 app,
@@ -1347,6 +1376,49 @@ mod tests {
         assert_eq!(claude.spans[1].1, app.palette.green);
         let narrow = rows(&app, 18);
         assert!(display_width(&narrow[1].text) <= 18, "{}", narrow[1].text);
+    }
+
+    #[test]
+    fn single_allowance_providers_do_not_invent_five_hour_or_weekly_windows() {
+        let now = 1_000_000;
+        let mut app = AppState::test_new();
+        app.status_now_unix = Some(now);
+        app.provider_usage.accounts = [QuotaProvider::Kimi, QuotaProvider::OpenCode]
+            .map(|provider| {
+                let mut allowance = usage(42, now);
+                allowance.seven_day = None;
+                allowance.credits = Some(12.0);
+                allowance.cost_usd = Some(1.5);
+                allowance.remaining_minutes = Some(30);
+                account(provider, "demo", allowance)
+            })
+            .into();
+        for width in [18, 40] {
+            let expanded = rows(&app, width);
+            let allowances: Vec<_> = expanded
+                .iter()
+                .filter(|row| row.tooltip.contains("Profile: demo"))
+                .collect();
+            assert_eq!(allowances.len(), 2);
+            for row in allowances {
+                assert!(display_width(&row.text) <= usize::from(width));
+                assert!(row.text.contains(if width < 27 { " Q" } else { " quota" }));
+                assert!(!row.text.contains("5h") && !row.text.contains("7d"));
+                assert!(row.tooltip.contains("Quota: 42% used"));
+                assert!(!row.tooltip.contains("5h") && !row.tooltip.contains("weekly"));
+                assert!(!row.tooltip.contains("Additional allowance"));
+                assert!(row.tooltip.contains("Credits: 12"));
+                assert!(row.tooltip.contains("cost: $1.50"));
+                assert!(row.tooltip.contains("remaining time: 30m"));
+            }
+        }
+        app.provider_usage.accounts[0].usage.seven_day = Some(QuotaWindow {
+            used_percent: 8,
+            resets_at: None,
+        });
+        assert!(rows(&app, 40)
+            .iter()
+            .any(|row| row.tooltip.contains("Additional allowance: 8% used")));
     }
 
     #[test]
