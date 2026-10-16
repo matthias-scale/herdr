@@ -441,6 +441,36 @@ Waiting on you — 1 item (1), 0 blocking.
 
 
 class ClosingBlockV2Tests(unittest.TestCase):
+    def test_now_waiting_on_you_recovers_blocked_state_without_a_record(self):
+        cases = [
+            (
+                "**Needs you:** a) send as is, b) cut \"added monitoring\", c) more changes. You send it yourself.\n\n**Now:** waiting on you.",
+                "blocked",
+            ),
+            (
+                "**Needs you:** say what \"continue\" refers to: a ticket, a PR, or a tab.\n\n**Now:** waiting on you",
+                "blocked",
+            ),
+            (
+                "\n**Needs you:** say c if you want me to open a PR ..., or d to leave it on GitHub's runners.\n**Now:** wait — Ben's reply.",
+                "unknown",
+            ),
+            (
+                "Card is still pending; no subagents to restart. **Now:** waiting on you.",
+                "unknown",
+            ),
+            (
+                "**Needs you: nothing.** If you want it, I'd hand it to a Codex worker...\n\n[Sidebar proposal](https://example.invalid/x/)",
+                "unknown",
+            ),
+        ]
+        for text, expected_state in cases:
+            with self.subTest(text=text):
+                block = closing_block.parse(text)
+                self.assertEqual(block.herdr_state, expected_state)
+                self.assertEqual(block.parse_status, "missing")
+                self.assertEqual(block.blocking, 0)
+
     def test_numbered_needs_you_decision_maps_to_blocked(self):
         text = (
             "**Needs you (1)**\n"
