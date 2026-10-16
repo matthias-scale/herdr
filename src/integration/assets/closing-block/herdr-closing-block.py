@@ -150,6 +150,8 @@ def _pending_agent_calls(rows: list[dict]) -> str | None:
                     pending.pop(call_id, None)
     if any(name in {"task", "agent"} for name in pending.values()):
         return "running"
+    if background_bash_ids & pending.keys():
+        return "running"
     return "unknown" if pending or malformed else None
 
 

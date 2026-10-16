@@ -2500,6 +2500,21 @@ class StopHookTranscriptTests(unittest.TestCase):
             )
         self.assertEqual(state, "unknown")
 
+    def test_unresolved_background_bash_is_running(self):
+        hook = self._hook_module()
+        rows = [{
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use", "id": "t1", "name": "Bash",
+                "input": {"command": "sleep 99", "run_in_background": True},
+            }]},
+        }]
+        with mock.patch.object(hook, "pane_activity", return_value=(0, False)):
+            state = hook._no_record_activity(
+                {}, "w1:p1", "/tmp/herdr.sock", rows, transcript_known=True
+            )
+        self.assertEqual(state, "running")
+
     def test_structurally_malformed_tool_rows_are_not_idle(self):
         hook = self._hook_module()
         cases = [
