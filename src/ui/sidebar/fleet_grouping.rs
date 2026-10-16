@@ -98,6 +98,8 @@ fn state_index(app: &AppState, entry: &AgentPanelEntry) -> usize {
         1
     } else if sidebar_entry_has_working_state(entry) {
         2
+    } else if entry.state == AgentState::Unknown {
+        1
     } else {
         3
     }
@@ -473,6 +475,81 @@ mod tests {
                 ("working", 1, false),
                 ("done / idle", 1, true)
             ]
+        );
+    }
+
+    #[test]
+    fn active_unknown_agents_wait_on_local_and_remote_hosts_but_settled_stays_done() {
+        let (app, mut entries) = fixture();
+        for entry in &mut entries {
+            if let Some(remote) = entry.remote_entry.as_mut() {
+                let mut data = remote.entry.clone();
+                data.state = AgentState::Unknown;
+                data.attention_tier = Some(AttentionTier::None);
+                *remote = std::sync::Arc::new(RemoteAgentPanelEntry::new_with_narrow_host(
+                    remote.agent_ref.clone(),
+                    data,
+                    remote.model.clone(),
+                    remote.effort.clone(),
+                    remote.work_context.clone(),
+                    false,
+                    None,
+                    true,
+                    false,
+                ));
+                *entry = remote_agent_as_panel_entry(remote);
+            } else {
+                entry.state = AgentState::Unknown;
+                entry.attention_tier = Some(AttentionTier::None);
+            }
+        }
+        let mut settled = entries.pop().unwrap();
+        std::sync::Arc::make_mut(settled.remote_entry.as_mut().unwrap()).settled = true;
+        entries.push(settled);
+        let projected = rows(&app, &entries, false);
+        let states = projected
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::SectionHeader {
+                    title,
+                    count,
+                    collapsed,
+                    ..
+                } => Some((*title, *count, *collapsed)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            [
+                ("blocked", 0, false),
+                ("waiting", 2, false),
+                ("working", 0, false),
+                ("done / idle", 1, true),
+            ]
+        );
+        assert_eq!(
+            projected
+                .iter()
+                .filter(|row| matches!(
+                    row,
+                    SidebarRow::Tab { .. } | SidebarRow::RemoteAgent { .. }
+                ))
+                .count(),
+            2
+        );
+        for entry in &entries[..2] {
+            assert_eq!(state_index(&app, entry), 1);
+            assert_eq!(collapsed_placement(&app, entry), None);
+            assert_eq!(agent_dot_tooltip(entry), "?");
+            for width in [18, 28] {
+                assert!(rendered_row(&app, entry, width).contains('?'));
+            }
+        }
+        assert_eq!(state_index(&app, &entries[2]), 3);
+        assert_eq!(
+            collapsed_placement(&app, &entries[2]),
+            Some(("done / idle".into(), "done / idle".into()))
         );
     }
 
