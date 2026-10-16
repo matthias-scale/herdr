@@ -10,8 +10,8 @@ pub(crate) struct DeviceGroup<T> {
     pub(crate) items: Vec<T>,
 }
 
-/// Build the section's device groups once, omitting empty hosts and keeping
-/// the local device first regardless of its name.
+/// Build the section's device groups once, omitting empty hosts and ordering
+/// them by their shared host names regardless of which device is rendering.
 pub(crate) fn group_items<T>(
     local_host: &str,
     items: impl IntoIterator<Item = (String, bool, bool, T)>,
@@ -37,10 +37,9 @@ pub(crate) fn group_items<T>(
         })
         .collect::<Vec<_>>();
     groups.sort_by(|left, right| {
-        right
-            .local
-            .cmp(&left.local)
-            .then_with(|| left.host.to_lowercase().cmp(&right.host.to_lowercase()))
+        left.host
+            .to_lowercase()
+            .cmp(&right.host.to_lowercase())
             .then_with(|| left.host.cmp(&right.host))
     });
     groups
@@ -280,7 +279,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn groups_omit_empty_hosts_and_order_local_then_remote_alphabetically() {
+    fn groups_omit_empty_hosts_and_order_by_host_name() {
         let groups = group_items(
             "ub2",
             [
@@ -294,9 +293,33 @@ mod tests {
                 .iter()
                 .map(|group| group.host.as_str())
                 .collect::<Vec<_>>(),
-            ["ub2", "alpha", "zeta"]
+            ["alpha", "ub2", "zeta"]
         );
         assert!(groups.iter().all(|group| !group.items.is_empty()));
+    }
+
+    #[test]
+    fn fleet_group_order_is_identical_for_different_viewing_devices() {
+        let inventory = || {
+            [
+                ("zeta".into(), false, true, "z1"),
+                ("ub2".into(), false, true, "b1"),
+                ("alpha".into(), false, true, "a1"),
+            ]
+        };
+        let viewed_on_ub2 = group_items("ub2", inventory());
+        let viewed_on_alpha = group_items("alpha", inventory());
+
+        let order = |groups: &[DeviceGroup<&str>]| -> Vec<String> {
+            groups
+                .iter()
+                .map(|group| group.host.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order(&viewed_on_ub2), ["alpha", "ub2", "zeta"]);
+        assert_eq!(order(&viewed_on_alpha), order(&viewed_on_ub2));
+        assert!(viewed_on_ub2[1].local);
+        assert!(viewed_on_alpha[0].local);
     }
 
     #[test]
