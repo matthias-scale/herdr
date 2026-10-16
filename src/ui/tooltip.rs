@@ -14,6 +14,7 @@ use crate::app::{
 pub(crate) enum TooltipPlacement {
     Below,
     Above,
+    Constrained,
 }
 
 pub(crate) fn tooltip_rect(
@@ -31,11 +32,9 @@ pub(crate) fn tooltip_rect(
         .unwrap_or(0);
     let width = content_width.saturating_add(2).min(area.width).max(3);
     let height = u16::try_from(wrap_tooltip_label(label, width.saturating_sub(2)).len())
-        .ok()?
-        .saturating_add(2);
-    if height > area.height {
-        return None;
-    }
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .min(area.height);
     let x = anchor.x.max(area.x).min(area.right().saturating_sub(width));
     if anchor.bottom().saturating_add(height) <= area.bottom() {
         return Some((
@@ -49,7 +48,28 @@ pub(crate) fn tooltip_rect(
             TooltipPlacement::Above,
         ));
     }
-    None
+    // In a short viewport the full tooltip may fit the screen but neither side
+    // of the anchor. Keep it visible and bounded even if it covers the anchor.
+    let y = anchor
+        .bottom()
+        .min(area.bottom().saturating_sub(height))
+        .max(area.y);
+    Some((
+        Rect::new(x, y, width, height),
+        TooltipPlacement::Constrained,
+    ))
+}
+
+fn visible_tooltip_lines(label: &str, width: u16, height: u16) -> Vec<String> {
+    let mut lines = wrap_tooltip_label(label, width.saturating_sub(2));
+    let capacity = usize::from(height.saturating_sub(2));
+    if lines.len() > capacity {
+        lines.truncate(capacity);
+        if let Some(last) = lines.last_mut() {
+            *last = if width >= 13 { "… truncated" } else { "…" }.into();
+        }
+    }
+    lines
 }
 
 fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
@@ -825,7 +845,7 @@ pub(super) fn render_hover_tooltip(app: &AppState, frame: &mut Frame) {
         return;
     };
     let age_tooltip = label.starts_with("Last reply ") || label.starts_with("Last status report ");
-    let lines = wrap_tooltip_label(&label, area.width.saturating_sub(2));
+    let lines = visible_tooltip_lines(&label, area.width, area.height);
     let paragraph = Paragraph::new(ratatui::text::Text::from(
         lines
             .into_iter()
@@ -925,6 +945,43 @@ mod tests {
         assert_eq!(placement, TooltipPlacement::Below);
         assert_eq!(rect.y, anchor.bottom());
         assert_eq!(rect.height, 4);
+    }
+
+    #[test]
+    fn long_tooltip_remains_bounded_and_visible_in_short_viewport() {
+        let area = Rect::new(0, 0, 40, 12);
+        let anchor = Rect::new(4, 5, 3, 1);
+        let label = (0..20)
+            .map(|index| format!("Account detail {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (rect, _) = tooltip_rect(anchor, &label, area).expect("bounded fallback");
+        assert!(rect.y >= area.y && rect.bottom() <= area.bottom());
+        assert_eq!(rect.height, area.height);
+        assert_eq!(
+            visible_tooltip_lines(&label, rect.width, rect.height)
+                .last()
+                .unwrap(),
+            "… truncated"
+        );
+    }
+
+    #[test]
+    fn middle_tooltip_stays_visible_when_full_height_fits_viewport() {
+        let area = Rect::new(3, 7, 40, 12);
+        let anchor = Rect::new(7, 12, 3, 1);
+        let label = (0..8)
+            .map(|n| format!("detail {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (rect, placement) = tooltip_rect(anchor, &label, area).expect("constrained placement");
+        assert_eq!(placement, TooltipPlacement::Constrained);
+        assert_eq!(rect.height, 10);
+        assert!(rect.y >= area.y && rect.bottom() <= area.bottom());
+        assert_eq!(
+            visible_tooltip_lines(&label, rect.width, rect.height).len(),
+            8
+        );
     }
 
     #[test]
