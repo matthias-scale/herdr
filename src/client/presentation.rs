@@ -320,7 +320,6 @@ fn save_sidebar_work_filter_to_path(
     update_path(path, |state| state.sidebar_work_filter = Some(filter))
 }
 
-#[cfg(not(test))]
 pub(crate) fn load_fleet_sidebar_sort() -> crate::app::state::FleetSidebarSort {
     let path = presentation_path();
     match load_from_path(&path) {

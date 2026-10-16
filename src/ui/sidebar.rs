@@ -4637,13 +4637,23 @@ fn compact_sidebar_rows_inner(
     settled_entries = ordered_tab_entries(app, &settled_entries);
 
     if sections_layout {
+        let mut active_remote_entries = Vec::new();
+        for entry in remote_entries.iter().cloned() {
+            match sidebar_entry_lifecycle(app, &entry) {
+                SidebarEntryLifecycle::Active
+                    if !entry_is_past_done_hide_threshold(app, &entry) =>
+                {
+                    active_remote_entries.push(entry);
+                }
+                SidebarEntryLifecycle::Snoozed => snoozed_entries.push(entry),
+                SidebarEntryLifecycle::Active | SidebarEntryLifecycle::Settled => {
+                    settled_entries.push(entry);
+                }
+            }
+        }
         let mut rows = fleet_grouping::rows(
             app,
-            visible_entries
-                .iter()
-                .chain(&snoozed_entries)
-                .chain(&settled_entries)
-                .chain(&remote_entries),
+            visible_entries.iter().chain(&active_remote_entries),
             expand_sections,
         );
         append_ordered_sidebar_blocks(
@@ -4655,7 +4665,7 @@ fn compact_sidebar_rows_inner(
             expand_worktrees,
             &pods,
             &inbox_new_entries,
-            false,
+            true,
         );
         let row_width = sidebar_row_render_width(app, &rows, expand_worktrees);
         mark_ambiguous_remote_titles(app, &mut rows, row_width);
@@ -33279,7 +33289,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .collect::<Vec<_>>();
         assert_eq!(
             titles,
-            [fleet_grouping::PROJECTS, "No repo yet", "Symphony"]
+            [
+                fleet_grouping::PROJECTS,
+                "No repo yet",
+                SNOOZED_SECTION_TITLE,
+                SETTLED_SECTION_TITLE,
+                "Symphony",
+            ]
         );
     }
 

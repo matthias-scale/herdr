@@ -6228,12 +6228,7 @@ mod tests {
                     .collapse_namespace()
                     .to_string()
             };
-            let lifecycle = if sections {
-                crate::ui::sidebar::DONE_IDLE_SECTION_TITLE
-            } else {
-                snoozed
-            };
-            for (title, collapsed) in [(spaces, true), (lifecycle, false)] {
+            for (title, collapsed) in [(spaces, true), (snoozed, false)] {
                 let key = format!("{namespace}:{title}");
                 if crate::ui::sidebar::section_is_collapsed(&app.state, title) != collapsed
                     && !app.state.collapsed_sidebar_groups.remove(&key)

@@ -5134,6 +5134,15 @@ impl HeadlessServer {
             }
         }
         self.app.start_usage_scan_if_requested();
+        if let Some(sort) = self
+            .app
+            .state
+            .sidebar_presentation
+            .fleet_sort_persistence_request
+            .take()
+        {
+            crate::client::presentation::save_fleet_sidebar_sort(sort);
+        }
         if let Some(mut presentation) = input_presentation {
             presentation.uninstall(&mut self.app.state);
             if let Some(client) = self.clients.get_mut(&client_id) {
@@ -5315,6 +5324,8 @@ impl HeadlessServer {
                         crate::client::presentation::load_sidebar_work_filter();
                     client.sidebar_presentation.group_sorts =
                         crate::client::presentation::load_sidebar_group_sorts();
+                    client.sidebar_presentation.fleet_sort =
+                        crate::client::presentation::load_fleet_sidebar_sort();
                 }
                 let foreground_changed =
                     !direct_attach_requested && self.foreground_client_id != Some(client_id);
@@ -12033,6 +12044,90 @@ new_tab = "prefix+t"
             server.app.state.config_diagnostic,
             server.server_config_diagnostic
         );
+    }
+
+    #[test]
+    fn fleet_sidebar_sort_persists_after_headless_input_and_reattach() {
+        use crate::app::state::FleetSidebarSort;
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-fleet-sort-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        env.set("XDG_STATE_HOME", &directory);
+        let config_path = directory.join("config.toml");
+        std::fs::write(&config_path, "onboarding = false\n").unwrap();
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &config_path);
+        crate::client::presentation::save_fleet_sidebar_sort(FleetSidebarSort::Status);
+        let mut server = test_headless_server();
+        server.app.state.sidebar_sections_layout = true;
+        server.app.state.sidebar_collapsed = false;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
+        for id in [1, 2] {
+            let (writer, _control_rx, _render_rx) = test_client_writer();
+            assert!(server.handle_server_event(ServerEvent::ClientConnected {
+                client_id: id,
+                cols: 120,
+                rows: 40,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                render_encoding: RenderEncoding::SemanticFrame,
+                keybindings: None,
+                direct_attach_requested: false,
+                direct_graphics: false,
+                writer,
+            }));
+            assert_eq!(
+                server.clients[&id].sidebar_presentation.fleet_sort,
+                if id == 1 {
+                    FleetSidebarSort::Status
+                } else {
+                    FleetSidebarSort::Activity
+                }
+            );
+            if id == 1 {
+                crate::ui::compute_view(
+                    &mut server.app.state,
+                    ratatui::layout::Rect::new(0, 0, 120, 40),
+                );
+                let sort = crate::ui::sidebar::fleet_sort_anchor_rect(
+                    &server.app.state,
+                    server.app.state.view.sidebar_rect,
+                );
+                assert!(sort.width > 0);
+                server.handle_client_input_events(
+                    id,
+                    vec![crate::raw_input::RawInputEvent::Mouse(
+                        crossterm::event::MouseEvent {
+                            kind: crossterm::event::MouseEventKind::Down(
+                                crossterm::event::MouseButton::Left,
+                            ),
+                            column: sort.x,
+                            row: sort.y,
+                            modifiers: crossterm::event::KeyModifiers::NONE,
+                        },
+                    )],
+                );
+                assert_eq!(
+                    server.clients[&id].sidebar_presentation.fleet_sort,
+                    FleetSidebarSort::Activity
+                );
+                assert_eq!(
+                    crate::client::presentation::load_fleet_sidebar_sort(),
+                    FleetSidebarSort::Activity
+                );
+                assert!(server.clients[&id]
+                    .sidebar_presentation
+                    .fleet_sort_persistence_request
+                    .is_none());
+                server.clients.remove(&id);
+                server.foreground_client_id = None;
+            }
+        }
+        drop(server);
+        drop(env);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

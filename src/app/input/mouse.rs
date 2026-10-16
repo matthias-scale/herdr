@@ -7139,6 +7139,8 @@ mod tests {
             "sections:{}",
             crate::ui::sidebar::DONE_IDLE_SECTION_TITLE
         ));
+        app.state
+            .toggle_sidebar_group(crate::ui::sidebar::SNOOZED_SECTION_TITLE);
         let sidebar = Rect::new(0, 0, 44, 40);
         app.state.view.sidebar_rect = sidebar;
         let tab_cards = crate::ui::compute_tab_card_areas(&app.state, sidebar);

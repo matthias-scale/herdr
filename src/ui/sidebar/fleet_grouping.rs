@@ -135,6 +135,17 @@ pub(super) fn collapsed_placement(
     app: &AppState,
     entry: &AgentPanelEntry,
 ) -> Option<(String, String)> {
+    let shelf = match sidebar_entry_lifecycle(app, entry) {
+        SidebarEntryLifecycle::Snoozed => Some(SNOOZED_SECTION_TITLE),
+        SidebarEntryLifecycle::Settled => Some(SETTLED_SECTION_TITLE),
+        SidebarEntryLifecycle::Active if entry_is_past_done_hide_threshold(app, entry) => {
+            Some(SETTLED_SECTION_TITLE)
+        }
+        SidebarEntryLifecycle::Active => None,
+    };
+    if let Some(shelf) = shelf {
+        return section_is_collapsed(app, shelf).then(|| (shelf.into(), shelf.into()));
+    }
     let target = entry.local_target()?;
     let workspace = app.workspaces.get(target.ws_idx)?;
     let (key, name) = workspace_declared_repo(app, target.ws_idx)
@@ -182,6 +193,11 @@ pub(super) fn rows<'a>(
         .collect::<Vec<_>>();
     let mut groups: BTreeMap<ProjectKey<'_>, (&str, Vec<&AgentPanelEntry>)> = BTreeMap::new();
     for entry in entries {
+        if sidebar_entry_lifecycle(app, entry) != SidebarEntryLifecycle::Active
+            || entry_is_past_done_hide_threshold(app, entry)
+        {
+            continue;
+        }
         if app
             .sidebar_presentation
             .host_filter
@@ -559,7 +575,120 @@ mod tests {
     }
 
     #[test]
-    fn active_unknown_agents_wait_on_local_and_remote_hosts_but_settled_stays_done() {
+    fn deferred_entries_stay_on_shelves_and_do_not_affect_projects() {
+        let (mut app, mut entries) = fixture();
+        let mut snoozed = entries[1].clone();
+        std::sync::Arc::make_mut(snoozed.remote_entry.as_mut().unwrap()).snoozed_until =
+            Some(u64::MAX);
+        let mut settled = entries[2].clone();
+        std::sync::Arc::make_mut(settled.remote_entry.as_mut().unwrap()).settled = true;
+        std::sync::Arc::make_mut(snoozed.remote_entry.as_mut().unwrap())
+            .agent_ref
+            .agent = "snoozed-agent".into();
+        snoozed = remote_agent_as_panel_entry(snoozed.remote_entry.as_ref().unwrap());
+        let remote = std::sync::Arc::make_mut(settled.remote_entry.as_mut().unwrap());
+        remote.agent_ref.agent = "settled-agent".into();
+        remote.work_context.repo = Some("org/deferred-only".into());
+        settled = remote_agent_as_panel_entry(settled.remote_entry.as_ref().unwrap());
+        entries[0].state = AgentState::Idle;
+        let mut expired = entries[0].clone();
+        expired.state = AgentState::Idle;
+        expired.seen = false;
+        expired.stale = false;
+        expired.done_since =
+            Some(app.view_observed_at - app.hide_done_after - std::time::Duration::from_secs(1));
+        assert!(entry_is_past_done_hide_threshold(&app, &expired));
+        let deferred = [snoozed, settled, expired];
+        for entry in &deferred {
+            assert!(collapsed_placement(&app, entry).is_some());
+        }
+        for sort in [
+            crate::app::state::FleetSidebarSort::Status,
+            crate::app::state::FleetSidebarSort::Activity,
+        ] {
+            app.sidebar_presentation.fleet_sort = sort;
+            let active_rows = rows(&app, &entries, false);
+            let with_deferred = rows(&app, entries.iter().chain(&deferred), false);
+            // Includes all project headers/counts, ordering, and projected rows.
+            let headers = |rows: &[SidebarRow]| {
+                rows.iter()
+                    .filter_map(|row| match row {
+                        SidebarRow::NestedHeader {
+                            key,
+                            count,
+                            activity_count,
+                            ..
+                        } => Some((key.clone(), *count, *activity_count)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(headers(&active_rows), headers(&with_deferred));
+            assert_eq!(active_rows.len(), with_deferred.len());
+        }
+        // Restore the existing shelves, including remote entries and done expiry.
+        entries.extend(deferred[..2].iter().cloned());
+        app.remote_agent_panel_entries = entries
+            .iter()
+            .filter_map(|entry| entry.remote_entry.clone())
+            .collect();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let pane = app.workspaces[0].tabs[0].panes.get_mut(&pane_id).unwrap();
+        pane.seen = false;
+        pane.done_since = deferred[2].done_since;
+        let terminal_id = pane.attached_terminal_id.clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Idle);
+        let projected = sidebar_rows(&app);
+        for (title, expected) in [(SNOOZED_SECTION_TITLE, 1), (SETTLED_SECTION_TITLE, 2)] {
+            assert!(
+                projected.iter().any(|row| matches!(row,
+                SidebarRow::SectionHeader { title: actual, count, collapsed: true, .. }
+                if *actual == title && *count == expected)),
+                "missing collapsed {title} shelf with {expected} entries"
+            );
+        }
+        for width in [18, 28] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 2)).unwrap();
+            terminal
+                .draw(|frame| {
+                    for (y, title, count) in
+                        [(0, SNOOZED_SECTION_TITLE, 1), (1, SETTLED_SECTION_TITLE, 2)]
+                    {
+                        render_section_header(
+                            &app,
+                            frame,
+                            &SectionHeaderArea {
+                                title,
+                                rect: Rect::new(0, y, width, 1),
+                            },
+                            count,
+                            &[],
+                            true,
+                        );
+                    }
+                })
+                .unwrap();
+            println!("DEFERRED SHELVES width={width}");
+            for y in 0..2 {
+                let line = (0..width)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>();
+                assert!(!line.is_empty());
+                println!("{}", line.trim_end());
+            }
+        }
+        let coverage = sidebar_coverage(&app, &TerminalRuntimeRegistry::new());
+        assert!(
+            coverage.iter().all(|row| row.placement.is_some()),
+            "{coverage:?}"
+        );
+    }
+
+    #[test]
+    fn active_unknown_agents_wait_on_local_and_remote_hosts_but_settled_stays_hidden() {
         let (app, mut entries) = fixture();
         for entry in &mut entries {
             if let Some(remote) = entry.remote_entry.as_mut() {
@@ -595,7 +724,7 @@ mod tests {
                     SidebarRow::Tab { .. } | SidebarRow::RemoteAgent { .. }
                 ))
                 .count(),
-            3
+            2
         );
         for entry in &entries[..2] {
             assert_eq!(state_index(&app, entry), 2);
@@ -606,7 +735,10 @@ mod tests {
             }
         }
         assert_eq!(state_index(&app, &entries[2]), 1);
-        assert_eq!(collapsed_placement(&app, &entries[2]), None);
+        assert_eq!(
+            collapsed_placement(&app, &entries[2]),
+            Some((SETTLED_SECTION_TITLE.into(), SETTLED_SECTION_TITLE.into()))
+        );
     }
 
     #[test]
