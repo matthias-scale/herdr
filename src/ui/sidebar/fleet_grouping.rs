@@ -173,14 +173,21 @@ pub(super) fn rows<'a>(
         .workspaces
         .iter()
         .enumerate()
-        .map(|(index, _workspace)| {
+        .map(|(index, workspace)| {
             workspace_declared_repo(app, index)
                 .map(|(repo, _)| {
                     let (key, title) = project(repo);
                     (key.to_string(), title.to_string())
                 })
                 .unwrap_or_else(|| {
-                    let title = NO_REPO_YET_SECTION_TITLE;
+                    let title = if app.sidebar_group_mode == SidebarGroupMode::Spaces {
+                        workspace
+                            .custom_name
+                            .as_deref()
+                            .unwrap_or(&workspace.cached_auto_label)
+                    } else {
+                        NO_REPO_YET_SECTION_TITLE
+                    };
                     (title.to_string(), title.to_string())
                 })
         })
@@ -206,7 +213,13 @@ pub(super) fn rows<'a>(
                 .repo
                 .as_deref()
                 .map(project)
-                .unwrap_or((NO_REPO_YET_SECTION_TITLE, NO_REPO_YET_SECTION_TITLE))
+                .unwrap_or_else(|| {
+                    if app.sidebar_group_mode == SidebarGroupMode::Spaces {
+                        (entry.space_label.as_str(), entry.space_label.as_str())
+                    } else {
+                        (NO_REPO_YET_SECTION_TITLE, NO_REPO_YET_SECTION_TITLE)
+                    }
+                })
         } else if let Some(target) = entry.local_target() {
             let Some(project) = projects.get(target.ws_idx) else {
                 continue;
@@ -274,9 +287,12 @@ pub(super) fn rows<'a>(
         let visible = total - working;
         let working_collapsed =
             !expand_collapsed && section_is_collapsed(app, &working_key(project.0));
-        let collapsed =
-            !expand_collapsed && section_is_collapsed(app, &project_section_key(project.0));
         let only_working = visible == 0;
+        let collapsed = if only_working {
+            working_collapsed
+        } else {
+            !expand_collapsed && section_is_collapsed(app, &project_section_key(project.0))
+        };
         rows.push(SidebarRow::NestedHeader {
             key: if only_working {
                 working_key(project.0)
@@ -289,12 +305,12 @@ pub(super) fn rows<'a>(
             title: name.into(),
             count: visible,
             activity_count: Some((working, total)),
-            collapsed: if only_working { true } else { collapsed },
+            collapsed,
             dim: only_working,
             status: None,
             spawn: false,
         });
-        if !only_working && collapsed {
+        if collapsed {
             continue;
         }
         let (working_entries, visible_entries): (Vec<_>, Vec<_>) = entries
@@ -332,7 +348,7 @@ pub(super) fn rows<'a>(
                     spawn: false,
                 });
             }
-            if !working_collapsed && !only_working {
+            if !working_collapsed {
                 append(&mut rows, working_entries, true);
             }
         }
@@ -790,7 +806,7 @@ mod tests {
         assert!(rows
             .iter()
             .any(|row| matches!(row, SidebarRow::Tab { entry, .. } if entry.pinned)));
-        assert!(!rows.iter().any(|row| matches!(
+        assert!(rows.iter().any(|row| matches!(
             row,
             SidebarRow::SectionHeader {
                 title: PINNED_SECTION_TITLE,
@@ -1068,9 +1084,22 @@ mod tests {
                     assert!(text.contains(expected), "{width}: {text:?}");
                 }
                 if header.dim {
-                    assert!(terminal.backend().buffer()[(2, 0)]
-                        .modifier
-                        .contains(Modifier::DIM));
+                    let expected = super::super::opacity_style(
+                        &app,
+                        50,
+                        Style::default().fg(app.palette.overlay0),
+                        None,
+                    )
+                    .fg
+                    .expect("working header has a blended foreground");
+                    let visible_count = activity_count
+                        .filter(|(working, total)| *working > 0 && working == total)
+                        .map_or(count, |(working, _)| working)
+                        .to_string();
+                    let count_column = (0..width)
+                        .find(|x| terminal.backend().buffer()[(*x, 0)].symbol() == visible_count)
+                        .expect("working count is visible");
+                    assert_eq!(terminal.backend().buffer()[(count_column, 0)].fg, expected);
                 }
             }
         }

@@ -3262,7 +3262,7 @@ mod tests {
         };
         let shown = render(&app);
         assert!(
-            shown.contains("working") && shown.contains("Scalable 1 of 2"),
+            shown.contains("No repo yet") && shown.contains("1 working"),
             "{shown}"
         );
         assert!(shown.contains("↳ Choose a layout"), "{shown}");

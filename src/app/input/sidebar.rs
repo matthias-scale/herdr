@@ -6004,90 +6004,100 @@ mod tests {
     }
 
     #[test]
-    fn device_character_toggles_host_filter() {
+    fn sidebar_display_settings_controls_tokens_and_host_scope() {
         let mut app = app_for_mouse_test();
         app.state.agent_host_name = "ub2".into();
         app.state.sidebar_sections_layout = true;
-        app.state.workspaces = vec![Workspace::test_new("herdr")];
-        app.state.ensure_test_terminals();
-        let pane = app.state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane]
-            .attached_terminal_id
-            .clone();
-        let terminal = app.state.terminals.get_mut(&terminal_id).expect("terminal");
-        terminal.detected_agent = Some(Agent::Claude);
-        terminal.set_raw_agent_state_for_test(AgentState::Working);
-        app.state.toggle_sidebar_group("fleet-working:herdr");
         let area = Rect::new(0, 0, 106, 40);
-        for expected in [Some("ub2"), None] {
-            crate::ui::compute_view(&mut app.state, area);
-            let device = app.state.view.sidebar_hover_targets.iter().find(|target| matches!(target.action.as_ref(), Some(crate::app::state::SidebarHoverAction::FilterHost { host }) if host.as_ref() == "ub2")).expect("device character hit area").rect;
+        crate::ui::compute_view(&mut app.state, area);
+        let cog = crate::ui::sidebar_display_settings_anchor_rect(
+            &app.state,
+            app.state.view.sidebar_rect,
+        );
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), cog.x, cog.y));
+        assert!(app.state.sidebar_display_settings_open);
+
+        let menu = crate::ui::sidebar::sidebar_display_settings_menu_layout(&app.state, area)
+            .expect("display settings popup");
+        for (index, row) in [(0, 0), (1, 1)] {
+            let y = menu.list_rect.y + row;
+            assert_eq!(
+                app.state
+                    .sidebar_display_settings_item_at(menu.list_rect.x, y),
+                Some(index)
+            );
             app.handle_mouse(mouse(
                 MouseEventKind::Down(MouseButton::Left),
-                device.x,
-                device.y,
+                menu.list_rect.x,
+                y,
             ));
-            assert_eq!(
-                app.state.sidebar_presentation.host_filter.as_deref(),
-                expected
-            );
         }
+        assert!(app.state.sidebar_hide_provider_icon);
+        assert!(app.state.sidebar_hide_machine_name);
+        assert!(app.state.sidebar_display_settings_open);
+
+        let menu = crate::ui::sidebar::sidebar_display_settings_menu_layout(&app.state, area)
+            .expect("display settings popup remains open");
+        let scope_y = menu.list_rect.y + 2;
+        assert_eq!(
+            app.state
+                .sidebar_display_settings_item_at(menu.list_rect.x, scope_y),
+            Some(2)
+        );
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.list_rect.x,
+            scope_y,
+        ));
+        assert!(!app.state.sidebar_display_settings_open);
+        assert!(app.state.sidebar_blocker_scope_menu_open);
+
+        let scope = crate::ui::sidebar_blocker_scope_menu_layout(&app.state, area)
+            .expect("machine scope picker");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            scope.list_rect.x,
+            scope.list_rect.y + 1,
+        ));
+        assert_eq!(
+            app.state.sidebar_presentation.host_filter.as_deref(),
+            Some("ub2")
+        );
     }
 
     #[test]
-    fn blocker_scope_dropdown_selects_by_mouse_and_keyboard() {
+    fn sidebar_display_settings_machine_scope_supports_keyboard() {
         let mut app = app_for_mouse_test();
-        app.state.sidebar_presentation.host_filter = Some(app.state.agent_host_name.clone());
-        app.state.sidebar_blocker_scope_menu_selected = 1;
+        app.state.agent_host_name = "ub2".into();
+        app.state.sidebar_presentation.host_filter = Some("ub2".into());
         app.state.sidebar_sections_layout = true;
-        app.state.workspaces = vec![Workspace::test_new("blocked")];
-        app.state.ensure_test_terminals();
-        let pane = app.state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane]
-            .attached_terminal_id
-            .clone();
-        let terminal = app.state.terminals.get_mut(&terminal_id).expect("terminal");
-        terminal.detected_agent = Some(Agent::Claude);
-        terminal.set_raw_agent_state_for_test(AgentState::Blocked);
-
         let area = Rect::new(0, 0, 106, 40);
         crate::ui::compute_view(&mut app.state, area);
-        let anchor =
-            crate::ui::sidebar_blocker_scope_anchor_rect(&app.state, app.state.view.sidebar_rect);
-        assert!(anchor.width > 0);
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            anchor.x,
-            anchor.y,
-        ));
+        app.state.open_sidebar_display_settings();
+        assert!(app.state.handle_sidebar_display_settings_key(KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::NONE,
+        )));
         assert!(app.state.sidebar_blocker_scope_menu_open);
-        let layout = crate::ui::sidebar_blocker_scope_menu_layout(&app.state, area)
-            .expect("blocker scope dropdown");
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            layout.list_rect.x,
-            layout.list_rect.y,
-        ));
-        assert_eq!(app.state.sidebar_presentation.host_filter, None);
-
-        app.state.open_sidebar_blocker_scope_menu();
         app.state
-            .handle_sidebar_blocker_scope_menu_key(KeyEvent::new(
-                KeyCode::Down,
-                KeyModifiers::NONE,
-            ));
+            .handle_sidebar_blocker_scope_menu_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         app.state
             .handle_sidebar_blocker_scope_menu_key(KeyEvent::new(
                 KeyCode::Enter,
                 KeyModifiers::NONE,
             ));
-        assert_eq!(
-            app.state.sidebar_presentation.host_filter.as_deref(),
-            Some(app.state.agent_host_name.as_str())
-        );
+        assert_eq!(app.state.sidebar_presentation.host_filter, None);
         assert!(!app.state.sidebar_blocker_scope_menu_open);
 
-        app.state.open_sidebar_blocker_scope_menu();
+        app.state.open_sidebar_display_settings();
+        app.state
+            .handle_sidebar_display_settings_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.state.sidebar_display_settings_open);
+        app.state.open_sidebar_display_settings();
+        app.state.handle_sidebar_display_settings_key(KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::NONE,
+        ));
         app.state
             .handle_sidebar_blocker_scope_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!app.state.sidebar_blocker_scope_menu_open);

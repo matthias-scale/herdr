@@ -5349,6 +5349,23 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.sidebar_sections_layout = true;
         install_remote_click_snapshot(&mut app, 1, true);
+        // All-working project groups start folded; expose the remote pane rows
+        // here because this fixture exercises their per-agent click targets.
+        let working_group_key = crate::ui::sidebar_rows(&app.state)
+            .into_iter()
+            .find_map(|row| match row {
+                crate::ui::SidebarRow::NestedHeader { key, .. }
+                    if key.starts_with("fleet-working:") =>
+                {
+                    Some(key)
+                }
+                _ => None,
+            })
+            .expect("all-working remote project group");
+        app.state
+            .collapsed_sidebar_groups
+            .insert(format!("sections:{working_group_key}"));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
         let agent_ref =
             crate::api::schema::AgentRef::new("ub1", "pane/first").expect("remote reference");
         let row =

@@ -5371,7 +5371,7 @@ mod tests {
         state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
         state.skip_collapsed_cycle = true;
         state.sidebar_sections_layout = true;
-        let remote = remote_blocker("ub2", "collapsed-agent");
+        let remote = remote_agent_with_status("ub2", "collapsed-agent", "idle");
         let agent_ref = remote.agent_ref.clone();
         state.remote_agent_panel_entries = vec![remote];
         state.remote_agent_device_groups =
@@ -5573,7 +5573,32 @@ mod tests {
         }
         app.state.sidebar_sections_layout = true;
         app.state.skip_collapsed_cycle = true;
-        assert!(!window_navigation_order(&app.state).is_empty());
+        let initial_rows = crate::ui::sidebar::sidebar_navigation_rows(&app.state);
+        let initial_row_kinds = initial_rows
+            .iter()
+            .map(|row| match row {
+                crate::ui::SidebarRow::Tab { entry, .. } => format!(
+                    "tab:{}:{}",
+                    entry
+                        .local_target()
+                        .map_or(usize::MAX, |target| target.ws_idx),
+                    entry
+                        .local_target()
+                        .map_or(usize::MAX, |target| target.tab_idx)
+                ),
+                crate::ui::SidebarRow::SectionHeader { title, .. } => {
+                    format!("section:{title}")
+                }
+                crate::ui::SidebarRow::NestedHeader { title, .. } => {
+                    format!("group:{title}")
+                }
+                _ => "other".to_string(),
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !window_navigation_order(&app.state).is_empty(),
+            "initial rows: {initial_row_kinds:?}"
+        );
 
         // Collapse every section header the sidebar shows.
         for _ in 0..3 {

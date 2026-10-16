@@ -4721,8 +4721,20 @@ fn compact_sidebar_rows_inner(
             .filter(|entry| !entry.pinned && !entry_needs_human_attention(entry))
             .collect::<Vec<_>>();
         let mut rows = Vec::new();
-        append_compact_section_rows(app, &mut rows, PINNED_SECTION_TITLE, &pinned_entries);
-        append_compact_section_rows(app, &mut rows, BLOCKERS_SECTION_TITLE, &promoted);
+        append_compact_section_rows(
+            app,
+            &mut rows,
+            PINNED_SECTION_TITLE,
+            &pinned_entries,
+            expand_sections,
+        );
+        append_compact_section_rows(
+            app,
+            &mut rows,
+            BLOCKERS_SECTION_TITLE,
+            &promoted,
+            expand_sections,
+        );
         let project_rows = fleet_grouping::rows(app, project_entries, expand_sections);
         rows.extend(project_rows);
         append_ordered_sidebar_blocks(
@@ -4853,11 +4865,12 @@ fn append_compact_section_rows(
     rows: &mut Vec<SidebarRow>,
     title: &'static str,
     entries: &[AgentPanelEntry],
+    force_expand: bool,
 ) {
     if entries.is_empty() {
         return;
     }
-    let collapsed = section_is_collapsed(app, title);
+    let collapsed = !force_expand && section_is_collapsed(app, title);
     rows.push(SidebarRow::SectionHeader {
         title,
         count: entries.len(),
@@ -22097,9 +22110,8 @@ pub(crate) mod tests {
             let has_blocked_header = rows.iter().any(|row| {
                 matches!(
                     row,
-                    SidebarRow::NestedHeader {
-                        count: 1,
-                        dim: false,
+                    SidebarRow::SectionHeader {
+                        title: BLOCKERS_SECTION_TITLE,
                         ..
                     }
                 )
@@ -34156,17 +34168,29 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.reconcile_sidebar_presentation();
 
         let rows = sidebar_rows(&app);
-        assert!(rows.iter().any(|row| matches!(row, SidebarRow::NestedHeader { title, activity_count: Some((1, 1)), collapsed: true, .. } if title == "working")));
+        let working_key = rows
+            .iter()
+            .find_map(|row| match row {
+                SidebarRow::NestedHeader {
+                    key,
+                    title,
+                    activity_count: Some((1, 1)),
+                    collapsed: true,
+                    ..
+                } if title == NO_REPO_YET_SECTION_TITLE => Some(key.clone()),
+                _ => None,
+            })
+            .expect("collapsed no-repo working group");
         assert!(rows
             .iter()
             .any(|row| matches!(row, SidebarRow::Tab { entry, .. } if entry_is_blocked(entry))));
         assert!(!rows.iter().any(
             |row| matches!(row, SidebarRow::Tab { entry, .. } if entry.state == AgentState::Working)
         ));
-        app.toggle_sidebar_group("fleet-working:working");
+        app.toggle_sidebar_group(&working_key);
         let rows = sidebar_rows(&app);
         assert!(rows.iter().any(|row| matches!(row, SidebarRow::Tab { entry, .. } if entry.state == AgentState::Working && entry.working_shelf)));
-        app.toggle_sidebar_group("fleet-working:working");
+        app.toggle_sidebar_group(&working_key);
         assert!(!sidebar_rows(&app).iter().any(
             |row| matches!(row, SidebarRow::Tab { entry, .. } if entry.state == AgentState::Working)
         ));
@@ -34387,7 +34411,17 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn sections_working_shelf_tabs_keep_shared_hover_actions_at_normal_width() {
         let mut app = app_with_agents(&["alpha"]);
         app.sidebar_sections_layout = true;
-        app.toggle_sidebar_group("fleet-working:alpha");
+        let working_key = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::NestedHeader { key, .. } if key.starts_with("fleet-working:") => {
+                    Some(key)
+                }
+                _ => None,
+            })
+            .expect("working group");
+        app.collapsed_sidebar_groups
+            .insert(format!("sections:{working_key}"));
         app.nerd_font = false;
         let area = Rect::new(0, 0, 60, 25);
         let tab = compute_tab_card_areas(&app, area)
@@ -34642,10 +34676,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(rendered.contains('2'), "{rendered:?}");
         let host_at = rendered.rfind('2').expect("local device char");
         let host_x = display_width(&rendered[..host_at]) as u16;
-        assert_eq!(
-            terminal.backend().buffer()[(host_x, 0)].fg,
-            app.palette.accent
-        );
+        let expected = opacity_style(&app, 50, Style::default().fg(app.palette.accent), None)
+            .fg
+            .expect("working token has a blended foreground");
+        assert_eq!(terminal.backend().buffer()[(host_x, 0)].fg, expected);
     }
 
     #[test]
@@ -34744,7 +34778,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .draw(|frame| render_section_header(&app, frame, &header, count, &[], true))
                 .expect("render collapsed shelf header");
             let line = row_text(terminal.backend().buffer(), 0, 32);
-            assert!(line.contains(&format!("{title} ({count})")), "{line:?}");
+            assert!(
+                line.contains(title) && line.trim_end().ends_with(&count.to_string()),
+                "{line:?}"
+            );
         }
     }
 
@@ -34837,12 +34874,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn blocker_scope_labels_fit_the_default_sidebar_width() {
+    fn blocker_scope_is_not_rendered_in_the_section_header() {
         use ratatui::{backend::TestBackend, Terminal};
 
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
-        for (scope, expected) in [(None, "all hosts ▾"), (Some("ub1".to_string()), "ub1 ▾")] {
+        for scope in [None, Some("ub1".to_string())] {
             app.sidebar_presentation.host_filter = scope;
             let width = 28;
             let area = Rect::new(0, 0, width, 1);
@@ -34863,7 +34900,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 })
                 .expect("render blocker header");
             let row = row_text(terminal.backend().buffer(), 0, width);
-            assert!(row.contains(expected), "{expected:?} missing from {row:?}");
+            assert!(!row.contains("hosts") && !row.contains("ub1"), "{row:?}");
         }
     }
 
