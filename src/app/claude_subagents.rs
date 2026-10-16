@@ -1555,6 +1555,39 @@ pub(crate) fn validated_transcript_path(
     Some(path.to_path_buf())
 }
 
+/// Rebuild runtime-only tracking from the durable session identity during
+/// restore. Live handoff keeps the agent process, so no startup hook will
+/// necessarily arrive to bind its transcript again.
+pub(crate) fn restore_transcript_tracking(
+    terminal: &mut crate::terminal::TerminalState,
+    locate: impl FnOnce(&crate::agent_resume::PersistedAgentSession, &Path) -> Option<PathBuf>,
+) {
+    if terminal.claude_transcript_path.is_some() {
+        return;
+    }
+    let Some(session) = terminal.persisted_agent_session.as_ref() else {
+        return;
+    };
+    if !matches!(
+        (session.source.as_str(), session.agent.as_str()),
+        ("herdr:claude", "claude") | ("herdr:codex", "codex")
+    ) || session.session_ref.kind != AgentSessionRefKind::Id
+    {
+        return;
+    }
+    let Some(path) = locate(session, &terminal.cwd).and_then(|path| {
+        validated_transcript_path(
+            &session.source,
+            &session.agent,
+            Some(&session.session_ref),
+            path.to_str(),
+        )
+    }) else {
+        return;
+    };
+    terminal.set_claude_transcript_target(Some(session.session_ref.value.clone()), Some(path));
+}
+
 fn parse_transcript_row(
     line: &[u8],
 ) -> Result<(Value, Option<TranscriptEvent>, Option<SystemTime>), ()> {
@@ -2694,6 +2727,118 @@ mod tests {
         });
         terminal.set_claude_transcript_target(Some(SESSION_ID.into()), Some(path));
         (app, terminal_id)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_rebinds_transcript_and_follows_appended_turn() {
+        let dir = TestDir::new("handoff-transcript");
+        let path = dir.transcript();
+        let first = b"{\"type\":\"user\",\"timestamp\":\"2026-10-16T19:32:00Z\",\"message\":{\"content\":\"first\"}}\n";
+        std::fs::write(&path, first).unwrap();
+        let (mut source, source_id) = app_with_claude_target(path.clone());
+        source
+            .state
+            .terminals
+            .get_mut(&source_id)
+            .unwrap()
+            .set_detected_state(Some(crate::detect::Agent::Claude), AgentState::Working);
+        let now = Instant::now();
+        let mut terminal = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            dir.0.clone(),
+        );
+        let source_terminal = &source.state.terminals[&source_id];
+        terminal
+            .set_persisted_agent_session(source_terminal.persisted_agent_session.clone().unwrap());
+        let handoff = source_terminal.terminal_agent_handoff_state(now).unwrap();
+        let encoded = serde_json::to_string(&handoff).unwrap();
+        // The restore pipeline has the durable session before importing the
+        // closing report. Supply a filesystem lookup rooted in this fixture.
+        restore_transcript_tracking(&mut terminal, |session, cwd| {
+            crate::app::settled_view::session_path_from_root(session, cwd, &dir.0)
+        });
+        terminal.restore_terminal_agent_handoff_state(serde_json::from_str(&encoded).unwrap(), now);
+        assert_eq!(terminal.claude_transcript_path.as_ref(), Some(&path));
+        assert_eq!(
+            terminal.claude_transcript_session_id.as_deref(),
+            Some(SESSION_ID)
+        );
+
+        let (mut app, terminal_id) = app_with_claude_target(path.clone());
+        terminal.id = terminal_id.clone();
+        app.state.terminals.insert(terminal_id.clone(), terminal);
+        let mut tracker = TranscriptTracker::new(SESSION_ID.into(), path.clone(), 1);
+        for (generation, at) in [(1, "2026-10-16T19:32:00Z"), (2, "2026-10-16T21:43:00Z")] {
+            if generation == 2 {
+                use std::io::Write;
+                writeln!(OpenOptions::new().append(true).open(&path).unwrap(),
+                    "{{\"type\":\"user\",\"timestamp\":\"{at}\",\"message\":{{\"content\":\"next\"}}}}"
+                ).unwrap();
+            }
+            app.claude_subagent_trackers
+                .insert(terminal_id.clone(), tracker.clone());
+            let (observations, stats) = refresh_trackers(
+                vec![RefreshWorkItem {
+                    target: TargetIdentity {
+                        terminal_id: terminal_id.clone(),
+                        source: "herdr:claude".into(),
+                        session_id: SESSION_ID.into(),
+                        path: path.clone(),
+                        target_generation: 1,
+                        turn_generation: app.state.terminals[&terminal_id].agent_turn_generation(),
+                    },
+                    tracker,
+                }],
+                Instant::now() + WORKER_TIMEOUT,
+                std::time::Duration::from_secs(60),
+            );
+            app.last_claude_subagent_refresh_generation = generation;
+            app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+                generation,
+                deadline: Instant::now() + WORKER_TIMEOUT,
+            });
+            app.handle_claude_subagents_refreshed(generation, observations, stats);
+            assert_eq!(app.state.terminals[&terminal_id].last_turn_at(), Some(at));
+            tracker = app.claude_subagent_trackers[&terminal_id].clone();
+        }
+    }
+
+    #[test]
+    fn restored_sessions_rebind_claude_and_codex_transcripts() {
+        let dir = TestDir::new("restored-transcripts");
+        for agent in ["claude", "codex"] {
+            let path = if agent == "claude" {
+                dir.transcript()
+            } else {
+                dir.0
+                    .join("sessions/2026/10/16")
+                    .join(format!("rollout-2026-10-16T19-32-00-{SESSION_ID}.jsonl"))
+            };
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"").unwrap();
+            let mut terminal = crate::terminal::TerminalState::new(
+                crate::terminal::TerminalId::alloc(),
+                dir.0.clone(),
+            );
+            terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: format!("herdr:{agent}"),
+                agent: agent.into(),
+                session_ref: AgentSessionRef::id(SESSION_ID).unwrap(),
+            });
+            restore_transcript_tracking(&mut terminal, |session, cwd| {
+                crate::app::settled_view::session_path_from_root(session, cwd, &dir.0)
+            });
+            assert_eq!(
+                terminal.claude_transcript_path.as_ref(),
+                Some(&path),
+                "{agent}"
+            );
+            assert_eq!(
+                terminal.claude_transcript_session_id.as_deref(),
+                Some(SESSION_ID)
+            );
+        }
     }
 
     fn merged_work(url: &str) -> crate::work_index::Snapshot {

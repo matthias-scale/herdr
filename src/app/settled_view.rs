@@ -66,7 +66,7 @@ pub(crate) fn load_transcript_limited(
     ))
 }
 
-fn session_path(
+pub(crate) fn session_path(
     session: &crate::agent_resume::PersistedAgentSession,
     cwd: &Path,
 ) -> Option<PathBuf> {
@@ -75,12 +75,25 @@ fn session_path(
         let path = PathBuf::from(&session.session_ref.value);
         return path.is_file().then_some(path);
     }
-    let id = &session.session_ref.value;
-    let agent = session.agent.to_ascii_lowercase();
-    if agent.contains("claude") {
-        let root = std::env::var_os("CLAUDE_CONFIG_DIR")
+    let root = if session.agent.to_ascii_lowercase().contains("claude") {
+        std::env::var_os("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))?;
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))?
+    } else {
+        std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))?
+    };
+    session_path_from_root(session, cwd, &root)
+}
+
+pub(crate) fn session_path_from_root(
+    session: &crate::agent_resume::PersistedAgentSession,
+    cwd: &Path,
+    root: &Path,
+) -> Option<PathBuf> {
+    let id = &session.session_ref.value;
+    if session.agent.to_ascii_lowercase().contains("claude") {
         let project = cwd
             .to_string_lossy()
             .chars()
@@ -101,11 +114,7 @@ fn session_path(
             &mut entries_seen,
         );
     }
-    let root = std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))?
-        .join("sessions");
-    find_codex_file(&root, id)
+    find_codex_file(&root.join("sessions"), id)
 }
 
 fn find_named_file(
@@ -133,38 +142,34 @@ fn find_named_file(
 }
 
 fn find_codex_file(root: &Path, id: &str) -> Option<PathBuf> {
-    let mut entries_seen = 0usize;
-    for year in std::fs::read_dir(root)
-        .ok()?
-        .take(MAX_SESSION_SEARCH_ENTRIES)
-        .flatten()
-    {
-        entries_seen += 1;
-        let year_path = year.path();
-        if !year_path.is_dir() {
-            continue;
+    find_codex_rollout(root, &format!("-{id}.jsonl"), 3, &mut 0)
+}
+
+fn find_codex_rollout(
+    root: &Path,
+    suffix: &str,
+    max_depth: usize,
+    entries_seen: &mut usize,
+) -> Option<PathBuf> {
+    let remaining = MAX_SESSION_SEARCH_ENTRIES.saturating_sub(*entries_seen);
+    for entry in std::fs::read_dir(root).ok()?.take(remaining).flatten() {
+        if *entries_seen >= MAX_SESSION_SEARCH_ENTRIES {
+            break;
         }
-        for month in std::fs::read_dir(&year_path)
-            .ok()?
-            .take(MAX_SESSION_SEARCH_ENTRIES.saturating_sub(entries_seen))
-            .flatten()
-        {
-            entries_seen += 1;
-            let month_path = month.path();
-            if !month_path.is_dir() {
-                continue;
+        *entries_seen += 1;
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() && max_depth > 0 {
+            if let Some(found) = find_codex_rollout(&path, suffix, max_depth - 1, entries_seen) {
+                return Some(found);
             }
-            for day in std::fs::read_dir(month_path)
-                .ok()?
-                .take(MAX_SESSION_SEARCH_ENTRIES.saturating_sub(entries_seen))
-                .flatten()
-            {
-                entries_seen += 1;
-                let path = day.path();
-                let name = path.file_name()?.to_string_lossy();
-                if name.starts_with("rollout-") && name.ends_with(&format!("-{id}.jsonl")) {
-                    return Some(path);
-                }
+        } else if file_type.is_file() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("rollout-") && name.ends_with(suffix) {
+                return Some(path);
             }
         }
     }

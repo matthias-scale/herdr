@@ -5553,6 +5553,29 @@ impl TerminalState {
                     "screen_blocker_over_unknown_transcript",
                 );
             }
+            // A settled screen followed by visible work identifies a new turn.
+            // Re-reading an unchanged transcript must not give its old settled
+            // state authority over that turn. Continuous spinners and unanswered
+            // closing gates do not arm unreported_turn_started_at. Unknown has
+            // no completion/gate proof, so newer visible work alone is enough.
+            if state != AgentState::Working
+                && self.fallback_visible_working
+                && (self
+                    .unreported_turn_started_at
+                    .zip(self.transcript_turn_observed_at)
+                    .is_some_and(|(started_at, transcript_at)| started_at > transcript_at)
+                    || (state == AgentState::Unknown
+                        && self
+                            .fallback_visible_working_observed_at
+                            .zip(self.transcript_turn_observed_at)
+                            .is_some_and(|(working_at, transcript_at)| working_at > transcript_at)))
+                && self
+                    .closing_report
+                    .as_ref()
+                    .is_none_or(|report| report.unanswered.is_none())
+            {
+                return (AgentState::Working, "screen_working_over_transcript");
+            }
             return (state, "transcript");
         }
         let (state, arbitration) = self.lifecycle_state_and_arbitration();
@@ -15696,6 +15719,115 @@ mod transcript_turn_tests {
 
     fn terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    #[test]
+    fn new_visible_turn_overrides_stale_settled_transcript() {
+        for agent in [Agent::Claude, Agent::Codex] {
+            for settled in [AgentState::Unknown, AgentState::Idle, AgentState::Blocked] {
+                let mut terminal = terminal();
+                let now = Instant::now();
+                let at = SystemTime::now() - Duration::from_secs(3600);
+                terminal.set_detected_state(Some(agent), AgentState::Working);
+                terminal.set_transcript_turn_state(Some(settled), Some(at), 0, 1, now);
+                terminal.set_detected_state_with_screen_signals_at(
+                    Some(agent),
+                    AgentState::Idle,
+                    false,
+                    true,
+                    false,
+                    false,
+                    false,
+                    now + Duration::from_secs(1),
+                );
+                terminal.set_detected_state_with_screen_signals_at(
+                    Some(agent),
+                    AgentState::Working,
+                    false,
+                    false,
+                    true,
+                    false,
+                    false,
+                    now + Duration::from_secs(2),
+                );
+                assert_eq!(
+                    terminal.raw_agent_state(),
+                    AgentState::Working,
+                    "{agent:?}/{settled:?}"
+                );
+                assert_eq!(
+                    terminal.effective_state_arbitration(),
+                    "screen_working_over_transcript"
+                );
+                // Polling unchanged historical rows must not renew their authority.
+                terminal.set_transcript_turn_state(
+                    Some(settled),
+                    Some(at),
+                    0,
+                    1,
+                    now + Duration::from_secs(3),
+                );
+                assert_eq!(terminal.raw_agent_state(), AgentState::Working);
+                terminal.set_transcript_turn_state(
+                    Some(AgentState::Blocked),
+                    Some(SystemTime::now()),
+                    0,
+                    2,
+                    now + Duration::from_secs(4),
+                );
+                assert_eq!(terminal.raw_agent_state(), AgentState::Blocked);
+            }
+        }
+    }
+
+    #[test]
+    fn newer_visible_work_resolves_unknown_transcript_without_a_settled_screen() {
+        let mut terminal = terminal();
+        let now = Instant::now();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Unknown),
+            Some(SystemTime::now()),
+            0,
+            1,
+            now,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            now + Duration::from_secs(1),
+        );
+        assert_eq!(terminal.raw_agent_state(), AgentState::Working);
+    }
+
+    #[test]
+    fn continuous_visible_spinner_does_not_clear_settled_transcript_ask() {
+        let mut terminal = terminal();
+        let now = Instant::now();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Blocked),
+            Some(SystemTime::now()),
+            0,
+            1,
+            now,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            now + Duration::from_secs(60),
+        );
+        assert_eq!(terminal.raw_agent_state(), AgentState::Blocked);
     }
 
     #[test]

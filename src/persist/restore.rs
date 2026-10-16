@@ -726,6 +726,10 @@ fn restore_tab(
             }
             if let Some(session) = restored_agent_session {
                 terminal.set_persisted_agent_session(session);
+                crate::app::claude_subagents::restore_transcript_tracking(
+                    &mut terminal,
+                    crate::app::settled_view::session_path,
+                );
                 restore_auto_settle_state(&mut terminal, saved_agent_session);
             }
             if let Some(report) = saved_pane.and_then(|pane| pane.closing_report.clone()) {
@@ -883,6 +887,10 @@ fn restore_tab(
                 }
                 if let Some(session) = restored_agent_session {
                     terminal.set_persisted_agent_session(session);
+                    crate::app::claude_subagents::restore_transcript_tracking(
+                        &mut terminal,
+                        crate::app::settled_view::session_path,
+                    );
                     restore_auto_settle_state(&mut terminal, saved_agent_session);
                 }
                 if let Some(report) = saved_pane.and_then(|pane| pane.closing_report.clone()) {
