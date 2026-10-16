@@ -18,7 +18,7 @@ pub(crate) fn capture_rect(app: &AppState, screen: Rect) -> Option<Rect> {
     let rows = u16::try_from(lines)
         .unwrap_or(u16::MAX)
         .clamp(2, (screen.height / 4).max(2));
-    let height = (6 + rows).min(screen.height.saturating_sub(1).max(1));
+    let height = (8 + rows).min(screen.height.saturating_sub(1).max(1));
     Some(Rect::new(
         screen.x.saturating_add(1),
         screen
@@ -111,7 +111,8 @@ pub(crate) fn render(app: &AppState, frame: &mut Frame, screen: Rect) {
         rect.x.saturating_add(2),
         rect.y.saturating_add(2),
         rect.width.saturating_sub(4),
-        rect.height.saturating_sub(6),
+        rect.height
+            .saturating_sub(if state.entering_reason { 8 } else { 6 }),
     );
     let (mut rows, cursor) =
         crate::ui::home::prompt_layout(&state.text, text_area.width, text_area.height, true);
@@ -142,14 +143,10 @@ pub(crate) fn render(app: &AppState, frame: &mut Frame, screen: Rect) {
             "urgent reason: {}",
             state.gate_reason.as_deref().unwrap_or_default()
         );
+        let reason_y = text_area.y.saturating_add(text_area.height);
         line(
             frame,
-            Rect::new(
-                text_area.x,
-                text_area.y + text_area.height.saturating_sub(1),
-                text_area.width,
-                1,
-            ),
+            Rect::new(text_area.x, reason_y, text_area.width, 1),
             vec![Span::styled(
                 reason,
                 Style::default()
@@ -158,7 +155,7 @@ pub(crate) fn render(app: &AppState, frame: &mut Frame, screen: Rect) {
             )],
         );
     }
-    let divider_y = rect.y.saturating_add(rect.height.saturating_sub(4));
+    let divider_y = rect.y.saturating_add(rect.height.saturating_sub(5));
     let divider_rect = Rect::new(
         rect.x.saturating_add(1),
         divider_y,
@@ -195,7 +192,8 @@ fn footer(app: &AppState, frame: &mut Frame, rect: Rect) {
     let queued = capture.queued_count;
     let active = capture.active_count;
     let rows = [
-        "Enter save · Ctrl+S spawn · Esc close".to_string(),
+        "Enter save · Ctrl+Enter research · Ctrl+S spawn · Esc close".to_string(),
+        "Shift+Enter newline".to_string(),
         format!(
             "queue {queued}/{} · active {active}/{}",
             app.focus_queue_limit, app.focus_spawn_limit
@@ -206,7 +204,7 @@ fn footer(app: &AppState, frame: &mut Frame, rect: Rect) {
         let text: String = row.chars().take(width as usize).collect();
         line(
             frame,
-            Rect::new(rect.x + 2, rect.y + rect.height - 3 + i as u16, width, 1),
+            Rect::new(rect.x + 2, rect.y + rect.height - 4 + i as u16, width, 1),
             vec![Span::styled(
                 text,
                 Style::default()
@@ -302,14 +300,14 @@ mod tests {
     fn geometry_grows_caps_scrolls_and_leaves_floor_and_sides() {
         let (app, _) = draw(160, 32, "a");
         let rect = capture_rect(&app, Rect::new(0, 0, 160, 32)).unwrap();
-        assert_eq!(rect, Rect::new(1, 23, 158, 8));
+        assert_eq!(rect, Rect::new(1, 21, 158, 10));
         let (app, _) = draw(40, 32, &"a".repeat(100));
         let rect = capture_rect(&app, Rect::new(0, 0, 40, 32)).unwrap();
-        assert_eq!(rect.height, 9);
+        assert_eq!(rect.height, 11);
         let long = "a\n".repeat(40);
         let (app, _) = draw(40, 20, &long);
         let rect = capture_rect(&app, Rect::new(0, 0, 40, 20)).unwrap();
-        assert_eq!(rect.height, 11);
+        assert_eq!(rect.height, 13);
         assert_eq!(rect.bottom(), 19);
         assert!(hit_test(&app, Rect::new(0, 0, 40, 20), rect.x, rect.y));
         let (tiny, _) = draw(20, 10, "tiny");
@@ -321,18 +319,18 @@ mod tests {
     fn render_footer_and_dimmed_underlay() {
         let (app, terminal) = draw(160, 32, "");
         let rect = capture_rect(&app, terminal.backend().buffer().area).unwrap();
-        let footer1 = row(&terminal, rect.y + rect.height - 3);
+        let footer1 = row(&terminal, rect.y + rect.height - 4);
         let footer2 = row(&terminal, rect.y + rect.height - 2);
-        assert!(footer1.contains("Enter save · Ctrl+S spawn · Esc close"));
+        assert!(footer1.contains("Enter save · Ctrl+Enter research · Ctrl+S spawn"));
         assert!(footer2.contains("queue 0/10 · active 0/3"));
         let cell = &terminal.backend().buffer()[(0, 0)];
         assert_eq!(cell.fg, app.palette.overlay1);
         assert!(!cell.modifier.contains(Modifier::BOLD));
         let (_, narrow) = draw(100, 24, "");
         let narrow_area = narrow.backend().buffer().area;
-        let narrow_rect = Rect::new(1, narrow_area.height - 9, 98, 8);
-        assert!(row(&narrow, narrow_rect.y + 5).contains("Enter save"));
-        assert!(row(&narrow, narrow_rect.y + 6).contains("queue"));
+        let narrow_rect = Rect::new(1, narrow_area.height - 11, 98, 10);
+        assert!(row(&narrow, narrow_rect.y + 6).contains("Enter save"));
+        assert!(row(&narrow, narrow_rect.y + 8).contains("queue"));
         let mut closed = AppState::test_new();
         let mut empty = Terminal::new(TestBackend::new(30, 10)).unwrap();
         empty
@@ -391,5 +389,29 @@ mod tests {
                 "│"
             );
         }
+    }
+
+    #[test]
+    fn urgent_reason_uses_its_own_row_below_the_draft() {
+        let mut app = AppState::test_new();
+        app.capture = Some(crate::app::capture::CaptureState {
+            text: "draft text".into(),
+            restored_age: None,
+            error: None,
+            gate_reason: Some("urgent".into()),
+            entering_reason: true,
+            queued_count: 0,
+            spawned_count: 0,
+            active_count: 3,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal
+            .draw(|frame| render(&app, frame, frame.area()))
+            .unwrap();
+        let rect = capture_rect(&app, terminal.backend().buffer().area).unwrap();
+        let text_y = rect.y + 2;
+        let reason_y = text_y + 2;
+        assert!(row(&terminal, text_y).contains("draft text"));
+        assert!(row(&terminal, reason_y).contains("urgent reason: urgent"));
     }
 }

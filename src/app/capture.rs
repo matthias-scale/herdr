@@ -103,6 +103,27 @@ impl CaptureState {
 }
 
 impl crate::app::state::AppState {
+    pub(crate) fn focus_active_agent_count(&self) -> usize {
+        self.workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.panes.values())
+            .filter(|pane| {
+                self.terminals
+                    .get(&pane.attached_terminal_id)
+                    .is_some_and(|terminal| {
+                        let projection = pane.agent_projection(terminal);
+                        !projection.stale
+                            && matches!(
+                                projection.state,
+                                crate::detect::AgentState::Working
+                                    | crate::detect::AgentState::Blocked
+                            )
+                    })
+            })
+            .count()
+    }
+
     pub(crate) fn open_capture(&mut self) {
         if self.capture.is_some() {
             return;
@@ -127,23 +148,7 @@ impl crate::app::state::AppState {
             entering_reason: false,
             queued_count: counts.queued,
             spawned_count: counts.spawned,
-            active_count: self
-                .workspaces
-                .iter()
-                .flat_map(|workspace| workspace.tabs.iter())
-                .flat_map(|tab| tab.panes.values())
-                .filter(|pane| {
-                    self.terminals
-                        .get(&pane.attached_terminal_id)
-                        .is_some_and(|terminal| {
-                            matches!(
-                                terminal.raw_agent_state(),
-                                crate::detect::AgentState::Working
-                                    | crate::detect::AgentState::Blocked
-                            )
-                        })
-                })
-                .count(),
+            active_count: self.focus_active_agent_count(),
         });
     }
 }

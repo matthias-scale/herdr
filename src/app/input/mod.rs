@@ -586,7 +586,7 @@ impl App {
             }
             Some(crate::app::capture::CaptureAction::Consumed) => self.persist_capture_draft(),
             Some(crate::app::capture::CaptureAction::Spawn) => {
-                let active = self.focus_active_count();
+                let active = self.state.focus_active_agent_count();
                 if active >= self.state.focus_spawn_limit {
                     if let Some(capture) = self.state.capture.as_mut() {
                         capture.gate_reason = Some(String::new());
@@ -617,26 +617,6 @@ impl App {
             }
             None => {}
         }
-    }
-
-    fn focus_active_count(&self) -> usize {
-        self.state
-            .workspaces
-            .iter()
-            .flat_map(|workspace| workspace.tabs.iter())
-            .flat_map(|tab| tab.panes.values())
-            .filter(|pane| {
-                self.state
-                    .terminals
-                    .get(&pane.attached_terminal_id)
-                    .is_some_and(|terminal| {
-                        matches!(
-                            terminal.raw_agent_state(),
-                            crate::detect::AgentState::Working | crate::detect::AgentState::Blocked
-                        )
-                    })
-            })
-            .count()
     }
 
     fn save_capture(&mut self, research: bool, spawn: bool, reason: Option<&str>) {
@@ -670,36 +650,54 @@ impl App {
         }
         match crate::focus_capture::add_item(&self.state.focus_dir, &text, research) {
             Ok(item) => {
-                let action = if spawn {
-                    "spawn"
-                } else if research {
-                    "research"
-                } else {
-                    "save"
-                };
-                let _ = crate::focus_capture::append_capture_log(
-                    &self.state.focus_dir,
-                    action,
-                    &item.title,
-                    reason,
-                );
+                let action = if research { "research" } else { "save" };
                 if spawn {
+                    let mut home = self.state.new_home_state();
+                    home.prompt = text;
+                    self.state.home = Some(home);
+                    let dispatch_succeeded = self.dispatch_home_prompt();
+                    if !dispatch_succeeded {
+                        let message = self
+                            .state
+                            .home
+                            .as_ref()
+                            .and_then(|home| home.dispatch_error.as_deref())
+                            .unwrap_or("dispatch failed");
+                        let _ = crate::focus_capture::append_capture_log(
+                            &self.state.focus_dir,
+                            "spawn_failed",
+                            &item.title,
+                            reason,
+                        );
+                        if let Some(capture) = self.state.capture.as_mut() {
+                            capture.error = Some(message.to_string());
+                        }
+                        return;
+                    }
                     if let Err(error) = crate::focus_capture::mark_spawned(&item.path, reason) {
                         if let Some(capture) = self.state.capture.as_mut() {
                             capture.error = Some(error.to_string());
                         }
                         return;
                     }
-                }
-                self.state.sidebar_presentation.save_capture_draft(None);
-                self.state.capture = None;
-                if spawn {
-                    let mut home = self.state.new_home_state();
-                    home.prompt = text;
-                    self.state.home = Some(home);
-                    self.dispatch_home_prompt();
+                    let _ = crate::focus_capture::append_capture_log(
+                        &self.state.focus_dir,
+                        "spawn",
+                        &item.title,
+                        reason,
+                    );
+                    self.state.sidebar_presentation.save_capture_draft(None);
+                    self.state.capture = None;
                     return;
                 }
+                let _ = crate::focus_capture::append_capture_log(
+                    &self.state.focus_dir,
+                    action,
+                    &item.title,
+                    reason,
+                );
+                self.state.sidebar_presentation.save_capture_draft(None);
+                self.state.capture = None;
                 self.state.capture_ack = Some(crate::app::capture::CaptureAck {
                     text: if research {
                         "saved · research queued".into()
@@ -1524,14 +1522,14 @@ impl App {
         true
     }
 
-    fn dispatch_home_prompt(&mut self) {
+    fn dispatch_home_prompt(&mut self) -> bool {
         if self
             .state
             .home
             .as_ref()
             .is_some_and(|home| home.pending_dispatch.is_some())
         {
-            return;
+            return false;
         }
         let Some(plan) = self
             .state
@@ -1555,11 +1553,13 @@ impl App {
                 target: None,
             });
             self.sync_toast_deadline(previous_toast);
-            return;
+            return false;
         };
 
         let dispatch = self.dispatch_home_plan(plan);
+        let succeeded = dispatch.is_ok();
         self.finish_home_dispatch(dispatch);
+        succeeded
     }
 
     pub(super) fn dispatch_sidebar_work_group_plan(

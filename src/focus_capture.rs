@@ -125,16 +125,42 @@ pub(crate) fn mark_spawned(path: &Path, reason: Option<&str>) -> std::io::Result
         ));
     }
     updated.push_str(&raw[end..]);
-    let temp = path.with_file_name(format!(".spawned-{}.tmp", std::process::id()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut reserved = None;
+    for attempt in 0..16 {
+        let temp = parent.join(format!(".spawned-{}-{attempt}.tmp", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => {
+                reserved = Some((temp, file));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let Some((temp, mut file)) = reserved else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not reserve temporary file",
+        ));
+    };
     use std::io::Write;
-    file.write_all(updated.as_bytes())?;
-    file.sync_all()?;
-    drop(file);
-    std::fs::rename(temp, path)
+    let result = (|| {
+        file.write_all(updated.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp);
+    }
+    result
 }
 
 pub(crate) fn append_capture_log(
@@ -549,6 +575,23 @@ mod tests {
         assert_eq!(record["reason"], "urgent work");
         assert!(record["ts"].as_str().is_some());
         let _ = queued;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mark_spawned_skips_an_existing_temp_name() {
+        let root = temp();
+        let item = add_item(&root, "spawn me", false).unwrap();
+        let collision = root.join(format!(".spawned-{}-0.tmp", std::process::id()));
+        std::fs::write(&collision, "owned by another operation").unwrap();
+        mark_spawned(&item.path, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(collision).unwrap(),
+            "owned by another operation"
+        );
+        assert!(std::fs::read_to_string(item.path)
+            .unwrap()
+            .contains("spawned:"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
