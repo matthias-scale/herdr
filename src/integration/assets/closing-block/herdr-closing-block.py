@@ -96,18 +96,29 @@ def _pending_agent_calls(rows: list[dict]) -> str | None:
     """Return transcript evidence of running, unknown, or no outstanding work."""
     pending: dict[str, str] = {}
     background_bash_ids: set[str] = set()
+    # A row we cannot pair reliably may hide live work, so it rules out idle.
+    malformed = False
     for row in rows:
-        message = row.get("message") if isinstance(row.get("message"), dict) else {}
+        message = row.get("message", {})
+        if not isinstance(message, dict):
+            malformed = True
+            continue
         contents = message.get("content")
+        if contents is None or isinstance(contents, str):
+            continue
         if not isinstance(contents, list):
+            malformed = True
             continue
         for content in contents:
             if not isinstance(content, dict):
+                malformed = True
                 continue
             if content.get("type") == "tool_use":
                 call_id = content.get("id")
                 name = content.get("name")
-                if isinstance(call_id, str) and isinstance(name, str):
+                if not (isinstance(call_id, str) and isinstance(name, str)):
+                    malformed = True
+                else:
                     pending[call_id] = name.casefold()
                     tool_input = content.get("input")
                     if (
@@ -118,7 +129,9 @@ def _pending_agent_calls(rows: list[dict]) -> str | None:
                         background_bash_ids.add(call_id)
             elif content.get("type") == "tool_result":
                 call_id = content.get("tool_use_id")
-                if isinstance(call_id, str):
+                if not isinstance(call_id, str):
+                    malformed = True
+                else:
                     if call_id in background_bash_ids:
                         result_content = content.get("content")
                         if isinstance(result_content, str):
@@ -137,7 +150,7 @@ def _pending_agent_calls(rows: list[dict]) -> str | None:
                     pending.pop(call_id, None)
     if any(name in {"task", "agent"} for name in pending.values()):
         return "running"
-    return "unknown" if pending else None
+    return "unknown" if pending or malformed else None
 
 
 def _no_record_activity(

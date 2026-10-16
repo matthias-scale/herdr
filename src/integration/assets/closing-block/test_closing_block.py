@@ -2500,6 +2500,32 @@ class StopHookTranscriptTests(unittest.TestCase):
             )
         self.assertEqual(state, "unknown")
 
+    def test_structurally_malformed_tool_rows_are_not_idle(self):
+        hook = self._hook_module()
+        cases = [
+            {"type": "assistant", "message": "not-a-dict"},
+            {"type": "assistant", "message": {"content": {"type": "tool_use"}}},
+            {"type": "assistant", "message": {"content": ["not-a-dict"]}},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Task"}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result"}]}},
+        ]
+        for row in cases:
+            with self.subTest(row=row):
+                with mock.patch.object(hook, "pane_activity", return_value=(0, False)):
+                    state = hook._no_record_activity(
+                        {}, "w1:p1", "/tmp/herdr.sock", [row], transcript_known=True
+                    )
+                self.assertEqual(state, "unknown")
+
+    def test_plain_text_rows_do_not_block_idle(self):
+        hook = self._hook_module()
+        rows = [{"type": "summary"}, {"type": "user", "message": {"content": "hi"}}]
+        with mock.patch.object(hook, "pane_activity", return_value=(0, False)):
+            state = hook._no_record_activity(
+                {}, "w1:p1", "/tmp/herdr.sock", rows, transcript_known=True
+            )
+        self.assertEqual(state, "idle")
+
     def test_malformed_middle_transcript_row_is_not_idle(self):
         hook = self._hook_module()
         path = self._write_transcript(['{"type":"user"}', '{broken', '{"type":"user"}'])
