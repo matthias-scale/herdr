@@ -1546,8 +1546,14 @@ impl AppState {
                     if let Some(agent_ref) = crate::ui::remote_agent_row_at(self, mouse.row) {
                         self.sidebar_selected_work_group = None;
                         self.select_remote_agent_row(agent_ref.clone());
-                        self.remote_agent_presses
-                            .insert(source_id, RemoteAgentPressState { agent_ref });
+                        self.remote_agent_presses.insert(
+                            source_id,
+                            RemoteAgentPressState {
+                                agent_ref,
+                                start_col: mouse.column,
+                                start_row: mouse.row,
+                            },
+                        );
                         return None;
                     }
                     if let Some(key) =
@@ -1758,7 +1764,15 @@ impl AppState {
                     return None;
                 }
 
-                if self.remote_agent_presses.remove(&source_id).is_some() {
+                if let Some(press) = self.remote_agent_presses.get(&source_id) {
+                    if mouse
+                        .column
+                        .abs_diff(press.start_col)
+                        .max(mouse.row.abs_diff(press.start_row))
+                        >= TAB_DRAG_THRESHOLD
+                    {
+                        self.remote_agent_presses.remove(&source_id);
+                    }
                     return None;
                 }
 
@@ -1998,9 +2012,17 @@ impl AppState {
                 let agent_press = self.agent_presses.remove(&source_id);
                 let remote_agent_press = self.remote_agent_presses.remove(&source_id);
                 let remote_agent_action = remote_agent_press.and_then(|press| {
-                    (in_sidebar
-                        && crate::ui::remote_agent_row_at(self, mouse.row).as_ref()
-                            == Some(&press.agent_ref))
+                    // Fleet updates can move rows during a click. Validate the
+                    // gesture against its press geometry and stable identity.
+                    (mouse
+                        .column
+                        .abs_diff(press.start_col)
+                        .max(mouse.row.abs_diff(press.start_row))
+                        < TAB_DRAG_THRESHOLD
+                        && self
+                            .remote_agent_panel_entries
+                            .iter()
+                            .any(|entry| entry.agent_ref == press.agent_ref))
                     .then_some(MouseAction::OpenFleetHost {
                         name: press.agent_ref.host,
                         focus_agent: Some(press.agent_ref.agent),
@@ -5234,6 +5256,192 @@ mod tests {
             app.state.sidebar_selected_remote_agent.as_ref(),
             Some(&agent_ref)
         );
+    }
+
+    fn install_remote_click_snapshot(app: &mut App, first_age: u64, include_first: bool) {
+        let mut first =
+            crate::fleet::FleetRow::test_agent_row_with_state("ub1", "pane/first", "working");
+        first.age_s = Some(first_age);
+        let mut second =
+            crate::fleet::FleetRow::test_agent_row_with_state("ub1", "pane/second", "working");
+        second.age_s = Some(10);
+        let entries = if include_first {
+            vec![first, second]
+        } else {
+            vec![second]
+        };
+        let snapshot = crate::fleet::Snapshot {
+            config_generation: app.fleet_poller_config.generation(),
+            hosts: vec![crate::fleet::HostSnapshot {
+                name: "ub1".into(),
+                target: "ub1".into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: crate::fleet::HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                remote_identity: None,
+                sessions: None,
+                reachable: true,
+                last_seen_unix_ms: None,
+                entries,
+            }],
+            ..Default::default()
+        };
+        app.install_fleet_snapshot_for_test(snapshot);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+    }
+
+    fn remote_click_fixture() -> (App, crate::api::schema::AgentRef, u16, u16) {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.state.sidebar_sections_layout = true;
+        install_remote_click_snapshot(&mut app, 1, true);
+        let agent_ref =
+            crate::api::schema::AgentRef::new("ub1", "pane/first").expect("remote reference");
+        let row =
+            crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
+                .into_iter()
+                .find(|row| row.agent_ref == agent_ref)
+                .expect("remote row");
+        (app, agent_ref, row.rect.x + 2, row.rect.y)
+    }
+
+    fn press_remote_click(app: &mut App, column: u16, row: u16) {
+        assert!(app
+            .state
+            .handle_mouse(
+                &mut app.terminal_runtimes,
+                crate::app::LOCAL_INPUT_SOURCE,
+                mouse(MouseEventKind::Down(MouseButton::Left), column, row)
+            )
+            .is_none());
+    }
+
+    fn assert_remote_click_opens(
+        app: &mut App,
+        agent_ref: &crate::api::schema::AgentRef,
+        column: u16,
+        row: u16,
+    ) {
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(MouseEventKind::Up(MouseButton::Left), column, row),
+        );
+        assert!(
+            matches!(action, Some(MouseAction::OpenFleetHost { name, focus_agent })
+            if name == agent_ref.host && focus_agent.as_ref() == Some(&agent_ref.agent)),
+            "release must open pressed agent"
+        );
+    }
+
+    #[test]
+    fn remote_click_survives_reordering_fleet_update() {
+        let (mut app, agent_ref, column, row) = remote_click_fixture();
+        press_remote_click(&mut app, column, row);
+        install_remote_click_snapshot(&mut app, 60, true);
+        assert_ne!(
+            crate::ui::remote_agent_row_at(&app.state, row).as_ref(),
+            Some(&agent_ref),
+            "fleet update must move the pressed agent"
+        );
+        assert_remote_click_opens(&mut app, &agent_ref, column, row);
+    }
+
+    #[test]
+    fn remote_click_static_opens_pressed_agent() {
+        let (mut app, agent_ref, column, row) = remote_click_fixture();
+        press_remote_click(&mut app, column, row);
+        assert_remote_click_opens(&mut app, &agent_ref, column, row);
+    }
+
+    #[test]
+    fn remote_click_survives_unchanged_fleet_update() {
+        let (mut app, agent_ref, column, row) = remote_click_fixture();
+        press_remote_click(&mut app, column, row);
+        install_remote_click_snapshot(&mut app, 1, true);
+        assert_remote_click_opens(&mut app, &agent_ref, column, row);
+    }
+
+    #[test]
+    fn remote_click_drag_away_then_back_cancels_open() {
+        let (mut app, _, column, row) = remote_click_fixture();
+        press_remote_click(&mut app, column, row);
+        assert!(app
+            .state
+            .handle_mouse(
+                &mut app.terminal_runtimes,
+                crate::app::LOCAL_INPUT_SOURCE,
+                mouse(
+                    MouseEventKind::Drag(MouseButton::Left),
+                    column + TAB_DRAG_THRESHOLD,
+                    row
+                )
+            )
+            .is_none());
+        assert!(app
+            .state
+            .handle_mouse(
+                &mut app.terminal_runtimes,
+                crate::app::LOCAL_INPUT_SOURCE,
+                mouse(MouseEventKind::Up(MouseButton::Left), column, row)
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn remote_click_stationary_drag_event_preserves_click() {
+        let (mut app, agent_ref, column, row) = remote_click_fixture();
+        press_remote_click(&mut app, column, row);
+        assert!(app
+            .state
+            .handle_mouse(
+                &mut app.terminal_runtimes,
+                crate::app::LOCAL_INPUT_SOURCE,
+                mouse(MouseEventKind::Drag(MouseButton::Left), column, row)
+            )
+            .is_none());
+        assert_remote_click_opens(&mut app, &agent_ref, column, row);
+    }
+
+    #[test]
+    fn remote_click_removed_agent_cancels_open() {
+        let (mut app, _, column, row) = remote_click_fixture();
+        press_remote_click(&mut app, column, row);
+        install_remote_click_snapshot(&mut app, 1, false);
+        assert!(app
+            .state
+            .handle_mouse(
+                &mut app.terminal_runtimes,
+                crate::app::LOCAL_INPUT_SOURCE,
+                mouse(MouseEventKind::Up(MouseButton::Left), column, row)
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn remote_click_release_movement_cancels_open() {
+        for (delta_col, delta_row) in [(TAB_DRAG_THRESHOLD, 0), (0, TAB_DRAG_THRESHOLD)] {
+            let (mut app, _, column, row) = remote_click_fixture();
+            press_remote_click(&mut app, column, row);
+            assert!(app
+                .state
+                .handle_mouse(
+                    &mut app.terminal_runtimes,
+                    crate::app::LOCAL_INPUT_SOURCE,
+                    mouse(
+                        MouseEventKind::Up(MouseButton::Left),
+                        column + delta_col,
+                        row + delta_row
+                    )
+                )
+                .is_none());
+        }
     }
 
     #[test]
