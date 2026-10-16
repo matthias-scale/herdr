@@ -175,6 +175,8 @@ impl PaneClickState {
 
 pub struct App {
     pub state: AppState,
+    #[cfg(test)]
+    pub(crate) capture_dispatch_should_fail: bool,
     /// Attached client whose overlay is currently swapped into `state`.
     /// Deferred worktree operations copy this id into their completion event.
     pub(crate) active_overlay_client_id: Option<u64>,
@@ -1737,6 +1739,8 @@ impl App {
         });
 
         let mut app = Self {
+            #[cfg(test)]
+            capture_dispatch_should_fail: false,
             config_diagnostic_deadline: None,
             toast_deadline: None,
             copy_feedback_deadline: None,

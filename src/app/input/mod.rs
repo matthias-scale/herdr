@@ -1523,6 +1523,13 @@ impl App {
     }
 
     fn dispatch_home_prompt(&mut self) -> bool {
+        #[cfg(test)]
+        if self.capture_dispatch_should_fail {
+            if let Some(home) = self.state.home.as_mut() {
+                home.dispatch_error = Some("test dispatch failure".into());
+            }
+            return false;
+        }
         if self
             .state
             .home
@@ -7771,6 +7778,139 @@ sidebar_visible = true
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         )
+    }
+
+    fn capture_app() -> (App, std::path::PathBuf) {
+        let mut app = test_app();
+        app.state = crate::app::state::AppState::test_new();
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-capture-app-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        app.state.focus_dir = dir.clone();
+        app.state.capture = Some(crate::app::capture::CaptureState {
+            text: "Urgent task".into(),
+            restored_age: None,
+            error: None,
+            gate_reason: None,
+            entering_reason: false,
+            queued_count: 0,
+            spawned_count: 0,
+            active_count: 0,
+        });
+        (app, dir)
+    }
+
+    fn capture_log(dir: &std::path::Path) -> String {
+        std::fs::read_to_string(dir.join("capture-log.jsonl")).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn capture_under_limit_attempts_spawn_without_reason_prompt() {
+        let (mut app, dir) = capture_app();
+        app.handle_capture_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(app.state.capture.is_none());
+        assert!(capture_log(&dir).contains("\"action\":\"spawn\""));
+        assert!(std::fs::read_to_string(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .find(|e| e.path().extension().is_some_and(|x| x == "md"))
+                .unwrap()
+                .path()
+        )
+        .unwrap()
+        .contains("spawned:"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn capture_at_limit_opens_urgent_reason_prompt() {
+        let (mut app, dir) = capture_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("active")];
+        app.state.ensure_test_terminals();
+        let ws = &app.state.workspaces[0];
+        let pane = ws.tabs[0].panes.values().next().unwrap();
+        app.state
+            .terminals
+            .get_mut(&pane.attached_terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Working,
+            );
+        app.state.focus_spawn_limit = 1;
+        app.handle_capture_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(app.state.capture.as_ref().unwrap().entering_reason);
+        assert!(app
+            .state
+            .capture
+            .as_ref()
+            .unwrap()
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("type a reason"));
+        std::fs::remove_dir_all(dir).unwrap_or(());
+    }
+
+    #[test]
+    fn capture_empty_reason_enter_saves_without_spawning() {
+        let (mut app, dir) = capture_app();
+        let c = app.state.capture.as_mut().unwrap();
+        c.entering_reason = true;
+        c.gate_reason = Some(String::new());
+        app.handle_capture_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.state.capture.is_none());
+        assert!(capture_log(&dir).contains("\"action\":\"save\""));
+        assert!(!capture_log(&dir).contains("spawn_failed"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn capture_nonempty_reason_is_recorded_after_successful_spawn() {
+        let (mut app, dir) = capture_app();
+        let c = app.state.capture.as_mut().unwrap();
+        c.entering_reason = true;
+        c.gate_reason = Some("production incident".into());
+        app.handle_capture_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(capture_log(&dir).contains("production incident"));
+        assert!(capture_log(&dir).contains("\"action\":\"spawn\""));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn capture_queue_full_keeps_draft_and_reports_error() {
+        let (mut app, dir) = capture_app();
+        app.state.focus_queue_limit = 1;
+        crate::focus_capture::add_item(&dir, "Existing", false).unwrap();
+        app.handle_capture_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.state.capture.as_ref().unwrap().text, "Urgent task");
+        assert_eq!(
+            app.state.capture.as_ref().unwrap().error.as_deref(),
+            Some("queue full (1): drop or promote one")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn capture_dispatch_failure_leaves_saved_item_unmarked_and_logs_failure() {
+        let (mut app, dir) = capture_app();
+        app.capture_dispatch_should_fail = true;
+        app.handle_capture_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        let item = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .find(|e| e.path().extension().is_some_and(|x| x == "md"))
+            .unwrap()
+            .path();
+        assert!(!std::fs::read_to_string(item).unwrap().contains("spawned:"));
+        assert!(capture_log(&dir).contains("spawn_failed"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
