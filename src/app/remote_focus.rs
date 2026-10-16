@@ -62,6 +62,19 @@ pub(crate) enum RemoteFocusTransition {
 /// in the resize slot), and detach. `detach` must not block; it releases the
 /// remote lease on a live session and is a no-op otherwise.
 pub(crate) trait RemoteFocusTransport: Send {
+    /// Paint a retained frame before opening a new live stream. Never enables input.
+    fn replay_cached(
+        &mut self,
+        _agent: &AgentRef,
+        _runtime: &crate::terminal::TerminalRuntime,
+    ) -> bool {
+        false
+    }
+    fn cache_frame(&mut self, _agent: &AgentRef, _frame: crate::protocol::TerminalFrame) {}
+    fn cache_snapshot(&mut self, _agent: &AgentRef, _runtime: &crate::terminal::TerminalRuntime) {}
+    fn note_focus(&mut self, _agent: &AgentRef) {}
+    fn prewarm_workspace(&mut self, _workspace: Option<&AgentRef>, _size: (u16, u16)) {}
+
     /// Resolve admission and connection details from the same live snapshot.
     /// Implementations that do not support remote focus reject every alias.
     fn accepts_remote_host(&self, _host: &str) -> bool {
@@ -109,6 +122,7 @@ pub(crate) struct RemoteFocusOperation {
     /// Local proxy pane and its terminal, once the pane exists.
     proxy: Option<(PaneId, TerminalId)>,
     first_frame_processed: bool,
+    live_frame_seen: bool,
     /// The error came from lifecycle reconciliation, not from the transport.
     /// A later detailed failure replaces it.
     error_is_placeholder: bool,
@@ -218,6 +232,7 @@ impl RemoteFocusOperations {
                 operation_state: crate::remote::RemoteFocusOperationState::new(),
                 proxy: None,
                 first_frame_processed: false,
+                live_frame_seen: false,
                 error_is_placeholder: false,
                 created_at: now,
                 operation_sequence,
@@ -773,6 +788,15 @@ impl crate::app::App {
                 return Ok(started);
             }
         };
+        if let Some((_, terminal)) = self
+            .remote_focus_operations
+            .proxy_location(&started.operation_id)
+        {
+            if let Some(runtime) = self.terminal_runtimes.get(&terminal) {
+                self.remote_focus_transport
+                    .replay_cached(&agent_ref, runtime);
+            }
+        }
         let event_tx = self.event_tx.clone();
         if let Err(error) = self.remote_focus_transport.start(
             &started.operation_id,
@@ -907,6 +931,14 @@ impl crate::app::App {
     }
 
     pub(crate) fn reconcile_remote_focus_lifecycle(&mut self) -> bool {
+        let focused = self
+            .state
+            .active
+            .and_then(|i| self.state.workspaces.get(i))
+            .filter(|workspace| workspace.is_fleet)
+            .and(self.state.sidebar_selected_remote_agent.as_ref());
+        self.remote_focus_transport
+            .prewarm_workspace(focused, self.state.estimate_pane_size());
         let terminal_operations = self
             .remote_focus_operations
             .reconcile_terminal_operations(Instant::now());
@@ -988,6 +1020,15 @@ impl crate::app::App {
         let Some(runtime) = self.terminal_runtimes.get(&terminal_id) else {
             return false;
         };
+        let first_live = self
+            .remote_focus_operations
+            .operations
+            .get_mut(operation_id)
+            .is_some_and(|operation| !std::mem::replace(&mut operation.live_frame_seen, true));
+        if first_live {
+            // A short live frame must clear every cached cell and parser mode.
+            runtime.process_remote_frame(b"\x1bc");
+        }
         let painted = runtime.process_remote_frame(&frame.bytes);
         if self
             .remote_focus_operations
@@ -996,6 +1037,25 @@ impl crate::app::App {
             runtime.set_remote_proxy_input_enabled(true);
         }
         painted
+    }
+
+    pub(crate) fn apply_and_cache_remote_focus_frame(
+        &mut self,
+        operation_id: &str,
+        frame: crate::protocol::TerminalFrame,
+    ) {
+        // Ignore queued frames after transport termination, including cache writes.
+        let live = self
+            .remote_focus_operations
+            .operation_state(operation_id)
+            .is_some_and(|state| !state.is_terminal());
+        if !live {
+            return;
+        }
+        self.apply_remote_focus_frame(operation_id, &frame);
+        if let Some(agent) = self.remote_focus_operations.agent_ref(operation_id) {
+            self.remote_focus_transport.cache_frame(agent, frame);
+        }
     }
 
     /// Closes the proxy pane for an operation that failed or closed. Closing
@@ -1038,6 +1098,20 @@ impl crate::app::App {
         {
             self.state.remote_focus_proxy_panes.remove(&pane_id);
         }
+        if let Some(operation_id) = self
+            .remote_focus_operations
+            .proxy_by_terminal
+            .get(terminal_id)
+        {
+            if let Some(operation) = self.remote_focus_operations.operations.get(operation_id) {
+                if operation.first_frame_processed {
+                    if let Some(runtime) = self.terminal_runtimes.get(terminal_id) {
+                        self.remote_focus_transport
+                            .cache_snapshot(&operation.agent_ref, runtime);
+                    }
+                }
+            }
+        }
         let Some(operation_id) = self
             .remote_focus_operations
             .take_proxy_terminal(terminal_id)
@@ -1073,6 +1147,7 @@ mod tests {
         started: Vec<(String, AgentRef)>,
         detached: Vec<String>,
         outbound: Option<tokio::sync::mpsc::Receiver<ProxyOutbound>>,
+        cache: crate::remote::snapshot_cache::SnapshotCache,
     }
 
     #[derive(Debug, Clone, Default)]
@@ -1081,6 +1156,28 @@ mod tests {
     }
 
     impl RemoteFocusTransport for RecordingTransport {
+        fn replay_cached(
+            &mut self,
+            agent: &AgentRef,
+            runtime: &crate::terminal::TerminalRuntime,
+        ) -> bool {
+            self.state
+                .lock()
+                .expect("lock")
+                .cache
+                .replay(agent, |frame| {
+                    runtime.process_remote_frame(&frame.bytes);
+                })
+        }
+        fn cache_frame(&mut self, agent: &AgentRef, frame: crate::protocol::TerminalFrame) {
+            self.state.lock().expect("lock").cache.insert(agent, frame);
+        }
+        fn cache_snapshot(&mut self, agent: &AgentRef, runtime: &crate::terminal::TerminalRuntime) {
+            if let Some(frame) = crate::remote::snapshot_cache::SnapshotCache::capture(runtime) {
+                self.cache_frame(agent, frame);
+            }
+        }
+
         fn start(
             &mut self,
             operation_id: &str,
@@ -1138,6 +1235,62 @@ mod tests {
             .proxy_location(operation_id)
             .expect("proxy location")
             .1
+    }
+
+    #[test]
+    fn snapshot_cache_reopen_paints_before_live_and_keeps_input_closed() {
+        let (mut app, _recording) = proxy_app();
+        let first = app
+            .start_remote_focus_operation(agent_ref())
+            .expect("first open");
+        app.apply_and_cache_remote_focus_frame(
+            &first.operation_id,
+            full_frame(b"cached remote frame"),
+        );
+        // Overflow the bounded delivery journal; close must still retain the screen.
+        for seq in 2..=258 {
+            let mut diff = full_frame(b"\x1b[2;1Hupdated");
+            diff.seq = seq;
+            diff.full = false;
+            app.apply_and_cache_remote_focus_frame(&first.operation_id, diff);
+        }
+        app.apply_remote_focus_transition(&first.operation_id, RemoteFocusTransition::Closed);
+        let reopened = app
+            .start_remote_focus_operation(agent_ref())
+            .expect("reopen");
+        let terminal = proxy_terminal_id(&app, &reopened.operation_id);
+        assert!(app
+            .terminal_runtimes
+            .get(&terminal)
+            .expect("runtime")
+            .visible_text()
+            .contains("cached remote frame"));
+        assert!(!app
+            .remote_focus_operations
+            .input_gate_open(&reopened.operation_id));
+        let mut partial = full_frame(b"\x1b[Hlive preview");
+        partial.full = false;
+        assert!(app.apply_remote_focus_frame(&reopened.operation_id, &partial));
+        assert!(!app
+            .terminal_runtimes
+            .get(&terminal)
+            .expect("runtime")
+            .visible_text()
+            .contains("cached"));
+        assert!(!app
+            .remote_focus_operations
+            .input_gate_open(&reopened.operation_id));
+        app.apply_and_cache_remote_focus_frame(&reopened.operation_id, full_frame(b"live"));
+        let painted = app
+            .terminal_runtimes
+            .get(&terminal)
+            .expect("runtime")
+            .visible_text();
+        assert!(painted.contains("live"));
+        assert!(!painted.contains("cached"));
+        assert!(!app
+            .remote_focus_operations
+            .input_gate_open(&reopened.operation_id));
     }
 
     #[test]

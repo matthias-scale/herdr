@@ -355,6 +355,7 @@ impl App {
         if let Some(agent_ref) =
             focus_agent.and_then(|agent| crate::api::schema::AgentRef::new(name, agent).ok())
         {
+            self.remote_focus_transport.note_focus(&agent_ref);
             let shared_mode = self.state.server_mode();
             let state = &self.state;
             let proxy_pane =

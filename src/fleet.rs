@@ -31,6 +31,37 @@ impl RetryBackoff {
     }
 }
 
+/// Read-only streams are opt-in, scoped to the active remote workspace and
+/// the ten most recently focused panes. Inventory excludes removed panes.
+#[cfg(any(unix, test))]
+pub(crate) fn prewarm_selection<'a>(
+    hosts: impl Iterator<Item = &'a FleetHostConfig>,
+    inventory: &[crate::api::schema::AgentRef],
+    active: &[crate::api::schema::AgentRef],
+    recent: &std::collections::VecDeque<crate::api::schema::AgentRef>,
+) -> HashSet<crate::api::schema::AgentRef> {
+    let wan: HashSet<_> = hosts
+        .filter(|host| host.wan && !host.local)
+        .map(|host| host.name.as_str())
+        .collect();
+    inventory
+        .iter()
+        .filter(|agent| {
+            wan.contains(agent.host.as_str())
+                && (active.iter().any(|active| {
+                    active.host == agent.host
+                        && active.agent.split_once(':').is_some_and(|(workspace, _)| {
+                            agent
+                                .agent
+                                .split_once(':')
+                                .is_some_and(|(candidate, _)| workspace == candidate)
+                        })
+                }) || recent.iter().take(10).any(|previous| previous == *agent))
+        })
+        .cloned()
+        .collect()
+}
+
 fn inventory_poll_due(
     local: bool,
     live: bool,
@@ -5277,6 +5308,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn prewarm_selection_includes_active_workspace_and_last_ten_only_for_wan() {
+        let hosts = [
+            FleetHostConfig {
+                name: "wan".into(),
+                wan: true,
+                ..Default::default()
+            },
+            FleetHostConfig {
+                name: "lan".into(),
+                ..Default::default()
+            },
+        ];
+        let agent = |host: &str, workspace: &str, n| {
+            crate::api::schema::AgentRef::new(host, format!("{workspace}:p{n}")).expect("ref")
+        };
+        let mut inventory: Vec<_> = (0..12).map(|n| agent("wan", "old", n)).collect();
+        inventory.extend([
+            agent("wan", "active", 1),
+            agent("wan", "active", 2),
+            agent("lan", "active", 1),
+        ]);
+        let recent = (0..12).map(|n| agent("wan", "old", n)).collect();
+        let selected = prewarm_selection(
+            hosts.iter(),
+            &inventory,
+            &[agent("wan", "active", 1), agent("lan", "active", 1)],
+            &recent,
+        );
+        assert_eq!(selected.len(), 12);
+        assert!(selected.contains(&agent("wan", "active", 2)));
+        assert!(!selected.contains(&agent("wan", "old", 10)));
+        assert!(selected.iter().all(|agent| agent.host == "wan"));
+        assert!(prewarm_selection(hosts[1..].iter(), &inventory, &[], &recent).is_empty());
+        assert!(prewarm_selection(hosts.iter(), &[], &[], &recent).is_empty());
+    }
+
     fn host(name: &str, local: bool) -> FleetHostConfig {
         FleetHostConfig {
             name: name.to_string(),
@@ -5450,6 +5518,7 @@ mod tests {
                 icon: None,
                 target: target.into(),
                 local: false,
+                wan: false,
                 session: Some("agents".into()),
                 socket: Some("/tmp/herdr.sock".into()),
             }],
