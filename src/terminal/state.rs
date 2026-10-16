@@ -1826,7 +1826,16 @@ impl TerminalState {
                     )
                 }))
         {
-            (AgentState::Unknown, "closing_task_uncertain")
+            if self.fallback_state == AgentState::Working {
+                (AgentState::Working, "screen_over_closing_task_uncertain")
+            } else if self.foreground_process_active && self.effective_agent_label().is_some() {
+                (
+                    AgentState::Working,
+                    "foreground_process_over_closing_task_uncertain",
+                )
+            } else {
+                (AgentState::Unknown, "closing_task_uncertain")
+            }
         } else {
             (state, "lifecycle")
         }
@@ -5583,7 +5592,16 @@ impl TerminalState {
 
     fn lifecycle_state_and_arbitration(&self) -> (AgentState, &'static str) {
         let (detected_state, arbitration) = self.detected_state_and_arbitration();
-        if detected_state == AgentState::Idle
+        if detected_state == AgentState::Unknown
+            && self.foreground_process_active
+            && self.effective_agent_label().is_some()
+            && !self.live_full_lifecycle_hook_authority()
+        {
+            (
+                AgentState::Working,
+                "foreground_process_over_unknown_screen",
+            )
+        } else if detected_state == AgentState::Idle
             && self.effective_agent_label().is_some()
             && self.foreground_process_active
             && !self
@@ -5607,6 +5625,21 @@ impl TerminalState {
             (AgentState::Blocked, "closing_block_gate")
         } else if self.waiting_on_agents() {
             (AgentState::Working, "closing_block_subagents")
+        } else if self.closing_block_reports_unknown_with_screen_fallback() {
+            if matches!(
+                self.fallback_state,
+                AgentState::Working | AgentState::Blocked
+            ) {
+                (self.fallback_state, "screen_over_unknown_hook")
+            } else if self.foreground_process_active && self.effective_agent_label().is_some() {
+                if self.fallback_state == AgentState::Idle {
+                    (AgentState::Idle, "screen_over_unknown_hook")
+                } else {
+                    (AgentState::Working, "foreground_process_over_unknown_hook")
+                }
+            } else {
+                (AgentState::Unknown, "closing_block_report")
+            }
         } else if self.closing_block_non_gate_yields_to_screen() {
             (self.fallback_state, "screen")
         } else if self.visible_working_overrides_idle_hook()
@@ -5627,6 +5660,19 @@ impl TerminalState {
         } else {
             (self.fallback_state, "screen")
         }
+    }
+
+    fn closing_block_reports_unknown_with_screen_fallback(&self) -> bool {
+        self.hook_authority.as_ref().is_some_and(|authority| {
+            authority.state == AgentState::Unknown
+                && authority.retired_at.is_none()
+                && self.hook_authority_is_effective(authority)
+                && (matches!(
+                    self.fallback_state,
+                    AgentState::Working | AgentState::Blocked
+                ) || self.foreground_process_active)
+                && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
+        })
     }
 
     fn visible_working_overrides_idle_hook(&self) -> bool {
@@ -6741,6 +6787,102 @@ mod tests {
         assert_eq!(
             terminal.sidebar_projection(false),
             (AgentState::Unknown, false)
+        );
+    }
+
+    #[test]
+    fn unknown_full_lifecycle_report_falls_back_to_live_screen_or_process() {
+        let now = Instant::now();
+        for (agent, parse_status) in [
+            (
+                Agent::Claude,
+                crate::api::schema::ClosingParseStatus::Malformed,
+            ),
+            (
+                Agent::Claude,
+                crate::api::schema::ClosingParseStatus::Missing,
+            ),
+            (
+                Agent::Codex,
+                crate::api::schema::ClosingParseStatus::Malformed,
+            ),
+        ] {
+            let mut terminal = test_terminal();
+            terminal.set_detected_state(Some(agent), AgentState::Working);
+            terminal.apply_closing_task_report(
+                Some(crate::api::schema::ClosingCompletion::Missing),
+                None,
+                Some(parse_status),
+                Some(false),
+                now,
+            );
+            let source = format!("herdr:{}-closing-block", crate::detect::agent_label(agent));
+            terminal.set_hook_authority_at(
+                source,
+                crate::detect::agent_label(agent).into(),
+                AgentState::Unknown,
+                None,
+                None,
+                Some(1),
+                now,
+            );
+
+            assert_eq!(
+                terminal.sidebar_projection(true),
+                (AgentState::Working, true),
+                "unknown closing metadata must not mask screen working evidence for {agent:?}"
+            );
+        }
+
+        let mut blocked = test_terminal();
+        blocked.set_detected_state(Some(Agent::Claude), AgentState::Blocked);
+        blocked.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Unknown,
+            None,
+            None,
+            Some(1),
+            now,
+        );
+        assert_eq!(
+            blocked.sidebar_projection(true),
+            (AgentState::Blocked, true),
+            "screen blocker detection remains authoritative over unknown closing state"
+        );
+
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Unknown);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Unknown,
+            None,
+            None,
+            Some(1),
+            now,
+        );
+        terminal.set_foreground_process(Some("claude".into()), true, now);
+        assert_eq!(
+            terminal.sidebar_projection(true),
+            (AgentState::Working, true),
+            "a live foreground agent process is positive working evidence"
+        );
+
+        terminal.set_foreground_process(None, false, now);
+        assert_eq!(
+            terminal.sidebar_projection(true),
+            (AgentState::Unknown, true),
+            "unknown is retained without screen or live process evidence"
+        );
+
+        let mut no_closing_tokens = test_terminal();
+        no_closing_tokens.set_detected_state(Some(Agent::Codex), AgentState::Unknown);
+        no_closing_tokens.set_foreground_process(Some("codex".into()), true, now);
+        assert_eq!(
+            no_closing_tokens.sidebar_projection(true),
+            (AgentState::Working, true),
+            "without closing metadata, a live Codex process supplies working evidence"
         );
     }
 

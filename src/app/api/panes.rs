@@ -8206,7 +8206,7 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_idle_report_emits_only_the_final_unknown_status() {
+    fn incomplete_idle_report_falls_back_to_live_screen_status() {
         let (mut app, pane_id) = app_with_test_workspace();
         let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
         let terminal_id = app.state.workspaces[0]
@@ -8231,7 +8231,7 @@ mod tests {
 
         assert_eq!(
             app.pane_info(0, internal_pane_id).unwrap().agent_status,
-            crate::api::schema::AgentStatus::Unknown
+            crate::api::schema::AgentStatus::Working
         );
         let statuses = app
             .event_hub
@@ -8244,7 +8244,10 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(statuses, vec![crate::api::schema::AgentStatus::Unknown]);
+        assert!(
+            statuses.is_empty(),
+            "the existing working state is unchanged"
+        );
     }
 
     #[test]
