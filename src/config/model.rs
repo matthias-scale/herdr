@@ -967,7 +967,7 @@ pub struct KeysConfig {
     pub new_thread: BindingConfig,
     /// Open the spawn dock at the bottom of the pane area. Default: "prefix+y"
     pub new_agent_dock: BindingConfig,
-    /// Capture a thought to the local focus list. Default: "ctrl+alt+r".
+    /// Capture a thought to the local focus list. Default: "alt+t".
     pub capture: BindingConfig,
     /// Enter the Focus Room. Default: "prefix+shift+z".
     pub focus_enter: BindingConfig,
@@ -1965,6 +1965,9 @@ pub struct UiConfig {
     pub hide_whitespace_in_diff: bool,
     /// Render Nerd Font glyphs in the UI and file lists. Default: true.
     pub nerd_font: bool,
+    /// Use companion Herdr Icons subscript glyphs. Default: false. Enable only
+    /// after every displaying client has the updated font; otherwise labels stay plain.
+    pub subscript_glyphs: bool,
     /// Custom icon overrides for Space headers.
     pub icons: UiIconsConfig,
     /// Workspace preselected in the Home composer for a new thread.
@@ -2144,6 +2147,49 @@ impl Default for FleetConfig {
 }
 
 impl FleetConfig {
+    pub fn device_code(host: &str) -> Option<char> {
+        let host = host.trim();
+        if host == "om1" {
+            return Some('o');
+        }
+        let last = host.chars().last()?;
+        if last.is_ascii_digit() {
+            return Some(last);
+        }
+        host.chars().next().map(|c| c.to_ascii_lowercase())
+    }
+
+    pub(crate) fn device_badge_collisions_with_hostname(
+        &self,
+        hostname: Option<String>,
+    ) -> Vec<(String, String, char)> {
+        let resolved = self.resolved_self_name_with_hostname(hostname);
+        let local = resolved.trim();
+        let mut identities = vec![local.to_string()];
+        for host in &self.hosts {
+            let name = if host.local { local } else { host.name.trim() };
+            if !name.is_empty() && !identities.iter().any(|item| item == name) {
+                identities.push(name.to_string());
+            }
+        }
+        let mut collisions = Vec::new();
+        for (index, left) in identities.iter().enumerate() {
+            let Some(code) = Self::device_code(left) else {
+                continue;
+            };
+            for right in identities.iter().skip(index + 1) {
+                if Self::device_code(right) == Some(code) {
+                    collisions.push((left.clone(), right.clone(), code));
+                }
+            }
+        }
+        collisions
+    }
+
+    pub(crate) fn device_badge_collisions(&self) -> Vec<(String, String, char)> {
+        self.device_badge_collisions_with_hostname(crate::platform::hostname())
+    }
+
     pub(crate) fn chrome_host_label_for_resolved_name(&self, resolved: &str) -> String {
         let is_configured = self.configured_self_name().is_some();
         let name = if is_configured {
@@ -2240,6 +2286,8 @@ pub struct FleetHostConfig {
     pub target: String,
     /// Read this machine's socket and run-state directory without SSH.
     pub local: bool,
+    /// Keep read-only pane streams warm on high-latency links. Default: false.
+    pub wan: bool,
     /// Optional Herdr socket override for this host.
     pub socket: Option<String>,
     /// Optional named Herdr session opened when this host is activated.
@@ -2300,7 +2348,7 @@ impl Default for KeysConfig {
             new_workspace: BindingConfig::one("prefix+alt+n"),
             new_thread: BindingConfig::one("prefix+c"),
             new_agent_dock: BindingConfig::one("prefix+y"),
-            capture: BindingConfig::one("ctrl+alt+r"),
+            capture: BindingConfig::one("alt+t"),
             focus_enter: BindingConfig::one("prefix+shift+z"),
             focus_leave: BindingConfig::one("prefix+o"),
             new_worktree: BindingConfig::one("prefix+shift+g"),
@@ -2471,6 +2519,7 @@ impl Default for UiConfig {
             combine_repos_across_hosts: false,
             hide_whitespace_in_diff: false,
             nerd_font: true,
+            subscript_glyphs: false,
             icons: UiIconsConfig::default(),
             new_thread_workspace: NewThreadWorkspaceConfig::CurrentCheckout,
             add_project_start_dir: String::new(),
@@ -2604,6 +2653,102 @@ impl Default for AdvancedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_code_maps_exact_om1_to_o() {
+        assert_eq!(FleetConfig::device_code("om1"), Some('o'));
+    }
+
+    #[test]
+    fn device_code_maps_padded_om1_to_o() {
+        assert_eq!(FleetConfig::device_code(" om1 "), Some('o'));
+    }
+
+    #[test]
+    fn device_badge_collision_pairs_include_local_identity_and_keep_distinct_hosts() {
+        assert_eq!(FleetConfig::device_code(" om1 "), Some('o'));
+        assert_eq!(FleetConfig::device_code("OM1"), Some('1'));
+        assert_eq!(FleetConfig::device_code("om2"), Some('2'));
+        assert_eq!(FleetConfig::device_code("ub1"), Some('1'));
+        assert_eq!(FleetConfig::device_code("ub2"), Some('2'));
+        assert_eq!(FleetConfig::device_code("mbpro"), Some('m'));
+        assert_eq!(FleetConfig::device_code("hetzner"), Some('h'));
+        assert_eq!(FleetConfig::device_code("MBAir"), Some('m'));
+        assert_eq!(FleetConfig::device_code("x"), Some('x'));
+        assert_eq!(FleetConfig::device_code("  "), None);
+
+        let fleet: FleetConfig = toml::from_str(
+            "self_name = 'om1'\n[[hosts]]\nname = 'om1'\nlocal = true\n[[hosts]]\nname = 'ub1'\n[[hosts]]\nname = 'offline1'",
+        ).expect("fleet config");
+        assert_eq!(
+            fleet.device_badge_collisions_with_hostname(Some("ignored".into())),
+            vec![("ub1".into(), "offline1".into(), '1')]
+        );
+    }
+
+    #[test]
+    fn device_badge_collision_detects_an_implicit_local_name() {
+        let fleet: FleetConfig = toml::from_str("[[hosts]]\nname = 'macmini'\ntarget = 'macmini'")
+            .expect("fleet config");
+
+        assert_eq!(
+            fleet.device_badge_collisions_with_hostname(Some("mbpro".into())),
+            vec![("mbpro".into(), "macmini".into(), 'm')]
+        );
+    }
+
+    #[test]
+    fn device_badge_collision_counts_self_name_override_once() {
+        let fleet: FleetConfig = toml::from_str(
+            "self_name = 'om1'\n[[hosts]]\nname = 'local-alias'\nlocal = true\n[[hosts]]\nname = 'other'\ntarget = 'other'",
+        )
+        .expect("fleet config");
+
+        assert_eq!(
+            fleet.device_badge_collisions_with_hostname(Some("ignored".into())),
+            vec![("om1".into(), "other".into(), 'o')]
+        );
+    }
+
+    #[test]
+    fn device_badge_collision_checks_offline_and_filtered_peer_entries() {
+        let fleet: FleetConfig = toml::from_str(
+            "self_name = 'om1'\n[[hosts]]\nname = 'ub1'\ntarget = 'ub1'\n[[hosts]]\nname = 'offline1'\ntarget = 'unreachable'\n[[hosts]]\nname = 'filtered1'\ntarget = 'filtered1'",
+        )
+        .expect("fleet config");
+
+        let selected = std::collections::HashSet::from(["ub1".to_owned()]);
+        assert_eq!(
+            crate::fleet::select_hosts(&fleet, Some(&selected))
+                .expect("filtered fleet")
+                .iter()
+                .map(|host| host.name.as_str())
+                .collect::<Vec<_>>(),
+            ["ub1"]
+        );
+
+        // Collision membership still includes offline and unselected peers.
+        assert_eq!(
+            fleet.device_badge_collisions_with_hostname(Some("ignored".into())),
+            vec![
+                ("ub1".into(), "offline1".into(), '1'),
+                ("ub1".into(), "filtered1".into(), '1'),
+                ("offline1".into(), "filtered1".into(), '1'),
+            ]
+        );
+    }
+
+    #[test]
+    fn device_badge_collision_allows_an_unused_code() {
+        let fleet: FleetConfig = toml::from_str(
+            "self_name = 'om1'\n[[hosts]]\nname = 'ub1'\ntarget = 'ub1'\n[[hosts]]\nname = 'hetzner'\ntarget = 'hetzner'",
+        )
+        .expect("fleet config");
+
+        assert!(fleet
+            .device_badge_collisions_with_hostname(Some("ignored".into()))
+            .is_empty());
+    }
 
     #[test]
     fn stalled_agent_nudge_config_defaults_are_opt_in_and_bounded() {
@@ -3660,6 +3805,9 @@ scrollback_lines = 12345
     #[test]
     fn nerd_font_defaults_on_and_accepts_an_ascii_fallback() {
         assert!(Config::default().ui.nerd_font);
+        assert!(!Config::default().ui.subscript_glyphs);
+        let config: Config = toml::from_str("[ui]\nsubscript_glyphs = true\n").unwrap();
+        assert!(config.ui.subscript_glyphs);
         assert_eq!(Config::default().files.icons, FilesIconConfig::Nerd);
         let config: Config = toml::from_str("[ui]\nnerd_font = false\n").unwrap();
         assert!(!config.ui.nerd_font);
@@ -3735,5 +3883,19 @@ scrollback_lines = 12345
                 cache_read: 0.5,
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod fleet_wan_tests {
+    use super::FleetHostConfig;
+    #[test]
+    fn fleet_host_wan_is_optional_and_defaults_false() {
+        let default: FleetHostConfig =
+            toml::from_str("name = 'remote'\ntarget = 'remote'").expect("host");
+        assert!(!default.wan);
+        let wan: FleetHostConfig =
+            toml::from_str("name = 'remote'\ntarget = 'remote'\nwan = true").expect("WAN host");
+        assert!(wan.wan);
     }
 }

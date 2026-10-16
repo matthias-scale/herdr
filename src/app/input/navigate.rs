@@ -2063,6 +2063,13 @@ fn prefix_binding_for_key(state: &AppState, key: &TerminalKey) -> Option<PrefixB
     })
 }
 
+pub(crate) fn is_capture_prefix_key(state: &AppState, key: &TerminalKey) -> bool {
+    matches!(
+        prefix_binding_for_key(state, key),
+        Some(PrefixBindingMatch::Action(NavigateAction::Capture))
+    )
+}
+
 pub(crate) fn is_window_cycle_key(state: &AppState, key: &TerminalKey) -> bool {
     let action = match state.server_mode() {
         Mode::Prefix => match prefix_binding_for_key(state, key) {
@@ -2444,7 +2451,7 @@ impl App {
 fn window_navigation_order(state: &AppState) -> Vec<WindowCycleTarget> {
     let include_fleet =
         state.window_cycle_mode == crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
-    let rows = crate::ui::sidebar_rows(state);
+    let rows = crate::ui::sidebar::sidebar_navigation_rows(state);
     let mut order = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for row in &rows {
@@ -3085,6 +3092,9 @@ pub(super) fn direct_screen_action_for_key(
     state: &AppState,
     key: &TerminalKey,
 ) -> Option<NavigateAction> {
+    if state.server_mode() == Mode::Prefix && prefix_binding_for_key(state, key).is_some() {
+        return None;
+    }
     let action = action_for_key(state, key.clone(), BindingDispatch::Direct)?;
     matches!(
         action,
@@ -5079,12 +5089,15 @@ mod tests {
             }
         }
 
-        let working = "Working";
+        let working = "working";
+        app.state.toggle_sidebar_group(working);
+        app.state
+            .toggle_sidebar_group(crate::ui::sidebar::DONE_IDLE_SECTION_TITLE);
         assert!(crate::ui::sidebar::section_is_collapsed(
             &app.state, working
         ));
-        assert_eq!(app.state.visible_workspace_order(), vec![0, 1, 2]);
-        assert_eq!(app.state.workspace_at_visible_position(2), Some(2));
+        assert_eq!(app.state.visible_workspace_order(), vec![0, 1]);
+        assert_eq!(app.state.workspace_at_visible_position(2), None);
         let third_workspace = navigate_reserved_action_for_key(
             &app.state,
             &TerminalKey::new(KeyCode::Char('3'), KeyModifiers::empty()),
@@ -5094,18 +5107,18 @@ mod tests {
         execute_navigate_action(&mut app.state, third_workspace);
         assert_eq!(
             app.state.active,
-            Some(2),
-            "device rows have jump numbers even while Working is collapsed"
+            Some(0),
+            "a collapsed Working session has no visible-row jump number"
         );
-        app.state.selected = 2;
+        app.state.selected = 1;
         app.state.move_selected_workspace_by_visible_delta(-1);
-        assert_eq!(app.state.selected, 1, "up follows the previous device row");
-        app.state.selected = 2;
+        assert_eq!(app.state.selected, 0, "up follows the previous project row");
+        app.state.selected = 1;
         app.state.move_selected_workspace_by_visible_delta(1);
-        assert_eq!(app.state.selected, 2, "down stays at the final device row");
+        assert_eq!(app.state.selected, 1, "down stays at the final visible row");
 
         app.state.toggle_sidebar_group(working);
-        assert_eq!(app.state.visible_workspace_order(), vec![0, 1, 2]);
+        assert_eq!(app.state.visible_workspace_order(), vec![0, 2, 1]);
         let third_workspace = navigate_reserved_action_for_key(
             &app.state,
             &TerminalKey::new(KeyCode::Char('3'), KeyModifiers::empty()),
@@ -5114,7 +5127,7 @@ mod tests {
         execute_navigate_action(&mut app.state, third_workspace);
         assert_eq!(
             app.state.active,
-            Some(2),
+            Some(1),
             "expanded Working summary does not duplicate jump numbers"
         );
 
@@ -5130,7 +5143,7 @@ mod tests {
         execute_navigate_action(&mut app.state, second_workspace);
         assert_eq!(
             app.state.active,
-            Some(2),
+            Some(1),
             "filtered workspaces have no jump number"
         );
         let first_workspace = navigate_reserved_action_for_key(
@@ -5351,7 +5364,7 @@ mod tests {
     }
 
     #[test]
-    fn skip_collapsed_cycle_hides_remote_agents_in_collapsed_device_groups() {
+    fn skip_collapsed_cycle_hides_remote_agents_in_collapsed_project_groups() {
         let mut state = AppState::test_new();
         state.workspaces = vec![Workspace::test_new("local")];
         state.ensure_test_terminals();
@@ -5365,9 +5378,16 @@ mod tests {
         state.remote_agent_panel_entries = vec![remote];
         state.remote_agent_device_groups =
             Some(crate::ui::sidebar::remote_agent_device_groups(&state));
-        state
-            .collapsed_sidebar_groups
-            .insert("device:main/ub2".into());
+        let project = crate::ui::sidebar_rows(&state)
+            .into_iter()
+            .find_map(|row| match row {
+                crate::ui::SidebarRow::NestedHeader { key, .. } if key.starts_with("fleet:") => {
+                    Some(key)
+                }
+                _ => None,
+            })
+            .expect("remote project group");
+        state.toggle_sidebar_group(&project);
 
         assert!(!crate::ui::sidebar_rows(&state)
             .iter()
@@ -5377,7 +5397,7 @@ mod tests {
     }
 
     #[test]
-    fn fleet_window_cycle_skips_remote_agents_in_collapsed_device_groups_by_default() {
+    fn fleet_window_cycle_includes_unified_remote_agents_despite_legacy_device_preferences() {
         let mut state = AppState::test_new();
         state.agent_host_name = "ub2".into();
         state.workspaces = vec![Workspace::test_new("local")];
@@ -5398,23 +5418,21 @@ mod tests {
                 .insert(format!("device:main/{host}"));
         }
 
-        assert!(window_navigation_order(&state)
-            .iter()
-            .all(|target| !matches!(target, WindowCycleTarget::Remote(_))));
+        assert_eq!(
+            window_navigation_order(&state)
+                .iter()
+                .filter(|target| matches!(target, WindowCycleTarget::Remote(_)))
+                .count(),
+            2
+        );
     }
 
     #[test]
-    fn next_window_skips_remote_agent_hidden_in_collapsed_device_group() {
+    fn next_window_skips_remote_agent_in_collapsed_state() {
         let (mut app, agent_ref) = app_with_remote_agent();
         app.state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
-        app.state.skip_collapsed_cycle = false;
+        app.state.skip_collapsed_cycle = true;
         app.state.sidebar_sections_layout = true;
-        app.state.remote_agent_device_groups =
-            Some(crate::ui::sidebar::remote_agent_device_groups(&app.state));
-        app.state
-            .collapsed_sidebar_groups
-            .insert(format!("device:main/{}", agent_ref.host));
-
         assert!(!crate::ui::sidebar_rows(&app.state)
             .iter()
             .any(|row| matches!(
@@ -6189,7 +6207,12 @@ mod tests {
                     .collapse_namespace()
                     .to_string()
             };
-            for (title, collapsed) in [(spaces, true), (snoozed, false)] {
+            let lifecycle = if sections {
+                crate::ui::sidebar::DONE_IDLE_SECTION_TITLE
+            } else {
+                snoozed
+            };
+            for (title, collapsed) in [(spaces, true), (lifecycle, false)] {
                 let key = format!("{namespace}:{title}");
                 if crate::ui::sidebar::section_is_collapsed(&app.state, title) != collapsed
                     && !app.state.collapsed_sidebar_groups.remove(&key)
@@ -7330,9 +7353,9 @@ mod tests {
 
             app.state.skip_collapsed_cycle = false;
             assert!(reaches_remote(&app.state), "sections={sections}");
-            // Compact layout keeps the blocker in Needs you; sections layout hides the collapsed device.
+            // Unified state/project rows remain visible across hosts.
             app.state.skip_collapsed_cycle = true;
-            assert_eq!(reaches_remote(&app.state), !sections, "sections={sections}");
+            assert!(reaches_remote(&app.state), "sections={sections}");
         }
     }
 
@@ -10656,11 +10679,8 @@ navigate_pane_down = "ctrl+j"
         app.state.set_server_mode(Mode::Terminal);
         let pane_before = app.state.workspaces[0].focused_pane_id();
 
-        app.handle_key(TerminalKey::new(
-            KeyCode::Char('r'),
-            KeyModifiers::CONTROL | KeyModifiers::ALT,
-        ))
-        .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::ALT))
+            .await;
 
         assert!(app.state.capture.is_some());
         assert_eq!(app.state.workspaces[0].focused_pane_id(), pane_before);
@@ -10677,6 +10697,25 @@ navigate_pane_down = "ctrl+j"
             .await;
 
         assert!(app.state.capture.is_none());
+    }
+
+    #[tokio::test]
+    async fn configured_prefix_t_opens_capture_from_a_pane() {
+        let mut app = app_with_test_workspaces(&["local"]);
+        let mut config = crate::config::Config::default();
+        config.keys.capture = crate::config::BindingConfig::one("prefix+t");
+        app.state.keybinds = config.keybinds();
+        app.state.active = Some(0);
+        app.state.set_server_mode(Mode::Terminal);
+        let pane_before = app.state.workspaces[0].focused_pane_id();
+
+        app.handle_key(TerminalKey::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
+            .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()))
+            .await;
+
+        assert!(app.state.capture.is_some());
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), pane_before);
     }
 
     #[tokio::test]

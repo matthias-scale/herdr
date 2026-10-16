@@ -1368,6 +1368,23 @@ impl Drop for PendingInputReservation {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static AFTER_INPUT_QUEUE_ADMISSION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Pauses a caller after the PTY queue accepted or refused its write and
+/// before the caller's remaining input bookkeeping, so tests can interleave
+/// PTY echo with a caller that has not resumed yet.
+#[cfg(test)]
+fn run_after_input_queue_admission_hook() {
+    let hook = AFTER_INPUT_QUEUE_ADMISSION_HOOK.with(|hook| hook.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 fn mark_input_reflected_through(reflected_input_seq: &AtomicU64, input_delivery_seq: u64) {
     reflected_input_seq.fetch_max(input_delivery_seq, Ordering::AcqRel);
 }
@@ -1780,9 +1797,28 @@ impl PaneRuntimeIo {
         }
     }
 
-    async fn send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
+    async fn send_bytes(
+        &self,
+        bytes: Bytes,
+        mut reservation: PendingInputReservation,
+    ) -> Result<(), mpsc::error::SendError<Bytes>> {
         match self {
-            PaneRuntimeIo::Actor(actor) => actor.write_user_input(bytes).await,
+            PaneRuntimeIo::Actor(actor) => {
+                #[cfg(unix)]
+                {
+                    actor
+                        .write_user_input_with_admission(bytes, || drop(reservation))
+                        .await
+                }
+                #[cfg(windows)]
+                {
+                    let result = actor.write_user_input(bytes).await;
+                    if result.is_ok() {
+                        reservation.mark_delivered();
+                    }
+                    result
+                }
+            }
             PaneRuntimeIo::RemoteProxy {
                 outbound,
                 input_enabled,
@@ -1809,6 +1845,7 @@ impl PaneRuntimeIo {
                     return Err(mpsc::error::SendError(bytes));
                 }
                 permit.send(ProxyOutbound::Input(bytes));
+                reservation.mark_delivered();
                 Ok(())
             }
             #[cfg(test)]
@@ -1824,14 +1861,35 @@ impl PaneRuntimeIo {
                 {
                     return Err(mpsc::error::SendError(bytes));
                 }
-                sender.send(bytes).await
+                let result = sender.send(bytes).await;
+                if result.is_ok() {
+                    reservation.mark_delivered();
+                }
+                result
             }
         }
     }
 
-    fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+    fn try_send_bytes(
+        &self,
+        bytes: Bytes,
+        mut reservation: PendingInputReservation,
+    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         match self {
-            PaneRuntimeIo::Actor(actor) => actor.try_write_user_input(bytes),
+            PaneRuntimeIo::Actor(actor) => {
+                #[cfg(unix)]
+                {
+                    actor.try_write_user_input_with_admission(bytes, || drop(reservation))
+                }
+                #[cfg(windows)]
+                {
+                    let result = actor.try_write_user_input(bytes);
+                    if result.is_ok() {
+                        reservation.mark_delivered();
+                    }
+                    result
+                }
+            }
             PaneRuntimeIo::RemoteProxy {
                 outbound,
                 input_enabled,
@@ -1846,7 +1904,7 @@ impl PaneRuntimeIo {
                 if operation_state.is_terminal() || !input_enabled.load(Ordering::Acquire) {
                     return Err(mpsc::error::TrySendError::Closed(bytes));
                 }
-                outbound
+                let result = outbound
                     .try_send(ProxyOutbound::Input(bytes))
                     .map_err(|error| match error {
                         mpsc::error::TrySendError::Full(ProxyOutbound::Input(bytes)) => {
@@ -1856,7 +1914,11 @@ impl PaneRuntimeIo {
                             mpsc::error::TrySendError::Closed(bytes)
                         }
                         _ => unreachable!("only input is sent as bytes"),
-                    })
+                    });
+                if result.is_ok() {
+                    reservation.mark_delivered();
+                }
+                result
             }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel {
@@ -1871,7 +1933,11 @@ impl PaneRuntimeIo {
                 {
                     return Err(mpsc::error::TrySendError::Closed(bytes));
                 }
-                sender.try_send(bytes)
+                let result = sender.try_send(bytes);
+                if result.is_ok() {
+                    reservation.mark_delivered();
+                }
+                result
             }
         }
     }
@@ -1916,6 +1982,18 @@ impl PaneRuntimeIo {
                 let actor = actor.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
+                    #[cfg(unix)]
+                    {
+                        let result = actor
+                            .write_user_input_with_admission(bytes, || drop(reservation))
+                            .await;
+                        #[cfg(test)]
+                        run_after_input_queue_admission_hook();
+                        if let Err(err) = result {
+                            warn!(error = %err, "failed to send delayed PTY input");
+                        }
+                    }
+                    #[cfg(windows)]
                     match actor.write_user_input(bytes).await {
                         Ok(()) => reservation.mark_delivered(),
                         Err(err) => warn!(error = %err, "failed to send delayed PTY input"),
@@ -2969,6 +3047,7 @@ impl PaneRuntime {
                     }
                 })),
                 pending_user_input: Arc::clone(&pending_input_reservations),
+                input_delivery_seq: Arc::clone(&input_delivery_seq),
             })?)
         };
 
@@ -3247,6 +3326,8 @@ impl PaneRuntime {
                     }
                 })),
                 pending_user_input: Arc::clone(&pending_input_reservations),
+                #[cfg(unix)]
+                input_delivery_seq: Arc::clone(&input_delivery_seq),
             })?)
         };
 
@@ -4135,7 +4216,7 @@ impl PaneRuntime {
         if self.suspended {
             return Ok(());
         }
-        let mut reservation = {
+        let reservation = {
             let mut admission = self
                 .input_admission
                 .lock()
@@ -4145,10 +4226,9 @@ impl PaneRuntime {
             admission.revision = admission.revision.saturating_add(1);
             PendingInputReservation::new(&self.pending_input_reservations, &self.input_delivery_seq)
         };
-        let result = self.io.send_bytes(bytes).await;
-        if result.is_ok() {
-            reservation.mark_delivered();
-        }
+        let result = self.io.send_bytes(bytes, reservation).await;
+        #[cfg(test)]
+        run_after_input_queue_admission_hook();
         result
     }
 
@@ -4160,10 +4240,15 @@ impl PaneRuntime {
             .input_admission
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let result = self.io.try_send_bytes(bytes);
+        let reservation = PendingInputReservation::new(
+            &self.pending_input_reservations,
+            &self.input_delivery_seq,
+        );
+        let result = self.io.try_send_bytes(bytes, reservation);
+        #[cfg(test)]
+        run_after_input_queue_admission_hook();
         if result.is_ok() {
             admission.revision = admission.revision.saturating_add(1);
-            self.input_delivery_seq.fetch_add(1, Ordering::AcqRel);
         }
         result
     }
@@ -4206,6 +4291,15 @@ impl PaneRuntime {
         observation_token: &str,
         bytes: Bytes,
     ) -> ConditionalInputResult {
+        self.try_send_bytes_if_observation_with_guard(observation_token, bytes, || true)
+    }
+
+    pub(crate) fn try_send_bytes_if_observation_with_guard(
+        &self,
+        observation_token: &str,
+        bytes: Bytes,
+        guard: impl FnOnce() -> bool,
+    ) -> ConditionalInputResult {
         if self.suspended || self.is_remote_proxy() {
             return ConditionalInputResult::Failed;
         }
@@ -4238,10 +4332,19 @@ impl PaneRuntime {
                 {
                     return ConditionalInputResult::ConditionMismatch;
                 }
-                match self.io.try_send_bytes(bytes) {
+                if !guard() {
+                    return ConditionalInputResult::ConditionMismatch;
+                }
+                let reservation = PendingInputReservation::new(
+                    &self.pending_input_reservations,
+                    &self.input_delivery_seq,
+                );
+                let result = self.io.try_send_bytes(bytes, reservation);
+                #[cfg(test)]
+                run_after_input_queue_admission_hook();
+                match result {
                     Ok(()) => {
                         admission.revision = admission.revision.saturating_add(1);
-                        self.input_delivery_seq.fetch_add(1, Ordering::AcqRel);
                         ConditionalInputResult::Sent
                     }
                     Err(_) => ConditionalInputResult::Failed,
@@ -5346,6 +5449,396 @@ mod tests {
         runtime.test_process_pty_bytes(b"reflected");
         assert!(runtime.input_observation().is_some());
         assert_eq!(rx.recv().await, Some(Bytes::from_static(b"waiting")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn input_reservation_is_released_when_capacity_wait_is_dropped() {
+        let (runtime, _rx) = PaneRuntime::test_with_channel_capacity(80, 24, 1);
+        let PaneRuntimeIo::TestChannel { sender, .. } = &runtime.io else {
+            panic!("test runtime must use a channel");
+        };
+        sender
+            .try_send(Bytes::from_static(b"fill"))
+            .expect("fill input queue");
+
+        let mut send = Box::pin(runtime.send_bytes(Bytes::from_static(b"cancelled")));
+        assert!(tokio::time::timeout(Duration::from_millis(10), &mut send)
+            .await
+            .is_err());
+        drop(send);
+
+        assert_eq!(
+            runtime.pending_input_reservations.load(Ordering::Acquire),
+            0
+        );
+        assert_eq!(
+            runtime.input_delivery_seq.load(Ordering::Acquire),
+            runtime.reflected_input_seq.load(Ordering::Acquire),
+            "a send dropped before admission does not advance delivery"
+        );
+        assert!(runtime.input_observation().is_some());
+    }
+
+    #[cfg(unix)]
+    struct HandoffSocketPane {
+        runtime: PaneRuntime,
+        shell: std::os::unix::net::UnixStream,
+        _events: mpsc::Receiver<AppEvent>,
+    }
+
+    /// A real Unix actor runtime built by the handoff import path whose PTY
+    /// master is one end of a socket pair. The test plays the shell on the
+    /// other end, so it decides exactly when, and how often, input echoes.
+    #[cfg(unix)]
+    fn handoff_socket_pane() -> HandoffSocketPane {
+        use std::os::fd::IntoRawFd;
+
+        let (master, shell) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        master.set_nonblocking(true).expect("nonblocking master");
+        shell
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("shell read timeout");
+        let (events, events_rx) = mpsc::channel(64);
+        let runtime = PaneRuntime::from_handoff_fd(
+            crate::handoff_runtime::ImportedHandoffRuntime {
+                master_fd: Some(master.into_raw_fd()),
+                state: crate::handoff_runtime::HandoffRuntimeState {
+                    pane_id: 346,
+                    actor_closed: false,
+                    child_pid: 0,
+                    tty_name: None,
+                    rows: 24,
+                    cols: 80,
+                    cell_width_px: 8,
+                    cell_height_px: 16,
+                    keyboard_protocol_flags: 0,
+                    keyboard_protocol_ansi: None,
+                    input_state: None,
+                    terminal_title: None,
+                    initial_history_ansi: None,
+                    agent_activity: None,
+                    agent_state: None,
+                    stall_nudge: None,
+                    human_draft: None,
+                    pane_seen: None,
+                    pane_done_for_ms: None,
+                },
+            },
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .expect("handoff runtime over a socket pair");
+        runtime.set_handoff_reader_paused(false);
+        HandoffSocketPane {
+            runtime,
+            shell,
+            _events: events_rx,
+        }
+    }
+
+    #[cfg(unix)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct InputAccounting {
+        pending: u64,
+        delivered: u64,
+        reflected: u64,
+    }
+
+    #[cfg(unix)]
+    #[derive(Clone)]
+    struct InputCounters {
+        pending: Arc<AtomicU64>,
+        delivered: Arc<AtomicU64>,
+        reflected: Arc<AtomicU64>,
+        content_seq: Arc<AtomicU64>,
+    }
+
+    #[cfg(unix)]
+    impl InputCounters {
+        fn of(runtime: &PaneRuntime) -> Self {
+            Self {
+                pending: Arc::clone(&runtime.pending_input_reservations),
+                delivered: Arc::clone(&runtime.input_delivery_seq),
+                reflected: Arc::clone(&runtime.reflected_input_seq),
+                content_seq: Arc::clone(&runtime.content_seq),
+            }
+        }
+
+        fn snapshot(&self) -> InputAccounting {
+            InputAccounting {
+                pending: self.pending.load(Ordering::Acquire),
+                delivered: self.delivered.load(Ordering::Acquire),
+                reflected: self.reflected.load(Ordering::Acquire),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
+
+    #[cfg(unix)]
+    fn read_shell_side_until(
+        shell: &mut std::os::unix::net::UnixStream,
+        complete: impl Fn(&[u8]) -> bool,
+    ) -> Vec<u8> {
+        use std::io::Read;
+
+        let mut received = Vec::new();
+        let mut buf = [0; 256];
+        while !complete(&received) {
+            let read = shell
+                .read(&mut buf)
+                .expect("actor writes to the shell side");
+            assert_ne!(read, 0, "actor closed the shell side");
+            received.extend_from_slice(&buf[..read]);
+        }
+        received
+    }
+
+    /// Plays the shell: receives the delivered input, then emits it back in
+    /// one write together with a cursor-position query.
+    #[cfg(unix)]
+    fn echo_once(shell: &mut std::os::unix::net::UnixStream, input: &[u8]) {
+        use std::io::Write;
+
+        let delivered = read_shell_side_until(shell, |bytes| bytes.len() >= input.len());
+        assert_eq!(
+            delivered, input,
+            "the shell receives exactly the queued input"
+        );
+        shell
+            .write_all(&[input, CURSOR_POSITION_QUERY].concat())
+            .expect("the shell echoes once");
+    }
+
+    /// The actor writes the cursor-position reply only after the read
+    /// callback that parsed the echo has returned.
+    #[cfg(unix)]
+    fn wait_for_echo_read_callback(shell: &mut std::os::unix::net::UnixStream) {
+        let reply = read_shell_side_until(shell, |bytes| bytes.ends_with(b"R"));
+        assert!(
+            reply.starts_with(b"\x1b["),
+            "cursor-position reply: {reply:?}"
+        );
+    }
+
+    /// Runs `paused` on this thread the next time an input caller returns
+    /// from PTY queue admission, before its remaining bookkeeping.
+    #[cfg(unix)]
+    fn pause_next_caller_after_queue_admission(paused: impl FnOnce() + 'static) {
+        AFTER_INPUT_QUEUE_ADMISSION_HOOK.with(|hook| {
+            assert!(hook.borrow_mut().replace(Box::new(paused)).is_none());
+        });
+    }
+
+    /// While the caller stays paused, the shell echoes the input once and the
+    /// actor finishes the read callback for that sole echo.
+    #[cfg(unix)]
+    fn echo_fully_while_caller_is_paused(
+        pane: &HandoffSocketPane,
+        input: &'static [u8],
+    ) -> (
+        Arc<Mutex<Option<InputAccounting>>>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let mut shell = pane.shell.try_clone().expect("shell clone");
+        let counters = InputCounters::of(&pane.runtime);
+        let paused = Arc::new(Mutex::new(None));
+        let record = Arc::clone(&paused);
+        let (resumed_tx, resumed_rx) = tokio::sync::oneshot::channel();
+        pause_next_caller_after_queue_admission(move || {
+            echo_once(&mut shell, input);
+            wait_for_echo_read_callback(&mut shell);
+            *record.lock().unwrap() = Some(counters.snapshot());
+            let _ = resumed_tx.send(());
+        });
+        (paused, resumed_rx)
+    }
+
+    #[cfg(unix)]
+    fn assert_sole_echo_settled(
+        pane: &mut HandoffSocketPane,
+        paused: Option<InputAccounting>,
+        stale_token: &str,
+    ) {
+        let settled = InputCounters::of(&pane.runtime).snapshot();
+        assert_eq!(
+            settled.delivered, settled.reflected,
+            "the sole echo must reflect the delivered input: {settled:?}"
+        );
+        assert_eq!(
+            settled,
+            InputAccounting {
+                pending: 0,
+                delivered: 1,
+                reflected: 1,
+            }
+        );
+        if let Some(paused) = paused {
+            assert_eq!(
+                paused, settled,
+                "no API hold lingers while paused and resuming delivers nothing more"
+            );
+        }
+
+        let observation = pane
+            .runtime
+            .input_observation()
+            .expect("observation is available after the sole echo");
+        assert!(observation.text.contains("probe"), "{:?}", observation.text);
+        assert_ne!(observation.token, stale_token);
+        assert_eq!(
+            pane.runtime
+                .try_send_bytes_if_observation(stale_token, Bytes::from_static(b"stale")),
+            ConditionalInputResult::ConditionMismatch
+        );
+        assert_eq!(
+            pane.runtime
+                .try_send_bytes_if_observation(&observation.token, Bytes::from_static(b"fresh")),
+            ConditionalInputResult::Sent
+        );
+        assert_eq!(
+            read_shell_side_until(&mut pane.shell, |bytes| bytes.len() >= 5),
+            b"fresh"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_try_send_echoed_while_the_caller_is_paused_leaves_a_fresh_observation() {
+        let mut pane = handoff_socket_pane();
+        let stale = pane.runtime.input_observation().expect("idle").token;
+        let (paused, _resumed) = echo_fully_while_caller_is_paused(&pane, b"probe");
+
+        pane.runtime
+            .try_send_bytes(Bytes::from_static(b"probe"))
+            .expect("input admitted");
+
+        let paused = *paused.lock().unwrap();
+        assert_sole_echo_settled(&mut pane, paused, &stale);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_async_send_echoed_while_the_caller_is_paused_leaves_a_fresh_observation() {
+        let mut pane = handoff_socket_pane();
+        let stale = pane.runtime.input_observation().expect("idle").token;
+        let (paused, _resumed) = echo_fully_while_caller_is_paused(&pane, b"probe");
+
+        pane.runtime
+            .send_bytes(Bytes::from_static(b"probe"))
+            .await
+            .expect("input admitted");
+
+        let paused = *paused.lock().unwrap();
+        assert_sole_echo_settled(&mut pane, paused, &stale);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_delayed_send_echoed_while_its_task_is_paused_leaves_a_fresh_observation() {
+        let mut pane = handoff_socket_pane();
+        let stale = pane.runtime.input_observation().expect("idle").token;
+        let (paused, resumed) = echo_fully_while_caller_is_paused(&pane, b"probe");
+
+        pane.runtime
+            .send_bytes_after(Bytes::from_static(b"probe"), Duration::ZERO);
+        // The delayed task has no await after the hook, so on this
+        // current-thread runtime it has finished once this receive resumes.
+        resumed.await.expect("delayed task reached the pause");
+
+        let paused = *paused.lock().unwrap();
+        assert_sole_echo_settled(&mut pane, paused, &stale);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_guarded_send_echoed_while_the_caller_is_paused_leaves_a_fresh_observation() {
+        let mut pane = handoff_socket_pane();
+        let observation = pane.runtime.input_observation().expect("idle");
+        let mut shell = pane.shell.try_clone().expect("shell clone");
+        let counters = InputCounters::of(&pane.runtime);
+        let content_before = counters.content_seq.load(Ordering::Acquire);
+        let paused = Arc::new(Mutex::new(None));
+        let record = Arc::clone(&paused);
+        pause_next_caller_after_queue_admission(move || {
+            echo_once(&mut shell, b"probe");
+            // The guarded caller holds the screen lock, so the read callback
+            // can only take its input snapshot and then wait for the parser.
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while counters.content_seq.load(Ordering::Acquire) == content_before {
+                assert!(std::time::Instant::now() < deadline, "echo read started");
+                std::thread::yield_now();
+            }
+            *record.lock().unwrap() = Some(counters.snapshot());
+        });
+
+        assert_eq!(
+            pane.runtime
+                .try_send_bytes_if_observation(&observation.token, Bytes::from_static(b"probe")),
+            ConditionalInputResult::Sent
+        );
+        wait_for_echo_read_callback(&mut pane.shell);
+
+        let paused = paused.lock().unwrap().expect("caller paused");
+        assert_eq!(
+            (paused.pending, paused.delivered),
+            (0, 1),
+            "the echo read started after delivery was counted and pending released"
+        );
+        assert_sole_echo_settled(&mut pane, None, &observation.token);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_delayed_send_refused_after_handoff_begins_releases_its_hold_undelivered() {
+        use std::io::Read;
+
+        let mut pane = handoff_socket_pane();
+        let counters = InputCounters::of(&pane.runtime);
+        pane.runtime
+            .pause_handoff_reader(Duration::from_secs(1))
+            .expect("actor quiesces");
+        let (resumed_tx, resumed_rx) = tokio::sync::oneshot::channel();
+        pause_next_caller_after_queue_admission(move || {
+            let _ = resumed_tx.send(());
+        });
+
+        pane.runtime
+            .send_bytes_after(Bytes::from_static(b"late"), Duration::ZERO);
+        assert_eq!(
+            counters.snapshot(),
+            InputAccounting {
+                pending: 1,
+                delivered: 0,
+                reflected: 0,
+            },
+            "the delayed write is pending before it reaches the queue"
+        );
+        assert!(pane.runtime.input_observation().is_none());
+        resumed_rx.await.expect("delayed task reached admission");
+
+        assert_eq!(
+            counters.snapshot(),
+            InputAccounting {
+                pending: 0,
+                delivered: 0,
+                reflected: 0,
+            }
+        );
+        pane.runtime.set_handoff_reader_paused(false);
+        assert!(pane.runtime.input_observation().is_some());
+        pane.shell.set_nonblocking(true).expect("nonblocking shell");
+        assert_eq!(
+            pane.shell.read(&mut [0; 16]).map_err(|err| err.kind()),
+            Err(std::io::ErrorKind::WouldBlock),
+            "refused input never reaches the shell"
+        );
     }
 
     #[tokio::test]

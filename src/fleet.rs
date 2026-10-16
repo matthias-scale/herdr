@@ -1,3 +1,6 @@
+#[cfg(unix)]
+pub(crate) mod channel;
+
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::ffi::OsStr;
@@ -13,6 +16,113 @@ use serde::{Deserialize, Serialize};
 use crate::api::client::{ApiClient, ConnectionTarget};
 use crate::api::schema::{AgentInfo, AgentStatus, EmptyParams, Method, Request, ResponseResult};
 use crate::config::{FleetConfig, FleetHostConfig};
+
+/// Shared by the SSH master and its event subscription supervisor.
+#[derive(Default)]
+struct RetryBackoff(u32);
+
+impl RetryBackoff {
+    fn next_delay(&mut self) -> Duration {
+        let delay = Duration::from_millis(250)
+            .saturating_mul(1_u32.checked_shl(self.0).unwrap_or(u32::MAX))
+            .min(Duration::from_secs(10));
+        self.0 = self.0.saturating_add(1);
+        delay
+    }
+}
+
+/// Read-only streams are opt-in, scoped to the active remote workspace and
+/// the ten most recently focused panes. Inventory excludes removed panes.
+#[cfg(any(unix, test))]
+pub(crate) fn prewarm_selection<'a>(
+    hosts: impl Iterator<Item = &'a FleetHostConfig>,
+    inventory: &[crate::api::schema::AgentRef],
+    active: &[crate::api::schema::AgentRef],
+    recent: &std::collections::VecDeque<crate::api::schema::AgentRef>,
+) -> HashSet<crate::api::schema::AgentRef> {
+    let wan: HashSet<_> = hosts
+        .filter(|host| host.wan && !host.local)
+        .map(|host| host.name.as_str())
+        .collect();
+    inventory
+        .iter()
+        .filter(|agent| {
+            wan.contains(agent.host.as_str())
+                && (active.iter().any(|active| {
+                    active.host == agent.host
+                        && active.agent.split_once(':').is_some_and(|(workspace, _)| {
+                            agent
+                                .agent
+                                .split_once(':')
+                                .is_some_and(|(candidate, _)| workspace == candidate)
+                        })
+                }) || recent.iter().take(10).any(|previous| previous == *agent))
+        })
+        .cloned()
+        .collect()
+}
+
+fn inventory_poll_due(
+    local: bool,
+    live: bool,
+    elapsed: Option<Duration>,
+    interval: Duration,
+) -> bool {
+    let interval = if !local && live {
+        Duration::from_secs(60)
+    } else {
+        interval
+    };
+    elapsed.is_none_or(|elapsed| elapsed >= interval)
+}
+
+/// Cache complete evidence so skipped reads preserve host and producer state.
+struct ScheduledHostReader {
+    poller: FleetPollerHandle,
+    interval: Duration,
+    cache: std::sync::Mutex<HashMap<String, (Instant, HostEvidence)>>,
+}
+
+impl HostReader for ScheduledHostReader {
+    fn fetch_local(
+        &self,
+        host: FleetHostConfig,
+        timeout: Duration,
+        producers: bool,
+    ) -> HostEvidence {
+        SystemHostReader.fetch_local(host, timeout, producers)
+    }
+
+    fn fetch_remote(
+        &self,
+        host: FleetHostConfig,
+        timeout: Duration,
+        producers: bool,
+    ) -> HostEvidence {
+        let now = Instant::now();
+        if let Some((last, evidence)) = self
+            .cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&host.name)
+        {
+            if !inventory_poll_due(
+                false,
+                self.poller.agent_stream_is_live(&host.name),
+                Some(now.saturating_duration_since(*last)),
+                self.interval,
+            ) {
+                return evidence.clone();
+            }
+        }
+        let evidence = SystemHostReader.fetch_remote(host, timeout, producers);
+        self.cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(evidence.host.name.clone(), (now, evidence.clone()));
+        evidence
+    }
+}
 
 const REMOTE_RUNS_MARKER: &[u8] = b"\x1eHERDR_FLEET_RUNS_V1\x1e\n";
 const REMOTE_RUN_RECORD_MARKER: &[u8] = b"\x1eHERDR_FLEET_RUN_V1:";
@@ -44,6 +154,14 @@ type ParsedRemoteOutput = (
 pub(crate) fn run_fleet_command(args: &[String]) -> std::io::Result<i32> {
     match args.first().map(String::as_str) {
         Some("status") => fleet_status(&args[1..]),
+        Some("observation") => {
+            let observation = HostObservation::collect();
+            println!(
+                "{}",
+                serde_json::to_string(&observation).map_err(std::io::Error::other)?
+            );
+            Ok(0)
+        }
         Some("help" | "--help" | "-h") => {
             print_fleet_help();
             Ok(0)
@@ -136,6 +254,8 @@ struct StatusOptions {
 }
 
 fn fleet_status(args: &[String]) -> std::io::Result<i32> {
+    #[cfg(unix)]
+    let _channels = channel::Cleanup;
     let options = match parse_status_options(args) {
         Ok(options) => options,
         Err(message) => {
@@ -371,7 +491,7 @@ pub(crate) struct HostSessionSection {
     pub(crate) pane_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub(crate) struct Snapshot {
     pub(crate) polled: bool,
     #[serde(skip)]
@@ -391,10 +511,130 @@ pub(crate) struct Snapshot {
     pub(crate) inbox: Option<Arc<crate::inbox::ProducerSnapshot>>,
     pub(crate) configured_hosts: Vec<String>,
     pub(crate) hosts: Vec<HostSnapshot>,
+    /// Read-only host resources and provider quota observations. Older hosts
+    /// simply omit this optional surface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) observations: Vec<HostObservation>,
     /// Complete owner catalogs observed by the periodic fleet poll. Admission
     /// happens once when the refresh reaches the app event loop.
     #[serde(skip)]
     pub(crate) group_catalogs: Vec<GroupCatalog>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct HostObservation {
+    pub(crate) host: String,
+    pub(crate) sampled_unix: i64,
+    pub(crate) metrics: crate::platform::status_metrics::StatusMetrics,
+    pub(crate) usage: crate::provider_usage::ProviderUsageSnapshot,
+}
+
+impl HostObservation {
+    fn collect() -> Self {
+        let mut sampler = crate::platform::status_metrics::StatusMetricSampler::new();
+        // CPU is a delta of two samples. The short delay is bounded and this
+        // command only runs from the fleet background collector.
+        let _ = crate::platform::sample_status_metrics(&mut sampler);
+        std::thread::sleep(Duration::from_millis(100));
+        let metrics = crate::platform::sample_status_metrics(&mut sampler);
+        let sampled_unix = crate::provider_usage::now_unix().unwrap_or_default();
+        let usage = crate::provider_usage::collect_fleet(Some(sampled_unix), Instant::now());
+        Self {
+            host: String::new(),
+            sampled_unix,
+            metrics,
+            usage,
+        }
+    }
+}
+
+/// Fleet observations have their own minute cadence. The ordinary agent poll
+/// can run every five seconds without launching provider helpers each time.
+type ObservationCache = std::sync::Mutex<HashMap<String, (Instant, Option<HostObservation>)>>;
+
+fn collect_observations(hosts: &[FleetHostConfig], timeout: Duration) -> Vec<HostObservation> {
+    static CACHE: std::sync::OnceLock<ObservationCache> = std::sync::OnceLock::new();
+    const INTERVAL: Duration = Duration::from_secs(60);
+    let cache = CACHE.get_or_init(Default::default);
+    let now = Instant::now();
+    let pending = {
+        let guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        hosts
+            .iter()
+            .filter(|host| {
+                guard
+                    .get(&observation_cache_key(host))
+                    .is_none_or(|(sampled, _)| now.duration_since(*sampled) >= INTERVAL)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let mut fresh = Vec::new();
+    // Bounded to four host reads at once. A large inventory must never spawn
+    // one blocking SSH process and thread for every configured machine.
+    for batch in pending.chunks(4) {
+        let batch_result = std::thread::scope(|scope| {
+            let workers = batch
+                .iter()
+                .cloned()
+                .map(|host| {
+                    scope.spawn(move || {
+                        let mut observation = if host.local {
+                            Some(HostObservation::collect())
+                        } else {
+                            run_ssh_with_timeout(
+                                &host.target,
+                                "herdr fleet observation --json",
+                                timeout,
+                            )
+                            .ok()
+                            .and_then(|bytes| {
+                                serde_json::from_slice::<HostObservation>(&bytes).ok()
+                            })
+                        };
+                        if let Some(sample) = observation.as_mut() {
+                            sample.host = host.name.clone();
+                        }
+                        (observation_cache_key(&host), observation)
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .filter_map(|worker| worker.join().ok())
+                .collect::<Vec<_>>()
+        });
+        fresh.extend(batch_result);
+    }
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (key, observation) in fresh {
+        let retained =
+            observation.or_else(|| guard.get(&key).and_then(|(_, previous)| previous.clone()));
+        guard.insert(key, (now, retained));
+    }
+    hosts
+        .iter()
+        .filter_map(|host| {
+            guard
+                .get(&observation_cache_key(host))
+                .and_then(|(_, observation)| observation.clone())
+        })
+        .collect()
+}
+
+fn observation_cache_key(host: &FleetHostConfig) -> String {
+    format!(
+        "{}\0{}\0{}\0{}\0{}",
+        host.name,
+        host.target,
+        host.local,
+        host.session.as_deref().unwrap_or_default(),
+        host.socket.as_deref().unwrap_or_default()
+    )
 }
 
 /// Remote devices that need attention in the status row.
@@ -463,6 +703,16 @@ impl Snapshot {
                     .filter(|entry| entry.source == EvidenceSource::Herdr)
                     .cloned(),
             );
+            // Cached fallback evidence must not roll back the session model
+            // received through session.changed or the resubscription seed.
+            if let Some(live) = &existing.sessions {
+                if let Some(incoming) = &mut incoming.sessions {
+                    incoming.snapshot = live.snapshot.clone();
+                    incoming.sections = live.sections.clone();
+                } else {
+                    incoming.sessions = Some(live.clone());
+                }
+            }
             incoming.state = existing.state;
             incoming.error = existing.error.clone();
         }
@@ -1180,6 +1430,12 @@ impl AuthorityMutationRouter {
             .store(config_generation, std::sync::atomic::Ordering::Release);
     }
 
+    #[cfg(test)]
+    pub(crate) fn config_generation_for_test(&self) -> u64 {
+        self.config_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub(crate) fn observe_snapshot(&self, snapshot: &Snapshot) {
         let conflicts = snapshot.identity_conflicts();
         let mut routes = BTreeMap::new();
@@ -1720,6 +1976,18 @@ impl Snapshot {
                 .filter(|inbox| inbox.host == fleet.resolved_inbox_host()),
             configured_hosts: fleet.hosts.iter().map(|host| host.name.clone()).collect(),
             hosts,
+            observations: self
+                .observations
+                .iter()
+                .filter(|observation| {
+                    fleet.hosts.iter().any(|host| {
+                        previous_hosts
+                            .get(observation.host.as_str())
+                            .is_some_and(|previous| previous.matches_config(host))
+                    })
+                })
+                .cloned()
+                .collect(),
             group_catalogs,
         }
     }
@@ -1927,17 +2195,12 @@ impl HostSnapshot {
     }
 }
 
-pub(crate) fn poll(fleet: &FleetConfig) -> Snapshot {
-    poll_without_generation(fleet)
+#[cfg(test)]
+fn poll(fleet: &FleetConfig) -> Snapshot {
+    poll_with_reader(fleet, &SystemHostReader)
 }
 
-fn poll_with_generation(fleet: &FleetConfig, config_generation: u64) -> Snapshot {
-    let mut snapshot = poll(fleet);
-    snapshot.config_generation = config_generation;
-    snapshot
-}
-
-fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
+fn poll_with_reader(fleet: &FleetConfig, reader: &impl HostReader) -> Snapshot {
     let mut polling_fleet = fleet.clone();
     let self_name = polling_fleet.resolved_self_name();
     // Skip the synthetic local host when a configured host already carries the
@@ -1958,12 +2221,19 @@ fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
         );
     }
     match select_hosts(&polling_fleet, None) {
-        Ok(hosts) => collect_snapshot_with_implicit_local(
-            &SystemHostReader,
-            &hosts,
-            &polling_fleet,
-            implicit_local.then(|| polling_fleet.resolved_self_name()),
-        ),
+        Ok(hosts) => {
+            let mut snapshot = collect_snapshot_with_implicit_local(
+                reader,
+                &hosts,
+                &polling_fleet,
+                implicit_local.then(|| polling_fleet.resolved_self_name()),
+            );
+            if !cfg!(test) {
+                snapshot.observations =
+                    collect_observations(&hosts, Duration::from_millis(polling_fleet.timeout_ms));
+            }
+            snapshot
+        }
         Err(error) => {
             let refreshed_at = SystemTime::now();
             Snapshot {
@@ -2007,6 +2277,7 @@ fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
                         entries: Vec::new(),
                     })
                     .collect(),
+                observations: Vec::new(),
                 group_catalogs: Vec::new(),
             }
         }
@@ -2151,6 +2422,14 @@ pub(crate) struct FleetPollerConfig {
 pub(crate) type FleetPollerHandle = Arc<FleetPollerConfig>;
 
 impl FleetPollerConfig {
+    pub(crate) fn fleet(&self) -> FleetConfig {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .fleet
+            .clone()
+    }
+
     fn new(fleet: FleetConfig) -> Self {
         Self {
             state: std::sync::Mutex::new(FleetPollerState {
@@ -2288,20 +2567,41 @@ pub(crate) fn start_poller(
     let stream_config = Arc::clone(&poller_config);
     let stream_events = event_tx.clone();
     let poller_config_for_thread = Arc::clone(&poller_config);
-    std::thread::spawn(move || loop {
-        let state = poller_config_for_thread.snapshot();
-        let snapshot = poll_with_generation(&state.fleet, state.generation);
-        match event_tx.try_send(crate::events::AppEvent::FleetRefreshed { snapshot }) {
-            Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                tracing::warn!("dropped fleet refresh because the event queue is full");
+    std::thread::spawn(move || {
+        #[cfg(unix)]
+        let _channels = channel::Cleanup;
+        let mut reader = ScheduledHostReader {
+            poller: Arc::clone(&poller_config_for_thread),
+            interval: Duration::ZERO,
+            cache: std::sync::Mutex::default(),
+        };
+        let mut generation = None;
+        loop {
+            let state = poller_config_for_thread.snapshot();
+            if generation != Some(state.generation) {
+                reader
+                    .cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear();
+                generation = Some(state.generation);
             }
+            reader.interval =
+                Duration::from_millis(state.fleet.refresh_interval_ms.max(MIN_REFRESH_INTERVAL_MS));
+            let mut snapshot = poll_with_reader(&state.fleet, &reader);
+            snapshot.config_generation = state.generation;
+            match event_tx.try_send(crate::events::AppEvent::FleetRefreshed { snapshot }) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!("dropped fleet refresh because the event queue is full");
+                }
+            }
+            poller_config_for_thread.wait_for_change(
+                state.generation,
+                Duration::from_millis(state.fleet.refresh_interval_ms.max(MIN_REFRESH_INTERVAL_MS)),
+            );
         }
-        poller_config_for_thread.wait_for_change(
-            state.generation,
-            Duration::from_millis(state.fleet.refresh_interval_ms.max(MIN_REFRESH_INTERVAL_MS)),
-        );
     });
     let _ = std::thread::Builder::new()
         .name("herdr-fleet-agent-streams".into())
@@ -2378,6 +2678,7 @@ fn run_remote_agent_stream_worker(
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
     stop: Arc<AtomicBool>,
 ) {
+    let mut retry = RetryBackoff::default();
     while !stop.load(Ordering::Acquire) && !event_tx.is_closed() {
         let (agent_events, session_events) = match remote_host_event_capabilities(&host, timeout) {
             Ok(capabilities) if capabilities.0 || capabilities.1 => capabilities,
@@ -2387,7 +2688,7 @@ fn run_remote_agent_stream_worker(
             }
             Err(error) => {
                 tracing::debug!(host = %host.name, %error, "remote fleet event stream probe failed");
-                wait_for_stream_retry(&stop, Duration::from_secs(10));
+                wait_for_stream_retry(&stop, retry.next_delay());
                 continue;
             }
         };
@@ -2401,15 +2702,19 @@ fn run_remote_agent_stream_worker(
             &stop,
             agent_events,
             session_events,
+            &mut retry,
         );
         poller.set_agent_stream_live(&host.name, config_generation, false);
         if stop.load(Ordering::Acquire) || event_tx.is_closed() {
             break;
         }
+        if matches!(result, Ok(true)) {
+            continue; // events_lost: resubscribe immediately and seed from session.snapshot.
+        }
         if let Err(error) = result {
             tracing::debug!(host = %host.name, %error, "remote fleet event stream disconnected; polling remains active");
         }
-        wait_for_stream_retry(&stop, Duration::from_secs(3));
+        wait_for_stream_retry(&stop, retry.next_delay());
     }
     poller.set_agent_stream_live(&host.name, config_generation, false);
 }
@@ -2423,6 +2728,8 @@ fn remote_host_event_capabilities(
         id: "fleet-agent-events-capability".into(),
         method: Method::Ping(crate::api::schema::PingParams::default()),
     };
+    // The default SSH program routes through channel::run on Unix, sharing
+    // the same master as inventory reads and subscription sessions.
     let response = route_api_request_with_ssh_program(&route, &request, timeout, "ssh")?;
     let value = serde_json::from_str(&response).map_err(|error| error.to_string())?;
     let response =
@@ -2445,84 +2752,36 @@ fn run_remote_agent_stream(
     stop: &AtomicBool,
     agent_events: bool,
     session_events: bool,
-) -> Result<(), String> {
+    retry: &mut RetryBackoff,
+) -> Result<bool, String> {
     let (mut child, lines, reader) =
         spawn_remote_host_stream(host, timeout, agent_events, session_events)?;
-    let mut started = false;
-    let stream_result = 'stream: loop {
+    let mut consumer = RemoteStreamConsumer {
+        host,
+        config_generation,
+        poller,
+        event_tx,
+        agent_events,
+        session_events,
+        started: false,
+        retry,
+    };
+    let stream_result = loop {
         if stop.load(Ordering::Acquire) || event_tx.is_closed() {
-            break Ok(());
+            break Ok(false);
         }
         match lines.recv_timeout(Duration::from_millis(100)) {
-            Ok(Ok(line)) => match parse_remote_agent_stream_line(&line) {
-                Ok(RemoteAgentStreamMessage::Started) => {
-                    started = true;
-                    if agent_events {
-                        poller.set_agent_stream_live(&host.name, config_generation, true);
-                    }
-                    if session_events {
-                        let seed = fetch_remote_session_inventory(host, timeout)
-                            .map_err(|error| {
-                                format!("cannot fetch initial session inventory: {error}")
-                            })
-                            .and_then(|(snapshot, _)| {
-                                send_remote_session_inventory_update(
-                                    host,
-                                    config_generation,
-                                    event_tx,
-                                    snapshot,
-                                )
-                            });
-                        if let Err(error) = seed {
-                            if error == "remote fleet event receiver closed" {
-                                break 'stream Ok(());
-                            }
-                            break 'stream Err(error);
-                        }
-                    }
-                }
-                Ok(RemoteAgentStreamMessage::AgentsChanged(agents)) if started => {
-                    let event = crate::events::AppEvent::FleetAgentInventoryChanged {
-                        host: host.clone(),
-                        config_generation,
-                        agents,
-                    };
-                    match event_tx.try_send(event) {
-                        Ok(()) => {}
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                            break 'stream Ok(())
-                        }
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            tracing::warn!(host = %host.name, "dropped remote fleet agent update because the event queue is full");
-                            break 'stream Err("remote fleet event queue is full".into());
-                        }
-                    }
-                }
-                Ok(RemoteAgentStreamMessage::AgentsChanged(_)) => {
-                    break Err("remote fleet stream sent inventory before its handshake".into());
-                }
-                Ok(RemoteAgentStreamMessage::SessionChanged(snapshot)) if started => {
-                    if let Err(error) = send_remote_session_inventory_update(
-                        host,
-                        config_generation,
-                        event_tx,
-                        *snapshot,
-                    ) {
-                        if error == "remote fleet event receiver closed" {
-                            break 'stream Ok(());
-                        }
-                        break 'stream Err(error);
-                    }
-                }
-                Ok(RemoteAgentStreamMessage::SessionChanged(_)) => {
-                    break Err("remote session stream sent inventory before its handshake".into());
-                }
+            Ok(Ok(line)) => match consumer.consume(&line, || {
+                fetch_remote_session_inventory(host, timeout).map(|(snapshot, _)| snapshot)
+            }) {
+                Ok(true) => break Ok(true),
+                Ok(false) => {}
                 Err(error) => break Err(error),
             },
             Ok(Err(error)) => break Err(format!("cannot read remote fleet stream: {error}")),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break Ok(()),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break Ok(false),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => match child.try_wait() {
-                Ok(Some(_)) => break Ok(()),
+                Ok(Some(_)) => break Ok(false),
                 Ok(None) => {}
                 Err(error) => break Err(error.to_string()),
             },
@@ -2534,11 +2793,87 @@ fn run_remote_agent_stream(
     // only exits once its send fails.
     drop(lines);
     let _ = reader.join();
-    stream_result?;
+    let lost = stream_result?;
+    if lost {
+        return Ok(true);
+    }
     if stop.load(Ordering::Acquire) || event_tx.is_closed() {
-        Ok(())
+        Ok(false)
     } else {
         Err("remote fleet event stream closed".into())
+    }
+}
+
+struct RemoteStreamConsumer<'a> {
+    host: &'a FleetHostConfig,
+    config_generation: u64,
+    poller: &'a FleetPollerHandle,
+    event_tx: &'a tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    agent_events: bool,
+    session_events: bool,
+    started: bool,
+    retry: &'a mut RetryBackoff,
+}
+
+impl RemoteStreamConsumer<'_> {
+    /// True requests an immediate fresh subscription. Its Started response seeds
+    /// session.snapshot before any queued session events are consumed.
+    fn consume(
+        &mut self,
+        line: &str,
+        seed: impl FnOnce() -> Result<crate::api::schema::SessionSnapshot, String>,
+    ) -> Result<bool, String> {
+        match parse_remote_agent_stream_line(line)? {
+            RemoteAgentStreamMessage::Started => {
+                *self.retry = RetryBackoff::default();
+                if self.session_events {
+                    let snapshot = seed()?;
+                    send_remote_session_inventory_update(
+                        self.host,
+                        self.config_generation,
+                        self.event_tx,
+                        snapshot,
+                    )?;
+                }
+                self.started = true;
+                // Agent-only subscriptions have no snapshot seed. Keep normal
+                // polling until an authoritative agent inventory arrives.
+                if self.agent_events && self.session_events {
+                    self.poller.set_agent_stream_live(
+                        &self.host.name,
+                        self.config_generation,
+                        true,
+                    );
+                }
+            }
+            RemoteAgentStreamMessage::EventsLost => {
+                self.started = false;
+                self.poller
+                    .set_agent_stream_live(&self.host.name, self.config_generation, false);
+                return Ok(true);
+            }
+            RemoteAgentStreamMessage::AgentsChanged(agents) if self.started => {
+                self.event_tx
+                    .try_send(crate::events::AppEvent::FleetAgentInventoryChanged {
+                        host: self.host.clone(),
+                        config_generation: self.config_generation,
+                        agents,
+                    })
+                    .map_err(|error| format!("cannot enqueue remote fleet event: {error}"))?;
+                self.poller
+                    .set_agent_stream_live(&self.host.name, self.config_generation, true);
+            }
+            RemoteAgentStreamMessage::SessionChanged(snapshot) if self.started => {
+                send_remote_session_inventory_update(
+                    self.host,
+                    self.config_generation,
+                    self.event_tx,
+                    *snapshot,
+                )?;
+            }
+            _ => return Err("remote fleet stream sent inventory before its handshake".into()),
+        }
+        Ok(false)
     }
 }
 
@@ -2566,12 +2901,16 @@ fn send_remote_session_inventory_update(
 
 enum RemoteAgentStreamMessage {
     Started,
+    EventsLost,
     AgentsChanged(Vec<AgentInfo>),
     SessionChanged(Box<crate::api::schema::SessionSnapshot>),
 }
 
 fn parse_remote_agent_stream_line(line: &str) -> Result<RemoteAgentStreamMessage, String> {
     if let Ok(error) = serde_json::from_str::<crate::api::schema::ErrorResponse>(line) {
+        if error.error.code == "events_lost" {
+            return Ok(RemoteAgentStreamMessage::EventsLost);
+        }
         return Err(format!("{}: {}", error.error.code, error.error.message));
     }
     if let Ok(success) = serde_json::from_str::<crate::api::schema::SuccessResponse>(line) {
@@ -2632,18 +2971,24 @@ fn spawn_remote_host_stream(
         "set -u\n{socket}{session}printf '%s\\n' {} | herdr api relay --stream\n",
         shell_quote(&request_json)
     );
-    let connect_timeout = timeout.as_secs().max(1).to_string();
-    let mut command = crate::noninteractive_process::command("ssh");
+    #[cfg(unix)]
+    let mut command = channel::for_host(&route.target)?.command(timeout)?;
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = crate::noninteractive_process::command("ssh");
+        command
+            .args(["-o", "BatchMode=yes", "-o"])
+            .arg(format!("ConnectTimeout={}", timeout.as_secs().max(1)))
+            .args([
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=3",
+            ])
+            .arg(&route.target);
+        command
+    };
     command
-        .args(["-o", "BatchMode=yes", "-o"])
-        .arg(format!("ConnectTimeout={connect_timeout}"))
-        .args([
-            "-o",
-            "ServerAliveInterval=15",
-            "-o",
-            "ServerAliveCountMax=3",
-        ])
-        .arg(&route.target)
         .args(["sh", "-s"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2716,7 +3061,7 @@ type HostSessionEvidence = Result<
     String,
 >;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct HostEvidence {
     host: FleetHostConfig,
     agents: Result<Vec<AgentInfo>, String>,
@@ -2993,6 +3338,7 @@ fn snapshot_from_evidence(
             .map(|host| host.name.clone())
             .collect(),
         hosts,
+        observations: Vec::new(),
         group_catalogs,
     }
 }
@@ -3156,7 +3502,10 @@ impl HostReader for SystemHostReader {
         timeout: Duration,
         include_aloop: bool,
     ) -> HostEvidence {
-        fetch_remote_host(host, timeout, include_aloop)
+        let evidence = fetch_remote_host(host, timeout, include_aloop);
+        #[cfg(unix)]
+        let evidence = channel::retain_during_reconnect(evidence);
+        evidence
     }
 }
 
@@ -3571,6 +3920,10 @@ fn run_ssh_program_with_timeout(
     script: &str,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
+    #[cfg(unix)]
+    if program.as_ref() == OsStr::new("ssh") {
+        return channel::run(target, script, timeout);
+    }
     let connect_timeout = timeout.as_secs().max(1).to_string();
     let mut command = crate::noninteractive_process::command(program);
     command
@@ -4441,23 +4794,23 @@ fn normalize_line(line: &str) -> String {
 
 fn score_descendant_closure(rows: &mut [FleetRow]) {
     let mut handles = HashMap::new();
-    let mut sessions = HashMap::new();
+    let mut sessions: HashMap<String, Vec<(String, String)>> = HashMap::new();
     for (index, row) in rows.iter().enumerate() {
         handles.insert(row.handle.clone(), index);
         if let Some(session) = &row.native_session {
-            sessions.insert(
-                format!("session:{}/{}", row.host, session),
-                row.handle.clone(),
-            );
+            sessions
+                .entry(session.clone())
+                .or_default()
+                .push((row.host.clone(), row.handle.clone()));
         }
     }
     for row in rows.iter_mut() {
         if let Some(parent) = row
             .parent_handle
-            .as_ref()
-            .and_then(|parent| sessions.get(parent))
+            .as_deref()
+            .and_then(|parent| resolve_session_parent(parent, &sessions))
         {
-            row.parent_handle = Some(parent.clone());
+            row.parent_handle = Some(parent);
         }
     }
 
@@ -4481,6 +4834,29 @@ fn score_descendant_closure(rows: &mut [FleetRow]) {
                 closure_liveness(rows[parent_index].liveness, rows[parent_index].descendants);
             parent = rows[parent_index].parent_handle.clone();
         }
+    }
+}
+
+/// Resolve `session:<host>/<id>` (or `session:<id>`) to the pane row owning that
+/// native session. Run-state writers record the machine hostname (for example
+/// `Matthiass-MBP`), which often differs from the configured fleet host name
+/// (`mbpro`), so an exact host match wins and a unique session id is the fallback.
+fn resolve_session_parent(
+    parent: &str,
+    sessions: &HashMap<String, Vec<(String, String)>>,
+) -> Option<String> {
+    let rest = parent.strip_prefix("session:")?;
+    let (host, session) = match rest.rsplit_once('/') {
+        Some((host, session)) => (host, session),
+        None => ("", rest),
+    };
+    let candidates = sessions.get(session)?;
+    if let Some((_, handle)) = candidates.iter().find(|(row_host, _)| row_host == host) {
+        return Some(handle.clone());
+    }
+    match candidates.as_slice() {
+        [(_, handle)] => Some(handle.clone()),
+        _ => None,
     }
 }
 
@@ -4628,6 +5004,8 @@ struct TransitionEvent<'a> {
     state_change_seq: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gate_summary: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tick_ms: Option<f64>,
 }
 
 fn watch_status(
@@ -4647,7 +5025,9 @@ fn watch_status(
         if !running.load(Ordering::SeqCst) {
             break;
         }
+        let tick_start = Instant::now();
         let mut current_snapshot = collect_snapshot(&hosts, &fleet);
+        let tick_ms = tick_start.elapsed().as_secs_f64() * 1_000.0;
         let current = watch_observed_states(&mut current_snapshot, &previous_snapshot);
 
         for (handle, observed) in &current {
@@ -4659,7 +5039,7 @@ fn watch_status(
             {
                 continue;
             }
-            emit_transition(handle, old, observed)?;
+            emit_transition(handle, old, observed, Some(tick_ms))?;
         }
         for (handle, observed) in &current {
             if previous.contains_key(handle) || (blocked_only && !observed.blocked) {
@@ -4672,7 +5052,7 @@ fn watch_status(
                 seq: None,
                 gate_summary: None,
             };
-            emit_transition(handle, &absent, observed)?;
+            emit_transition(handle, &absent, observed, Some(tick_ms))?;
         }
         let missing = previous
             .keys()
@@ -4690,7 +5070,7 @@ fn watch_status(
                 gate_summary: None,
             };
             if !same_observed_state(old, &unknown) && (!blocked_only || old.blocked) {
-                emit_transition(&handle, old, &unknown)?;
+                emit_transition(&handle, old, &unknown, Some(tick_ms))?;
             }
             next.insert(handle, unknown);
         }
@@ -4721,12 +5101,18 @@ fn same_observed_state(left: &ObservedState, right: &ObservedState) -> bool {
     left.state == right.state && left.liveness == right.liveness && left.blocked == right.blocked
 }
 
-fn emit_transition(handle: &str, old: &ObservedState, new: &ObservedState) -> std::io::Result<()> {
+fn emit_transition(
+    handle: &str,
+    old: &ObservedState,
+    new: &ObservedState,
+    tick_ms: Option<f64>,
+) -> std::io::Result<()> {
     let event = TransitionEvent {
         handle,
         old_state: &old.state,
         new_state: &new.state,
         timestamp: format_utc_timestamp(unix_now_s()),
+        tick_ms,
         liveness: new.liveness,
         blocked: new.blocked,
         state_change_seq: new.seq,
@@ -4922,6 +5308,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn prewarm_selection_includes_active_workspace_and_last_ten_only_for_wan() {
+        let hosts = [
+            FleetHostConfig {
+                name: "wan".into(),
+                wan: true,
+                ..Default::default()
+            },
+            FleetHostConfig {
+                name: "lan".into(),
+                ..Default::default()
+            },
+        ];
+        let agent = |host: &str, workspace: &str, n| {
+            crate::api::schema::AgentRef::new(host, format!("{workspace}:p{n}")).expect("ref")
+        };
+        let mut inventory: Vec<_> = (0..12).map(|n| agent("wan", "old", n)).collect();
+        inventory.extend([
+            agent("wan", "active", 1),
+            agent("wan", "active", 2),
+            agent("lan", "active", 1),
+        ]);
+        let recent = (0..12).map(|n| agent("wan", "old", n)).collect();
+        let selected = prewarm_selection(
+            hosts.iter(),
+            &inventory,
+            &[agent("wan", "active", 1), agent("lan", "active", 1)],
+            &recent,
+        );
+        assert_eq!(selected.len(), 12);
+        assert!(selected.contains(&agent("wan", "active", 2)));
+        assert!(!selected.contains(&agent("wan", "old", 10)));
+        assert!(selected.iter().all(|agent| agent.host == "wan"));
+        assert!(prewarm_selection(hosts[1..].iter(), &inventory, &[], &recent).is_empty());
+        assert!(prewarm_selection(hosts.iter(), &[], &[], &recent).is_empty());
+    }
+
     fn host(name: &str, local: bool) -> FleetHostConfig {
         FleetHostConfig {
             name: name.to_string(),
@@ -5095,6 +5518,7 @@ mod tests {
                 icon: None,
                 target: target.into(),
                 local: false,
+                wan: false,
                 session: Some("agents".into()),
                 socket: Some("/tmp/herdr.sock".into()),
             }],
@@ -5274,7 +5698,7 @@ mod tests {
         };
         let invalid_config = app_config_with_fleet(invalid.clone());
         let mut app = app_with_retained_deleted_group(&invalid_config, &path);
-        let unusable = poll_without_generation(&invalid);
+        let unusable = poll(&invalid);
         assert!(unusable.group_catalogs.is_empty());
 
         install_snapshot_and_finish_ledger_write(&mut app, unusable);
@@ -5740,7 +6164,7 @@ mod tests {
 
         let mut unusable_config = fleet.clone();
         unusable_config.timeout_ms = 1;
-        let unusable_poll = poll_without_generation(&unusable_config);
+        let unusable_poll = poll(&unusable_config);
         assert!(unusable_poll.polled);
         assert!(unusable_poll.group_catalogs.is_empty());
         assert!(unusable_poll.hosts.iter().any(|host| {
@@ -8074,6 +8498,226 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
     }
 
     #[test]
+    fn cached_poll_preserves_live_session_snapshot_and_sections() {
+        let (mut current, _) = pane_lifecycle_snapshot(HostState::Reachable);
+        let inventory = HostSessionInventory {
+            snapshot: Some(serde_json::json!({"epoch":"current", "revision":23})),
+            sections: vec![HostSessionSection {
+                name: "main",
+                pane_ids: vec!["new-pane".into()],
+            }],
+            runs: Vec::new(),
+            loops: Vec::new(),
+        };
+        current.hosts[0].sessions = Some(inventory.clone());
+        let mut cached = current.clone();
+        cached.hosts[0].sessions = Some(HostSessionInventory {
+            snapshot: Some(serde_json::json!({"epoch":"old", "revision":1})),
+            sections: Vec::new(),
+            runs: Vec::new(),
+            loops: Vec::new(),
+        });
+        cached.preserve_live_agent_inventory_from(&current, |_| true);
+        assert_eq!(cached.hosts[0].sessions, Some(inventory));
+        let mut disconnected = current.clone();
+        disconnected.hosts[0].sessions = None;
+        disconnected.preserve_live_agent_inventory_from(&current, |_| false);
+        assert!(disconnected.hosts[0].sessions.is_none());
+    }
+
+    #[test]
+    fn stream_poll_schedule_keeps_sixty_second_safety_net() {
+        let interval = Duration::from_secs(5);
+        for elapsed in [0, 5, 59] {
+            assert!(!inventory_poll_due(
+                false,
+                true,
+                Some(Duration::from_secs(elapsed)),
+                interval
+            ));
+        }
+        assert!(inventory_poll_due(
+            false,
+            true,
+            Some(Duration::from_secs(60)),
+            interval
+        ));
+        assert!(inventory_poll_due(false, false, Some(interval), interval));
+        assert!(!inventory_poll_due(
+            false,
+            false,
+            Some(Duration::from_secs(4)),
+            interval
+        ));
+        assert!(inventory_poll_due(true, true, Some(interval), interval));
+        assert!(inventory_poll_due(false, false, None, interval));
+    }
+
+    #[test]
+    fn stream_retry_backoff_caps_and_resets() {
+        let mut retry = RetryBackoff::default();
+        for ms in [250, 500, 1000, 2000, 4000, 8000, 10000, 10000] {
+            assert_eq!(retry.next_delay(), Duration::from_millis(ms));
+        }
+        retry = RetryBackoff::default();
+        assert_eq!(retry.next_delay(), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn stream_status_event_emits_inventory_without_poll() {
+        let host = FleetHostConfig {
+            name: "remote".into(),
+            target: "remote".into(),
+            ..Default::default()
+        };
+        let poller = Arc::new(FleetPollerConfig::new(FleetConfig::default()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut retry = RetryBackoff::default();
+        let mut consumer = RemoteStreamConsumer {
+            host: &host,
+            config_generation: poller.generation(),
+            poller: &poller,
+            event_tx: &tx,
+            agent_events: true,
+            session_events: false,
+            started: false,
+            retry: &mut retry,
+        };
+        consumer
+            .consume(
+                r#"{"id":"stream","result":{"type":"subscription_started"}}"#,
+                || panic!("no session seed"),
+            )
+            .expect("start");
+        let event = crate::api::schema::SubscriptionEventEnvelope {
+            event: crate::api::schema::SubscriptionEventKind::FleetAgentsChanged,
+            data: crate::api::schema::SubscriptionEventData::FleetAgentsChanged(
+                crate::api::schema::FleetAgentsChangedEvent {
+                    agents: vec![agent(AgentStatus::Working, serde_json::json!([]))],
+                },
+            ),
+        };
+        consumer
+            .consume(&serde_json::to_string(&event).expect("event"), || {
+                panic!("no poll")
+            })
+            .expect("consume");
+        let crate::events::AppEvent::FleetAgentInventoryChanged { agents, .. } =
+            rx.try_recv().expect("immediate event")
+        else {
+            panic!("agent inventory");
+        };
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].agent_status, AgentStatus::Working);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn agent_only_events_lost_keeps_poll_due_until_fresh_inventory() {
+        let host = FleetHostConfig {
+            name: "remote".into(),
+            target: "remote".into(),
+            ..Default::default()
+        };
+        let poller = Arc::new(FleetPollerConfig::new(FleetConfig::default()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut retry = RetryBackoff::default();
+        let mut consumer = RemoteStreamConsumer {
+            host: &host,
+            config_generation: poller.generation(),
+            poller: &poller,
+            event_tx: &tx,
+            agent_events: true,
+            session_events: false,
+            started: true,
+            retry: &mut retry,
+        };
+        poller.set_agent_stream_live(&host.name, poller.generation(), true);
+        assert!(consumer
+            .consume(
+                r#"{"id":"stream","error":{"code":"events_lost","message":"behind"}}"#,
+                || panic!("agent-only host has no session seed"),
+            )
+            .expect("lost"));
+        assert!(!consumer
+            .consume(
+                r#"{"id":"stream","result":{"type":"subscription_started"}}"#,
+                || panic!("agent-only host has no session seed"),
+            )
+            .expect("resubscribe"));
+        assert!(!poller.agent_stream_is_live(&host.name));
+        assert!(inventory_poll_due(
+            false,
+            poller.agent_stream_is_live(&host.name),
+            Some(Duration::from_secs(2)),
+            Duration::from_secs(2),
+        ));
+        assert!(!consumer
+            .consume(
+                r#"{"event":"fleet.agents_changed","data":{"agents":[]}}"#,
+                || panic!("agent-only host has no session seed"),
+            )
+            .expect("fresh inventory"));
+        assert!(matches!(rx.try_recv().expect("inventory"),
+            crate::events::AppEvent::FleetAgentInventoryChanged { agents, .. } if agents.is_empty()));
+        assert!(poller.agent_stream_is_live(&host.name));
+    }
+
+    #[test]
+    fn events_lost_resubscribes_and_seeds_session_snapshot() {
+        let host = FleetHostConfig {
+            name: "remote".into(),
+            target: "remote".into(),
+            ..Default::default()
+        };
+        let poller = Arc::new(FleetPollerConfig::new(FleetConfig::default()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut retry = RetryBackoff::default();
+        let mut consumer = RemoteStreamConsumer {
+            host: &host,
+            config_generation: poller.generation(),
+            poller: &poller,
+            event_tx: &tx,
+            agent_events: true,
+            session_events: true,
+            started: true,
+            retry: &mut retry,
+        };
+        poller.set_agent_stream_live(&host.name, poller.generation(), true);
+        assert!(consumer
+            .consume(
+                r#"{"id":"stream","error":{"code":"events_lost","message":"behind"}}"#,
+                || panic!("seed on new handshake")
+            )
+            .expect("lost"));
+        assert!(!poller.agent_stream_is_live(&host.name));
+        let snapshot: crate::api::schema::SessionSnapshot =
+            serde_json::from_value(serde_json::json!({
+                "epoch":"resynced", "revision":23, "version":"0.9.1", "protocol":1,
+                "workspaces":[], "tabs":[], "panes":[], "layouts":[], "agents":[]
+            }))
+            .expect("snapshot");
+        let expected = serde_json::to_value(&snapshot).expect("snapshot value");
+        assert!(!consumer
+            .consume(
+                r#"{"id":"stream","result":{"type":"subscription_started"}}"#,
+                || Ok(snapshot)
+            )
+            .expect("resubscribe"));
+        let crate::events::AppEvent::FleetSessionInventoryChanged { snapshot, .. } =
+            rx.try_recv().expect("seed event")
+        else {
+            panic!("snapshot inventory");
+        };
+        assert_eq!(
+            serde_json::to_value(snapshot).expect("event snapshot"),
+            expected
+        );
+        assert!(poller.agent_stream_is_live(&host.name));
+        assert_eq!(consumer.retry.next_delay(), Duration::from_millis(250));
+    }
+
+    #[test]
     fn remote_fleet_stream_parser_accepts_handshake_and_owner_inventory() {
         let started = crate::api::schema::SuccessResponse {
             id: "fleet-agent-events".into(),
@@ -8230,6 +8874,91 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
 
         let row = FleetRow::from_agent("ub1", false, agent, 0).expect("valid fleet row");
         assert_eq!(row.title.as_deref(), Some("~/fleet-title-project"));
+    }
+
+    fn session_fixture_pane(host: &str, pane: &str, session: &str) -> FleetRow {
+        let mut row = FleetRow::unknown(
+            host,
+            EvidenceSource::Herdr,
+            crate::api::schema::AgentRef::new(host, pane).expect("valid pane reference"),
+            "fixture".into(),
+        );
+        row.liveness = Liveness::Terminal;
+        row.closure_liveness = Liveness::Terminal;
+        row.native_session = Some(session.into());
+        row
+    }
+
+    fn session_fixture_run(host: &str, run: &str, parent: &str) -> FleetRow {
+        let mut row = FleetRow::unknown(
+            host,
+            EvidenceSource::RunState,
+            crate::api::schema::AgentRef::new(host, run).expect("valid run reference"),
+            "fixture".into(),
+        );
+        row.liveness = Liveness::Live;
+        row.closure_liveness = Liveness::Live;
+        row.parent_handle = Some(parent.into());
+        row
+    }
+
+    // Fixtures from the 2026-10-15 fleet sweep: done Claude panes on mbpro had live
+    // Codex workers on ub2 whose run-state parent used the machine hostname.
+    #[test]
+    fn done_pane_counts_live_worker_across_session_parent_shapes() {
+        let session = "8f1a06c4-d88a-462b-bdcd-5faf5c55c449";
+        for parent in [
+            format!("session:mbpro/{session}"),
+            format!("session:Matthiass-MBP/{session}"),
+            format!("session:ubuntu-direct/{session}"),
+            format!("session:{session}"),
+        ] {
+            let mut rows = vec![
+                session_fixture_pane("mbpro", "w2J:p2W", session),
+                session_fixture_run("ub2", "ra-worker", &parent),
+            ];
+            score_descendant_closure(&mut rows);
+            assert_eq!(rows[0].descendants.live, 1, "parent shape {parent}");
+            assert_eq!(
+                rows[0].closure_liveness,
+                Liveness::Live,
+                "parent shape {parent}"
+            );
+            assert_eq!(rows[1].parent_handle.as_deref(), Some("mbpro::w2J:p2W"));
+        }
+    }
+
+    #[test]
+    fn session_parent_prefers_exact_host_and_refuses_ambiguous_alias() {
+        let session = "860c1521-5315-4428-8789-8b74fbd3d4f7";
+        let mut rows = vec![
+            session_fixture_pane("mbpro", "w33:p3", session),
+            session_fixture_pane("ub1", "w8X:pA", session),
+            session_fixture_run("ub2", "ra-exact", &format!("session:ub1/{session}")),
+            session_fixture_run(
+                "ub2",
+                "ra-alias",
+                &format!("session:Matthiass-MBP/{session}"),
+            ),
+        ];
+        score_descendant_closure(&mut rows);
+        assert_eq!(rows[1].descendants.live, 1);
+        assert_eq!(rows[0].descendants.live, 0);
+        assert_eq!(
+            rows[3].parent_handle.as_deref(),
+            Some(&*format!("session:Matthiass-MBP/{session}"))
+        );
+    }
+
+    #[test]
+    fn unrelated_session_parent_stays_unresolved() {
+        let mut rows = vec![
+            session_fixture_pane("mbpro", "w2J:p2W", "8f1a06c4-d88a-462b-bdcd-5faf5c55c449"),
+            session_fixture_run("ub2", "ra-other", "session:Matthiass-MBP/other-session"),
+        ];
+        score_descendant_closure(&mut rows);
+        assert_eq!(rows[0].descendants.live, 0);
+        assert_eq!(rows[0].closure_liveness, Liveness::Terminal);
     }
 
     #[test]

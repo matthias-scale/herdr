@@ -1,6 +1,199 @@
 use super::harness::*;
 
 #[test]
+fn pane_send_text_if_accepts_guarded_shell_flags_and_refuses_mixed_modes() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    // Impossible pane identity makes this a no-input capability probe. A
+    // supported server returns a structured condition mismatch; older servers
+    // reject the distinct pane.send_text_if_shell method.
+    let probe = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "send-text-if",
+            "missing-pane",
+            "probe",
+            "--workspace",
+            "missing-workspace",
+            "--terminal",
+            "missing-terminal",
+            "--expect-shell",
+            "--shell-pid",
+            "1",
+            "--cwd",
+            "/",
+            "--condition",
+            "detection-snapshot-unchanged",
+            "--observation-token",
+            "unusable",
+        ],
+    );
+    assert!(
+        probe.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap();
+    assert_eq!(value["result"]["type"], "pane_text_send");
+    assert_eq!(value["result"]["outcome"], "condition_mismatch");
+
+    let mixed = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "send-text-if",
+            "w1:p1",
+            "probe",
+            "--workspace",
+            "w1",
+            "--terminal",
+            "t1",
+            "--expect-shell",
+            "--shell-pid",
+            "1",
+            "--cwd",
+            "/",
+            "--agent-ref",
+            "host::w1:p1",
+            "--agent-source",
+            "herdr:codex",
+            "--agent",
+            "codex",
+            "--session-kind",
+            "id",
+            "--session",
+            "session",
+            "--condition",
+            "detection-snapshot-unchanged",
+            "--observation-token",
+            "token",
+        ],
+    );
+    assert_eq!(mixed.status.code(), Some(2));
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn pane_send_text_if_sends_only_to_the_observed_idle_shell() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let mut process_info = serde_json::Value::Null;
+    for _ in 0..40 {
+        process_info = run_cli_json(&socket_path, &["pane", "process-info", "--pane", &pane_id]);
+        let shell_pid = process_info["result"]["process_info"]["shell_pid"].as_u64();
+        let foreground_pgid =
+            process_info["result"]["process_info"]["foreground_process_group_id"].as_u64();
+        let foreground = process_info["result"]["process_info"]["foreground_processes"].as_array();
+        if shell_pid.is_some()
+            && shell_pid == foreground_pgid
+            && foreground.is_some_and(|members| members.len() == 1)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let process = &process_info["result"]["process_info"];
+    let shell_pid = process["shell_pid"].as_u64().expect("shell pid") as u32;
+    let cwd = process["foreground_processes"][0]["cwd"]
+        .as_str()
+        .expect("foreground shell cwd")
+        .to_owned();
+    assert_eq!(
+        process["foreground_process_group_id"].as_u64(),
+        Some(shell_pid.into())
+    );
+
+    // Bind the closure to this pane after workspace creation and wait for the
+    // first coherent observation rather than racing the render loop.
+    let read_detection = |previous: Option<&str>| {
+        for _ in 0..40 {
+            let read = run_cli_json(
+                &socket_path,
+                &["pane", "read", &pane_id, "--source", "detection", "--json"],
+            );
+            let token = read["result"]["read"]["input_observation"]["token"].as_str();
+            let observed_text = read["result"]["read"]["text"].as_str();
+            if token.is_some_and(|token| previous != Some(token))
+                && observed_text.is_some_and(|text| !text.trim().is_empty())
+            {
+                return read;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("detection read did not observe an idle shell prompt");
+    };
+    let read = read_detection(None);
+    let observation = read["result"]["read"]["input_observation"]["token"]
+        .as_str()
+        .expect("coherent observation token")
+        .to_owned();
+    let terminal_id = read["result"]["read"]["terminal_id"].as_str().unwrap();
+    let shell_send = |shell_pid: u32, cwd: &str, observation: &str| {
+        run_cli_json(
+            &socket_path,
+            &[
+                "pane",
+                "send-text-if",
+                &pane_id,
+                "codex resume test-session",
+                "--workspace",
+                &workspace_id,
+                "--terminal",
+                terminal_id,
+                "--expect-shell",
+                "--shell-pid",
+                &shell_pid.to_string(),
+                "--cwd",
+                cwd,
+                "--condition",
+                "detection-snapshot-unchanged",
+                "--observation-token",
+                observation,
+            ],
+        )
+    };
+    // Exercise identity mismatches against the same observed idle shell before
+    // sending text. Sending without a newline leaves the shell at its prompt,
+    // so it need not produce another observation token for these checks.
+    let wrong_pid = shell_send(shell_pid.saturating_add(1), &cwd, &observation);
+    assert_eq!(wrong_pid["result"]["outcome"], "condition_mismatch");
+    let wrong_cwd = shell_send(shell_pid, "/not-the-pane-shell-cwd", &observation);
+    assert_eq!(wrong_cwd["result"]["outcome"], "condition_mismatch");
+
+    let sent = shell_send(shell_pid, &cwd, &observation);
+    assert_eq!(sent["result"]["outcome"], "sent");
+
+    let stale = shell_send(shell_pid, &cwd, &observation);
+    assert_eq!(stale["result"]["outcome"], "condition_mismatch");
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn pane_close_only_removes_the_target_tab_when_other_tabs_exist() {
     let base = unique_test_dir();
     let config_home = base.join("config");

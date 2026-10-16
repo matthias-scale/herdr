@@ -774,10 +774,10 @@ impl AppState {
     }
 
     pub(crate) fn open_sidebar_blocker_scope_menu(&mut self) {
-        self.sidebar_blocker_scope_menu_selected = crate::app::state::BlockerScope::ALL
+        self.sidebar_blocker_scope_menu_selected = crate::ui::sidebar::host_filter_options(self)
             .iter()
-            .position(|scope| *scope == self.sidebar_blocker_scope)
-            .unwrap_or(1);
+            .position(|host| host.as_deref() == self.sidebar_presentation.host_filter.as_deref())
+            .unwrap_or(0);
         self.sidebar_filter_menu_open = false;
         self.sidebar_group_menu_open = false;
         self.sidebar_blocker_scope_menu_open = true;
@@ -789,11 +789,20 @@ impl AppState {
     }
 
     pub(crate) fn select_sidebar_blocker_scope_option(&mut self, index: usize) {
-        if let Some(scope) = crate::app::state::BlockerScope::ALL.get(index).copied() {
-            self.set_sidebar_blocker_scope(scope);
-        } else {
-            self.sidebar_blocker_scope_menu_open = false;
+        if let Some(host) = crate::ui::sidebar::host_filter_options(self).get(index) {
+            self.sidebar_presentation.host_filter.clone_from(host);
+            self.workspace_scroll = 0;
+            self.mark_sidebar_projection_changed();
         }
+        self.sidebar_blocker_scope_menu_open = false;
+    }
+
+    pub(crate) fn toggle_sidebar_host_filter(&mut self, host: String) {
+        self.sidebar_presentation.host_filter = (self.sidebar_presentation.host_filter.as_deref()
+            != Some(host.as_str()))
+        .then_some(host);
+        self.workspace_scroll = 0;
+        self.mark_sidebar_projection_changed();
     }
 
     pub(crate) fn handle_sidebar_blocker_scope_menu_key(&mut self, key: KeyEvent) -> bool {
@@ -810,7 +819,11 @@ impl AppState {
                 self.sidebar_blocker_scope_menu_selected = self
                     .sidebar_blocker_scope_menu_selected
                     .saturating_add(1)
-                    .min(crate::app::state::BlockerScope::ALL.len().saturating_sub(1));
+                    .min(
+                        crate::ui::sidebar::host_filter_options(self)
+                            .len()
+                            .saturating_sub(1),
+                    );
             }
             KeyCode::Enter => {
                 self.select_sidebar_blocker_scope_option(self.sidebar_blocker_scope_menu_selected)
@@ -1521,7 +1534,6 @@ impl AppState {
                 | crate::ui::SidebarRow::Inbox(_)
                 | crate::ui::SidebarRow::NeedsYou { .. }
                 | crate::ui::SidebarRow::NeedsYouMore { .. }
-                | crate::ui::SidebarRow::BlockersOtherDevices { .. }
                 | crate::ui::SidebarRow::AgentRun { .. } => None,
             })
     }
@@ -1568,7 +1580,6 @@ impl AppState {
                 | crate::ui::SidebarRow::Inbox(_)
                 | crate::ui::SidebarRow::NeedsYou { .. }
                 | crate::ui::SidebarRow::NeedsYouMore { .. }
-                | crate::ui::SidebarRow::BlockersOtherDevices { .. }
                 | crate::ui::SidebarRow::AgentRun { .. } => None,
                 crate::ui::SidebarRow::Tab { entry, .. } => entry
                     .local_target()
@@ -3741,9 +3752,7 @@ mod tests {
                 }
                 crate::ui::SidebarRow::NeedsYou { title, .. } => format!("needs-you:{title}"),
                 crate::ui::SidebarRow::NeedsYouMore { .. } => "needs-you-more".to_string(),
-                crate::ui::SidebarRow::BlockersOtherDevices { .. } => {
-                    "blockers-other-devices".to_string()
-                }
+
                 crate::ui::SidebarRow::NestedHeader { key, .. } => format!("group:{key}"),
                 crate::ui::SidebarRow::SymphonyJob { name, .. } => format!("symphony:{name}"),
                 crate::ui::SidebarRow::SymphonyEmpty => "symphony:empty".to_string(),
@@ -5821,9 +5830,39 @@ mod tests {
     }
 
     #[test]
+    fn device_character_toggles_host_filter() {
+        let mut app = app_for_mouse_test();
+        app.state.agent_host_name = "ub2".into();
+        app.state.sidebar_sections_layout = true;
+        app.state.workspaces = vec![Workspace::test_new("herdr")];
+        app.state.ensure_test_terminals();
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).expect("terminal");
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.set_raw_agent_state_for_test(AgentState::Working);
+        let area = Rect::new(0, 0, 106, 40);
+        for expected in [Some("ub2"), None] {
+            crate::ui::compute_view(&mut app.state, area);
+            let device = app.state.view.sidebar_hover_targets.iter().find(|target| matches!(target.action.as_ref(), Some(crate::app::state::SidebarHoverAction::FilterHost { host }) if host.as_ref() == "ub2")).expect("device character hit area").rect;
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                device.x,
+                device.y,
+            ));
+            assert_eq!(
+                app.state.sidebar_presentation.host_filter.as_deref(),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn blocker_scope_dropdown_selects_by_mouse_and_keyboard() {
         let mut app = app_for_mouse_test();
-        app.state.sidebar_blocker_scope = crate::app::state::BlockerScope::Fleet;
+        app.state.sidebar_presentation.host_filter = Some(app.state.agent_host_name.clone());
         app.state.sidebar_blocker_scope_menu_selected = 1;
         app.state.sidebar_sections_layout = true;
         app.state.workspaces = vec![Workspace::test_new("blocked")];
@@ -5854,14 +5893,7 @@ mod tests {
             layout.list_rect.x,
             layout.list_rect.y,
         ));
-        assert_eq!(
-            app.state.sidebar_blocker_scope,
-            crate::app::state::BlockerScope::ThisDevice
-        );
-        assert_eq!(
-            app.state.take_sidebar_blocker_scope_persistence_request(),
-            Some(crate::app::state::BlockerScope::ThisDevice)
-        );
+        assert_eq!(app.state.sidebar_presentation.host_filter, None);
 
         app.state.open_sidebar_blocker_scope_menu();
         app.state
@@ -5875,8 +5907,8 @@ mod tests {
                 KeyModifiers::NONE,
             ));
         assert_eq!(
-            app.state.sidebar_blocker_scope,
-            crate::app::state::BlockerScope::Fleet
+            app.state.sidebar_presentation.host_filter.as_deref(),
+            Some(app.state.agent_host_name.as_str())
         );
         assert!(!app.state.sidebar_blocker_scope_menu_open);
 

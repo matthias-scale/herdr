@@ -1040,6 +1040,7 @@ pub struct SidebarHoverTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarHoverAction {
+    FilterHost { host: std::sync::Arc<str> },
     Pin { ws_idx: usize, tab_idx: usize },
     Snooze { target: SidebarPaneLifecycleTarget },
     Settle { target: SidebarPaneLifecycleTarget },
@@ -1529,13 +1530,6 @@ pub(crate) enum BlockerScope {
 
 impl BlockerScope {
     pub(crate) const ALL: [Self; 2] = [Self::ThisDevice, Self::Fleet];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::ThisDevice => "This device",
-            Self::Fleet => "Fleet",
-        }
-    }
 }
 
 impl SidebarSortMode {
@@ -1572,6 +1566,7 @@ pub(crate) struct SidebarPresentationState {
     /// renders and scrolls itself instead of relying on the mutating path.
     pub(crate) revealed_workspace_id: Option<String>,
     pub(crate) workspace_scroll: usize,
+    pub(crate) fleet_usage_scroll: usize,
     pub(crate) mobile_switcher_scroll: usize,
     pub(crate) collapsed_groups: std::collections::HashSet<String>,
     /// Global projection revision last reconciled into this attach.
@@ -1582,6 +1577,8 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) work_filter: SidebarWorkFilter,
     pub(crate) filter_menu_open: bool,
     pub(crate) filter_menu_selected: usize,
+    /// Attach-local host filter for the unified agent list.
+    pub(crate) host_filter: Option<String>,
     pub(crate) blocker_scope: BlockerScope,
     pub(crate) blocker_scope_menu_open: bool,
     pub(crate) blocker_scope_menu_selected: usize,
@@ -4871,6 +4868,7 @@ pub struct AppState {
     pub(crate) sidebar_projection_revision: u64,
     pub(crate) workspace_picker_forces_spaces_tree: bool,
     pub workspace_scroll: usize,
+    pub(crate) fleet_usage_scroll: usize,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
     pub mobile_switcher_scroll: usize,
@@ -4998,6 +4996,7 @@ pub struct AppState {
         std::collections::HashMap<std::path::PathBuf, std::path::PathBuf>,
     pub(crate) files_icons: crate::config::FilesIconConfig,
     pub(crate) nerd_font: bool,
+    pub(crate) subscript_glyphs: bool,
     pub(crate) space_icons: std::collections::BTreeMap<String, String>,
     /// Selection inside the dock home tab, swapped per client through
     /// `DockPresentationState`. A key, never an index.
@@ -5686,6 +5685,8 @@ pub(crate) enum ControlId {
     SidebarMore,
     SidebarFooter(SidebarFooterItem),
     SidebarHover(usize),
+    SidebarFleetRow(usize),
+    SidebarFleetToken(usize, usize),
     SidebarRowHover(u16),
     NotepadUsageRow(usize),
     NotepadUsageToggle,
@@ -5706,6 +5707,7 @@ pub(crate) enum ControlId {
     TopBarScrollRight,
     TopBarNewTab,
     TopBarTabPin(usize),
+    TopBarTabActivity(usize),
     TopBarRepoEditor,
     TopBarAddAction,
     TopBarUserAction(usize),
@@ -6543,21 +6545,6 @@ impl AppState {
         self.sidebar_work_filter_persistence_request.take()
     }
 
-    pub(crate) fn set_sidebar_blocker_scope(&mut self, scope: BlockerScope) {
-        self.sidebar_blocker_scope_menu_open = false;
-        if self.sidebar_blocker_scope == scope {
-            return;
-        }
-        self.sidebar_blocker_scope = scope;
-        self.sidebar_blocker_scope_menu_selected = BlockerScope::ALL
-            .iter()
-            .position(|candidate| *candidate == scope)
-            .unwrap_or(1);
-        self.sidebar_blocker_scope_persistence_request = Some(scope);
-        self.workspace_scroll = 0;
-        self.mark_sidebar_projection_changed();
-    }
-
     pub(crate) fn take_sidebar_blocker_scope_persistence_request(
         &mut self,
     ) -> Option<BlockerScope> {
@@ -6610,6 +6597,10 @@ impl AppState {
     }
 
     pub(crate) fn swap_sidebar_presentation(&mut self, other: &mut SidebarPresentationState) {
+        std::mem::swap(
+            &mut self.sidebar_presentation.host_filter,
+            &mut other.host_filter,
+        );
         std::mem::swap(&mut self.sidebar_focused, &mut other.focused);
         std::mem::swap(&mut self.client_focus_intent, &mut other.focus_intent);
         std::mem::swap(
@@ -6629,6 +6620,7 @@ impl AppState {
             &mut other.revealed_workspace_id,
         );
         std::mem::swap(&mut self.workspace_scroll, &mut other.workspace_scroll);
+        std::mem::swap(&mut self.fleet_usage_scroll, &mut other.fleet_usage_scroll);
         std::mem::swap(
             &mut self.mobile_switcher_scroll,
             &mut other.mobile_switcher_scroll,
@@ -8380,6 +8372,7 @@ impl AppState {
             sidebar_projection_revision: 0,
             workspace_picker_forces_spaces_tree: false,
             workspace_scroll: 0,
+            fleet_usage_scroll: 0,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
@@ -8557,6 +8550,7 @@ impl AppState {
             dock_files_roots_by_cwd: std::collections::HashMap::new(),
             files_icons: crate::config::FilesIconConfig::Nerd,
             nerd_font: true,
+            subscript_glyphs: false,
             space_icons: std::collections::BTreeMap::new(),
             dock_home_selection: None,
             dock_home_ticket_selection: None,

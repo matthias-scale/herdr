@@ -1,8 +1,7 @@
-"""Parse the existing closing block into herdr status channels.
+"""Parse display details and closing-state v3 lifecycle facts.
 
-Critical action points retain their Gate/Answer/Verify labels and every retained
-item is a pending human decision. Task completion, active workers, external waits,
-and parse quality remain separate facts.
+Prose can provide display details, but blocked, working, and done state comes
+only from a valid machine record.
 """
 
 from __future__ import annotations
@@ -13,10 +12,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-# HERDR_INTEGRATION_VERSION=6
+# HERDR_INTEGRATION_VERSION=7
 try:
     from closing_block_record import extract as extract_record, validate as validate_record
-except ImportError:  # embedded standalone (herdr src/turns.rs include_str!): legacy prose only
+except ImportError:  # standalone tooling can display prose but cannot trust it for state
     def extract_record(text):  # type: ignore[misc]
         return None, text
 
@@ -274,6 +273,7 @@ class ClosingBlock:
     record_errors: list[str] = field(default_factory=list)
     record_state: str | None = None
     record_completion: str | None = None
+    now_waiting_on_you: bool = False
 
     @property
     def gates(self) -> list[Item]:
@@ -293,6 +293,8 @@ class ClosingBlock:
 
     @property
     def blocking(self) -> int:
+        if self.source != "record" or self.record_errors:
+            return 0
         return len(
             [
                 item
@@ -307,47 +309,18 @@ class ClosingBlock:
             return "malformed"
         if self.source == "record":
             return "ok"
-        if not self.present:
-            return "missing"
-        if self.fallback:
-            return "malformed"
-        if self.discarded_items:
-            return "malformed"
-        if (
-            self.declared_blocking is not None
-            and self.declared_blocking != self.blocking
-        ):
-            return "malformed"
-        if self.waiting_count is not None and self.waiting_count != self.blocking:
-            return "malformed"
-        if self.waiting_on_you and self.blocking == 0:
-            return "malformed"
-        if self.done_here and (
-            self.blocking > 0 or self.agents_running > 0 or self.external_wait
-        ):
-            return "malformed"
-        return "ok"
+        return "missing"
 
     @property
     def completion(self) -> str:
         if self.source == "record" and not self.record_errors:
             return self.record_completion or "incomplete"
-        if self.parse_status == "missing":
-            return "missing"
-        if (
-            self.done_here
-            and self.parse_status == "ok"
-            and self.blocking == 0
-            and self.agents_running == 0
-            and not self.external_wait
-            and not self.workers_unknown
-            and self.contract_met is not False
-        ):
-            return "complete"
-        return "incomplete"
+        return "missing"
 
     @property
     def agents_running(self) -> int:
+        if self.source != "record" or self.record_errors:
+            return 0
         if self.workers_unknown:
             return 0
         if self.declared_agents is not None:
@@ -358,15 +331,9 @@ class ClosingBlock:
     def herdr_state(self) -> str:
         if self.source == "record" and self.record_state:
             return self.record_state
-        if (
-            self.blocking > 0
-            or self.waiting_on_you
-            or (self.parse_status == "malformed" and (self.declared_blocking or 0) > 0)
-        ):
+        if (self.source != "record" or self.record_errors) and self.now_waiting_on_you:
             return "blocked"
-        if self.agents_running > 0 or self.external_wait:
-            return "working"
-        return "idle"
+        return "unknown"
 
     def message(self) -> str | None:
         if self.record_errors:
@@ -390,9 +357,13 @@ class ClosingBlock:
         return None
 
     def wire_gates(self) -> list[dict[str, Any]]:
+        if self.source != "record" or self.record_errors:
+            return []
         return [item.wire() for item in self.gates]
 
     def wire_items(self) -> list[dict[str, Any]]:
+        if self.source != "record" or self.record_errors:
+            return [item.wire() for item in self.nongate_items if item.label not in HUMAN_INPUT_LABELS]
         return [item.wire() for item in self.nongate_items]
 
     def wire_decisions(self) -> list[dict[str, Any]]:
@@ -765,7 +736,7 @@ def parse(text: str) -> ClosingBlock:
     if record is not None:
         errors = validate_record(record)
         if not errors:
-            derived_state = "blocked" if record["items"] else (
+            derived_state = "blocked" if record["items"] or record["now"]["kind"] == "waiting_on_you" else (
                 "working" if record["workers"] or record["wait"] is not None or record["now"]["kind"] in {"worker", "wait"}
                 else "idle" if record["now"]["kind"] in {"done_here", "stopped"}
                 else "unknown"
@@ -929,6 +900,13 @@ def parse(text: str) -> ClosingBlock:
         (marker.start() for marker in (agents, external_wait) if marker), default=-1
     )
     now_is_latest = bool(last_now and last_now.start() > latest_legacy_position)
+    block.now_waiting_on_you = bool(
+        now_is_latest
+        and last_now
+        and re.fullmatch(
+            r"waiting[ \t]+on[ \t]+you\.?", last_now.group("rest").strip(), re.I
+        )
+    )
     latest_activity_position = max(
         latest_legacy_position, last_now.start() if last_now else -1
     )
@@ -983,12 +961,6 @@ def parse(text: str) -> ClosingBlock:
 
 
 def settle_ready(text: str) -> bool:
-    """Return whether the final assistant message closes with both markers."""
-    lines = [line.strip() for line in text.splitlines() if line.strip()][-6:]
-    markers = set()
-    for line in lines:
-        normalized = line.replace("**", "").strip()
-        normalized = normalized.rstrip(string.punctuation).strip().casefold()
-        if normalized in {"needs you: nothing", "done here"}:
-            markers.add(normalized)
-    return markers == {"needs you: nothing", "done here"}
+    """Return whether a valid closing-state record says the turn is complete."""
+    block = parse(text)
+    return block.source == "record" and not block.record_errors and block.completion == "complete"

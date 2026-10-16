@@ -18,7 +18,7 @@ pub use self::{
         upsert_section_value, write_actions_atomically,
     },
     keybinds::{
-        format_key_combo, normalize_key_combo, terminal_key_matches_combo,
+        format_key_combo, normalize_key_combo, terminal_key_matches_combo, validate_capture_key,
         validate_focus_room_leave_key, validate_user_action_key, ActionKeybinds, BindingConfig,
         CommandKeybindConfig, CustomCommandAction, CustomCommandKeybind, IndexedKeybind, Keybinds,
         LiveKeybindConfig, UserAction,
@@ -203,6 +203,11 @@ impl Config {
             .chain(window_title_diagnostics(&self.ui.window_title))
             .chain(self.invalid_sidebar_bounds_diagnostic())
             .chain(self.invalid_headless_size_diagnostic())
+            .chain(self.remote.fleet.device_badge_collisions().into_iter().map(
+                |(left, right, code)| {
+                    format!("device badge '{code}' is shared by fleet hosts {left} and {right}")
+                },
+            ))
             .collect()
     }
 

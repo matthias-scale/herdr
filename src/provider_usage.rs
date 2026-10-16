@@ -509,7 +509,7 @@ struct UsageCache {
 }
 
 /// One quota window, normalised across providers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct QuotaWindow {
     pub used_percent: u8,
     /// Unix seconds. `None` when the provider reports a window without a reset,
@@ -517,7 +517,7 @@ pub(crate) struct QuotaWindow {
     pub resets_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum UsageUnavailable {
     NoStatuslineData,
     NoSessionData,
@@ -539,7 +539,7 @@ fn unavailable(reason: UsageUnavailable) -> AccountUsage {
 }
 
 /// A single provider account: its short label and its windows.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AccountUsage {
     pub unavailable: Option<UsageUnavailable>,
     /// Short account code, e.g. `SHQ`. `None` when the account cannot be named.
@@ -586,7 +586,7 @@ pub(crate) enum QuotaProvider {
     OpenCode,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ProviderAccountUsage {
     pub provider: QuotaProvider,
     pub profile_id: String,
@@ -594,7 +594,7 @@ pub(crate) struct ProviderAccountUsage {
     pub usage: AccountUsage,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ProviderUsageSnapshot {
     pub collected_unix: Option<i64>,
     pub accounts: Vec<ProviderAccountUsage>,
@@ -695,7 +695,7 @@ impl ProviderUsageSnapshot {
 
 /// Collects every provider. Blocking: callers run it off the render thread.
 pub(crate) fn collect(now_unix: Option<i64>, now: Instant) -> ProviderUsageSnapshot {
-    let (claude, primary_claude) = load_all_claude_usage(now_unix, now);
+    let (claude, primary_claude) = load_all_claude_usage(now_unix, now, true);
     let (codex, primary_codex) = load_all_codex_usage(now_unix);
     let kimi = ProviderAccountUsage {
         provider: QuotaProvider::Kimi,
@@ -727,6 +727,76 @@ pub(crate) fn collect(now_unix: Option<i64>, now: Instant) -> ProviderUsageSnaps
         collected_unix: now_unix,
         accounts,
         codex_reset_credits: (!cfg!(test)).then(read_codex_reset_credits).flatten(),
+        primary_claude,
+        primary_codex,
+        primary_kimi: "default".into(),
+        primary_agy: "default".into(),
+        primary_opencode: "default".into(),
+    }
+}
+
+/// A bounded read-only snapshot for one fleet SSH request. Slow optional
+/// ccusage details and Codex reset-credit probes are omitted; each provider's
+/// independent read runs concurrently so the configured host deadline can
+/// still return the real quota windows and auth classification.
+pub(crate) fn collect_fleet(now_unix: Option<i64>, now: Instant) -> ProviderUsageSnapshot {
+    let (claude, codex, kimi, agy) = std::thread::scope(|scope| {
+        let claude = scope.spawn(|| load_all_claude_usage(now_unix, now, false));
+        let codex = scope.spawn(|| load_all_codex_usage(now_unix));
+        let kimi = scope.spawn(|| {
+            run_helper(
+                resolve_kimi_usage(),
+                "--rate-limits",
+                Duration::from_secs(3),
+                KIMI_OUTPUT_LIMIT,
+            )
+            .map(|output| parse_kimi_usage(&output, now_unix))
+            .unwrap_or_else(unavailable)
+        });
+        let agy = scope.spawn(|| {
+            run_helper(
+                resolve_agy_usage(),
+                "--json",
+                Duration::from_secs(3),
+                AGY_OUTPUT_LIMIT,
+            )
+            .map(|output| parse_agy_usage(&output, now_unix))
+            .unwrap_or_else(unavailable)
+        });
+        (
+            claude.join().unwrap_or_default(),
+            codex.join().unwrap_or_default(),
+            kimi.join()
+                .unwrap_or_else(|_| unavailable(UsageUnavailable::HelperFailed)),
+            agy.join()
+                .unwrap_or_else(|_| unavailable(UsageUnavailable::HelperFailed)),
+        )
+    });
+    let (mut accounts, primary_claude) = claude;
+    let (codex, primary_codex) = codex;
+    accounts.extend(codex);
+    accounts.push(ProviderAccountUsage {
+        provider: QuotaProvider::Kimi,
+        profile_id: "default".into(),
+        label: "Kimi".into(),
+        usage: kimi,
+    });
+    accounts.push(ProviderAccountUsage {
+        provider: QuotaProvider::OpenCode,
+        profile_id: "default".into(),
+        label: "default".into(),
+        usage: unavailable(UsageUnavailable::NoQuotaSource),
+    });
+    accounts.push(ProviderAccountUsage {
+        provider: QuotaProvider::Agy,
+        profile_id: "default".into(),
+        label: "Antigravity".into(),
+        usage: agy,
+    });
+    ProviderUsageSnapshot {
+        collected_unix: now_unix,
+        accounts,
+        codex_reset_credits: None,
         primary_claude,
         primary_codex,
         primary_kimi: "default".into(),
@@ -1540,12 +1610,15 @@ fn read_profile_metadata(path: &Path) -> Option<String> {
 fn load_all_claude_usage(
     now_unix: Option<i64>,
     now: Instant,
+    include_details: bool,
 ) -> (Vec<ProviderAccountUsage>, String) {
     let profiles = home_path(".claude-profiles")
         .map(|root| named_profile_dirs(&root, &["meta.env"]))
         .unwrap_or_default();
     let primary = active_profile_id("CLAUDE_CONFIG_DIR", &profiles);
-    let details = now_unix.and_then(|now_unix| load_claude_usage_details(now_unix, now));
+    let details = include_details
+        .then(|| now_unix.and_then(|now_unix| load_claude_usage_details(now_unix, now)))
+        .flatten();
     let mut default_usage = load_claude_usage_from(
         &statusline_cache_dir().join("rate-limits.env"),
         None,

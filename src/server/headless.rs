@@ -4556,6 +4556,8 @@ impl HeadlessServer {
             } else if let Some(snapshot) = snapshot.clone() {
                 view.replace_snapshot(snapshot);
             }
+            // Client-owned views do not pass through AppState's refresh handler.
+            view.refreshing = false;
         }
     }
 
@@ -8768,10 +8770,55 @@ mod tests {
             1,
             vec![crate::raw_input::RawInputEvent::Key(
                 crate::input::TerminalKey::new(
-                    crossterm::event::KeyCode::Char('r'),
-                    KeyModifiers::CONTROL | KeyModifiers::ALT,
+                    crossterm::event::KeyCode::Char('t'),
+                    KeyModifiers::ALT,
                 ),
             )],
+            false,
+        );
+
+        assert!(server.app.state.capture.is_some());
+        assert!(server.app.state.focus_room_ui.drawer.is_some());
+    }
+
+    #[tokio::test]
+    async fn headless_focus_room_prefix_capture_works_over_drawer() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("focus-room")];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        let mut config = crate::config::Config::default();
+        config.keys.capture = crate::config::BindingConfig::one("prefix+t");
+        server.app.state.keybinds = config.keybinds();
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
+        server.app.state.focus_room.active = true;
+        server.app.state.focus_room_ui.drawer =
+            Some(crate::app::focus_room::FocusRoomDrawerState {
+                pane_id: None,
+                agent_ref: None,
+                title: "agent".into(),
+                agent_label: "agent".into(),
+                host: "local".into(),
+                remote: false,
+                lines: Vec::new(),
+                input: String::new(),
+                cursor: 0,
+                output_revision: 0,
+                refreshed_at: None,
+            });
+
+        server.route_full_app_human_events(
+            1,
+            vec![
+                crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('b'),
+                    KeyModifiers::CONTROL,
+                )),
+                crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('t'),
+                    KeyModifiers::empty(),
+                )),
+            ],
             false,
         );
 
@@ -9142,14 +9189,14 @@ mod tests {
         server.sync_foreground_client_state();
         assert!(server.app.state.keybinds.capture.matches_direct_key(
             &crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Char('r'),
-                crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
+                crossterm::event::KeyCode::Char('t'),
+                crossterm::event::KeyModifiers::ALT,
             )
         ));
 
         assert!(server.handle_server_event(ServerEvent::ClientInput {
             client_id: 1,
-            data: b"\x1b[114;7u".to_vec(),
+            data: b"\x1b[116;3u".to_vec(),
         }));
         assert!(server.clients[&1].sidebar_presentation.capture.is_some());
         assert!(server.handle_server_event(ServerEvent::ClientInput {
@@ -9382,6 +9429,8 @@ mod tests {
         // same socket, which surfaces as AddrInUse. A counter cannot collide.
         let dir = std::env::temp_dir().join(format!("hh-{}", crate::config::test_unique_suffix()));
         let _ = fs::create_dir_all(&dir);
+        // Scheduled scratch polling must not observe the user's notes.
+        app.state.scratch.dir = dir.join("scratch");
         let socket_path = dir.join("client.sock");
         let _ = fs::remove_file(&socket_path);
         let listener = bind_local_listener(&socket_path).expect("bind test listener");
@@ -9966,6 +10015,42 @@ mod tests {
             work_item_detail_request(&client),
             Some((crate::app::state::DockHomeSection::Prs, Some(key), true))
         );
+    }
+
+    #[test]
+    fn refreshed_work_index_clears_client_owned_work_view_loading_state() {
+        let mut server = test_headless_server();
+        server.app.work_index_config.enabled = true;
+        server.app.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items: Vec::new(),
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: std::time::SystemTime::UNIX_EPOCH,
+        });
+
+        let mut client = ClientConnection::new(
+            (120, 40),
+            crate::kitty_graphics::HostCellSize::default(),
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            1,
+            RenderEncoding::SemanticFrame,
+            None,
+        );
+        let mut view = crate::app::state::WorkViewState::new(true, None);
+        view.refreshing = true;
+        client.work_view = Some(view);
+        server.clients.insert(1, client);
+
+        server.refresh_client_work_views();
+
+        let view = server.clients[&1]
+            .work_view
+            .as_ref()
+            .expect("full-screen work view remains open");
+        assert!(view.snapshot.is_some());
+        assert!(!view.refreshing);
     }
 
     #[test]

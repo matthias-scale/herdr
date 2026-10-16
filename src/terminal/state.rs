@@ -1261,46 +1261,16 @@ impl TerminalState {
         true
     }
 
-    pub(crate) fn merge_closing_blockers(
+    pub(crate) fn merge_closing_display_items(
         &mut self,
-        gates: Vec<crate::api::schema::ClosingBlockItem>,
         items: Vec<crate::api::schema::ClosingBlockItem>,
     ) -> bool {
-        let gates: Vec<_> = gates
-            .into_iter()
-            .filter(crate::api::schema::ClosingBlockItem::requires_human_input)
-            .collect();
-        let items: Vec<_> = items
-            .into_iter()
-            .filter(crate::api::schema::ClosingBlockItem::requires_human_input)
-            .collect();
-        let has_blockers = !gates.is_empty() || !items.is_empty();
-        let agent_label = self
-            .hook_authority
-            .as_ref()
-            .map(|authority| authority.agent_label.clone());
-        let report = self.closing_report.get_or_insert_default();
-        if report.unanswered.is_none() && has_blockers {
-            report.unanswered = Some(UnansweredClosingBlockers {
-                agent_label,
-                ..UnansweredClosingBlockers::default()
-            });
-        }
         let mut changed = false;
-        if let Some(unanswered) = report.unanswered.as_mut() {
-            changed |= merge_unanswered_closing_blockers(unanswered, &gates, &items);
-        }
-        for gate in gates {
-            if !report
-                .closing_gates
-                .iter()
-                .any(|existing| same_closing_blocker(existing, &gate))
-            {
-                report.closing_gates.push(gate);
-                changed = true;
-            }
-        }
-        for item in items {
+        let report = self.closing_report.get_or_insert_default();
+        for item in items
+            .into_iter()
+            .filter(|item| !item.requires_human_input())
+        {
             if !report
                 .closing_items
                 .iter()
@@ -5567,6 +5537,21 @@ impl TerminalState {
                     && (state == AgentState::Working || self.last_turn_at().is_none()))
             {
                 return (AgentState::Blocked, "transcript_permission");
+            }
+            let matching_blocked_hook = self.hook_authority.as_ref().is_some_and(|authority| {
+                authority.state == AgentState::Blocked
+                    && authority.retired_at.is_none()
+                    && self.detected_agent.is_some_and(|agent| {
+                        crate::detect::parse_agent_label(&authority.agent_label) == Some(agent)
+                    })
+            });
+            if state == AgentState::Unknown
+                && (self.fallback_visible_blocker || matching_blocked_hook)
+            {
+                return (
+                    AgentState::Blocked,
+                    "screen_blocker_over_unknown_transcript",
+                );
             }
             return (state, "transcript");
         }
@@ -15735,6 +15720,71 @@ mod transcript_turn_tests {
             Instant::now(),
         );
         assert_eq!(terminal.raw_agent_state(), AgentState::Working);
+    }
+
+    #[test]
+    fn visible_blocker_promotes_unknown_transcript_only() {
+        let now = Instant::now();
+        let mut terminal = terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Unknown),
+            Some(SystemTime::now()),
+            0,
+            1,
+            now,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Blocked,
+            true,
+            false,
+            false,
+            false,
+            false,
+            now,
+        );
+        assert_eq!(terminal.raw_agent_state(), AgentState::Blocked);
+        assert_eq!(
+            terminal.effective_state_arbitration(),
+            "screen_blocker_over_unknown_transcript"
+        );
+
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Idle),
+            Some(SystemTime::now()),
+            0,
+            2,
+            now,
+        );
+        assert_eq!(terminal.raw_agent_state(), AgentState::Idle);
+        assert_eq!(terminal.effective_state_arbitration(), "transcript");
+    }
+
+    #[test]
+    fn visible_idle_does_not_promote_unknown_transcript() {
+        let now = Instant::now();
+        let mut terminal = terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Unknown),
+            Some(SystemTime::now()),
+            0,
+            1,
+            now,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            now,
+        );
+        assert_eq!(terminal.raw_agent_state(), AgentState::Unknown);
+        assert_eq!(terminal.effective_state_arbitration(), "transcript");
     }
 
     #[test]

@@ -6,6 +6,10 @@ mod machine_attach;
 mod machine_process;
 mod machine_restart_policy;
 mod machine_saved;
+pub(crate) mod multiplex;
+#[cfg(unix)]
+mod prewarm;
+pub(crate) mod snapshot_cache;
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc, Mutex, MutexGuard,

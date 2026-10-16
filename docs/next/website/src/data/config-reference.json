@@ -597,7 +597,7 @@
         {
           "key": "keys.capture",
           "type": "keybinding",
-          "default": "\"ctrl+alt+r\"",
+          "default": "\"alt+t\"",
           "description": "Capture a thought to the local focus list."
         },
         {
@@ -1476,6 +1476,12 @@
           "type": "boolean",
           "default": "true",
           "description": "Render Nerd Font glyphs for agents, Spaces, usage providers, and file kinds. Disable this to use text labels and portable two-character file kinds."
+        },
+        {
+          "key": "ui.subscript_glyphs",
+          "type": "boolean",
+          "default": "false",
+          "description": "Render compact account tags and machine aliases with the companion Herdr Icons subscript alphabet. Enable only when every displaying client has that font; otherwise keep readable ordinary text labels. Requires nerd_font."
         },
         {
           "key": "ui.icons.spaces",
@@ -2421,7 +2427,7 @@
           "key": "remote.fleet.refresh_interval_ms",
           "type": "integer",
           "default": "15000",
-          "description": "Milliseconds between background fleet inventory refreshes. Minimum: 100."
+          "description": "Milliseconds between background fleet inventory refreshes. Minimum: 100. On Unix clients, host entries under [[remote.fleet.hosts]] may set wan = true (default false) to keep read-only terminal streams open for the active remote workspace and ten most recently focused panes."
         },
         {
           "key": "remote.fleet.timeout_ms",

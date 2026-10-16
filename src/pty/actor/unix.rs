@@ -4,7 +4,7 @@ use std::{
     os::fd::{AsRawFd, OwnedFd, RawFd},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc as std_mpsc, Arc, Mutex,
+        mpsc as std_mpsc, Arc, Mutex, TryLockError,
     },
     time::{Duration, Instant},
 };
@@ -74,6 +74,7 @@ pub(crate) struct PtyIoActorConfig {
     pub on_reader_exit: Option<ReaderExitCallback>,
     pub on_user_writes_poisoned: Option<Arc<dyn Fn() + Send + Sync>>,
     pub pending_user_input: Arc<AtomicU64>,
+    pub input_delivery_seq: Arc<AtomicU64>,
 }
 
 enum PtyIoDataCommand {
@@ -151,9 +152,18 @@ impl PtyIoActorHandle {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn write_user_input(
         &self,
         bytes: Bytes,
+    ) -> Result<(), mpsc::error::SendError<Bytes>> {
+        self.write_user_input_with_admission(bytes, || {}).await
+    }
+
+    pub(crate) async fn write_user_input_with_admission(
+        &self,
+        bytes: Bytes,
+        on_admitted: impl FnOnce(),
     ) -> Result<(), mpsc::error::SendError<Bytes>> {
         let accepting = {
             let Some(user_writes) = self.lock_user_writes() else {
@@ -176,17 +186,27 @@ impl PtyIoActorHandle {
         if !user_writes.accepting || user_writes.remote_owner.is_some() {
             return Err(mpsc::error::SendError(bytes));
         }
-        permit.send(PtyIoDataCommand::WriteUserInput { bytes });
         user_writes.pending_local_writes += 1;
         self.pending_user_input.fetch_add(1, Ordering::AcqRel);
+        on_admitted();
+        permit.send(PtyIoDataCommand::WriteUserInput { bytes });
         drop(user_writes);
         self.wake_actor();
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn try_write_user_input(
         &self,
         bytes: Bytes,
+    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        self.try_write_user_input_with_admission(bytes, || {})
+    }
+
+    pub(crate) fn try_write_user_input_with_admission(
+        &self,
+        bytes: Bytes,
+        on_admitted: impl FnOnce(),
     ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         let Some(mut user_writes) = self.lock_user_writes() else {
             return Err(mpsc::error::TrySendError::Closed(bytes));
@@ -197,29 +217,37 @@ impl PtyIoActorHandle {
         if user_writes.remote_owner.is_some() {
             return Err(mpsc::error::TrySendError::Closed(bytes));
         }
-        match self
-            .data_tx
-            .try_send(PtyIoDataCommand::WriteUserInput { bytes })
-        {
-            Ok(()) => {
+        match self.data_tx.try_reserve() {
+            Ok(permit) => {
                 user_writes.pending_local_writes += 1;
                 self.pending_user_input.fetch_add(1, Ordering::AcqRel);
+                on_admitted();
+                permit.send(PtyIoDataCommand::WriteUserInput { bytes });
                 drop(user_writes);
                 self.wake_actor();
                 Ok(())
             }
-            Err(mpsc::error::TrySendError::Full(PtyIoDataCommand::WriteUserInput { bytes })) => {
-                Err(mpsc::error::TrySendError::Full(bytes))
-            }
-            Err(mpsc::error::TrySendError::Closed(PtyIoDataCommand::WriteUserInput { bytes })) => {
+            Err(mpsc::error::TrySendError::Full(())) => Err(mpsc::error::TrySendError::Full(bytes)),
+            Err(mpsc::error::TrySendError::Closed(())) => {
                 Err(mpsc::error::TrySendError::Closed(bytes))
             }
         }
     }
 
     pub(crate) fn try_acquire_remote_owner(&self, owner_id: u64) -> RemoteOwnerAcquireResult {
-        let Some(mut user_writes) = self.lock_user_writes() else {
+        if self.user_writes_poisoned.load(Ordering::Acquire) {
             return RemoteOwnerAcquireResult::RefusedForSafety;
+        }
+        let mut user_writes = match self.user_writes.try_lock() {
+            Ok(user_writes) => user_writes,
+            // A local writer may hold this gate while it waits for pty_write.
+            // Remote acquisition is advisory: refuse rather than blocking in
+            // the opposite lock order and deadlocking with an in-flight write.
+            Err(TryLockError::WouldBlock) => return RemoteOwnerAcquireResult::RefusedForSafety,
+            Err(TryLockError::Poisoned(_)) => {
+                self.mark_user_writes_poisoned();
+                return RemoteOwnerAcquireResult::RefusedForSafety;
+            }
         };
         match user_writes.remote_owner {
             Some(existing) if existing == owner_id => RemoteOwnerAcquireResult::Acquired,
@@ -544,6 +572,7 @@ impl PtyIoActor {
             controls,
             response_order,
             pending_user_input: config.pending_user_input,
+            input_delivery_seq: config.input_delivery_seq,
             on_read: config.on_read,
             on_reader_exit: config.on_reader_exit,
             poll_observer,
@@ -581,6 +610,7 @@ struct PtyIoActorRunner {
     controls: Arc<Mutex<SharedPtyControls>>,
     response_order: Arc<Mutex<()>>,
     pending_user_input: Arc<AtomicU64>,
+    input_delivery_seq: Arc<AtomicU64>,
     on_read: ReadCallback,
     on_reader_exit: Option<ReaderExitCallback>,
     poll_observer: Option<std_mpsc::Sender<()>>,
@@ -1014,6 +1044,9 @@ impl PtyIoActorRunner {
                     return;
                 }
                 Ok(written) => {
+                    if user_input && self.current_write_offset == 0 {
+                        self.input_delivery_seq.fetch_add(1, Ordering::AcqRel);
+                    }
                     self.current_write_offset += written;
                     if self.current_write_offset >= bytes.len() {
                         self.pending_writes.pop_front();
@@ -1146,6 +1179,7 @@ mod tests {
             on_reader_exit: None,
             on_user_writes_poisoned: None,
             pending_user_input: Arc::new(AtomicU64::new(0)),
+            input_delivery_seq: Arc::new(AtomicU64::new(0)),
         };
         let handle = if let Some(poll_observer) = poll_observer {
             PtyIoActor::spawn_with_poll_observer(config, poll_observer)
@@ -1184,6 +1218,7 @@ mod tests {
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
             pending_user_input: Arc::new(AtomicU64::new(1)),
+            input_delivery_seq: Arc::new(AtomicU64::new(0)),
             on_read: Box::new(|_| PtyReadResult::empty()),
             on_reader_exit: None,
             on_user_writes_poisoned: None,
@@ -1300,6 +1335,7 @@ mod tests {
             on_reader_exit: None,
             on_user_writes_poisoned: None,
             pending_user_input: Arc::new(AtomicU64::new(0)),
+            input_delivery_seq: Arc::new(AtomicU64::new(0)),
         })
         .expect("real PTY actor spawn");
         if prefill_input {
@@ -1393,6 +1429,121 @@ mod tests {
                 .pending_local_writes,
             0
         );
+        assert_eq!(runner.input_delivery_seq.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn unix_input_accounting_advances_once_on_first_positive_user_write() {
+        let (mut runner, mut peer) = actor_runner_for_unit_test();
+        runner
+            .pending_writes
+            .push_back((Bytes::from_static(b"single-write"), true));
+
+        runner.flush_pending_writes_once();
+
+        let mut echoed = [0; 32];
+        let bytes_read = peer.read(&mut echoed).expect("peer reads actor write");
+        assert_eq!(&echoed[..bytes_read], b"single-write");
+        assert_eq!(runner.input_delivery_seq.load(Ordering::Acquire), 1);
+
+        runner.flush_pending_writes_once();
+        assert_eq!(runner.input_delivery_seq.load(Ordering::Acquire), 1);
+        assert_eq!(
+            runner.pending_user_input.load(Ordering::Acquire),
+            0,
+            "completed user write releases its actor reservation"
+        );
+    }
+
+    #[test]
+    fn unix_input_accounting_ignores_empty_terminal_and_never_written_requests() {
+        let (mut runner, mut peer) = actor_runner_for_unit_test();
+        assert!(
+            !runner.handle_data_command(PtyIoDataCommand::WriteUserInput {
+                bytes: Bytes::new(),
+            })
+        );
+        assert_eq!(runner.input_delivery_seq.load(Ordering::Acquire), 0);
+
+        runner.enqueue_write(Bytes::from_static(b"terminal-response"));
+        runner.flush_pending_writes_once();
+        let mut response = [0; 32];
+        let bytes_read = peer
+            .read(&mut response)
+            .expect("peer reads terminal response");
+        assert_eq!(&response[..bytes_read], b"terminal-response");
+        assert_eq!(runner.input_delivery_seq.load(Ordering::Acquire), 0);
+
+        // Closing the peer makes the write fail on both macOS and Linux.
+        drop(peer);
+        runner
+            .user_writes
+            .lock()
+            .expect("user-write gate lock")
+            .pending_local_writes = 1;
+        runner.pending_user_input.store(1, Ordering::Release);
+        runner
+            .pending_writes
+            .push_back((Bytes::from_static(b"never-written"), true));
+        runner.flush_pending_writes_once();
+
+        assert_eq!(runner.input_delivery_seq.load(Ordering::Acquire), 0);
+        assert_eq!(runner.pending_user_input.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn unix_input_accounting_survives_partial_write_would_block_and_error() {
+        let (mut runner, peer) = actor_runner_for_unit_test();
+        runner
+            .pending_writes
+            .push_back((Bytes::from(vec![b'x'; 4 * 1024 * 1024]), true));
+
+        runner.flush_pending_writes_once();
+        let partial_offset = runner.current_write_offset;
+        assert!(partial_offset > 0 && partial_offset < 4 * 1024 * 1024);
+        assert_eq!(runner.input_delivery_seq.load(Ordering::Acquire), 1);
+        assert_eq!(
+            runner.pending_user_input.load(Ordering::Acquire),
+            1,
+            "a partially written request stays pending after delivery is counted"
+        );
+
+        runner.flush_pending_writes_once();
+        assert_eq!(runner.current_write_offset, partial_offset);
+        assert_eq!(runner.input_delivery_seq.load(Ordering::Acquire), 1);
+
+        // A read-half shutdown can still accept a small write on macOS.
+        drop(peer);
+        runner.flush_pending_writes_once();
+        assert_eq!(runner.input_delivery_seq.load(Ordering::Acquire), 1);
+        assert_eq!(runner.pending_user_input.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn unix_input_accounting_ignores_discarded_unwritten_requests() {
+        let (mut runner, _peer) = actor_runner_for_unit_test();
+        runner.state = ActorState::Quiesced;
+        assert!(
+            !runner.handle_data_command(PtyIoDataCommand::WriteUserInput {
+                bytes: Bytes::from_static(b"quiesced"),
+            })
+        );
+        assert_eq!(runner.pending_user_input.load(Ordering::Acquire), 0);
+
+        runner.state = ActorState::Running;
+        runner.user_writes.lock().unwrap().pending_local_writes = 2;
+        runner.pending_user_input.store(2, Ordering::Release);
+        runner
+            .pending_writes
+            .push_back((Bytes::from_static(b"first"), true));
+        runner
+            .pending_writes
+            .push_back((Bytes::from_static(b"second"), true));
+        runner.discard_pending_local_writes();
+
+        assert_eq!(runner.input_delivery_seq.load(Ordering::Acquire), 0);
+        assert_eq!(runner.pending_user_input.load(Ordering::Acquire), 0);
+        assert_eq!(runner.user_writes.lock().unwrap().pending_local_writes, 0);
     }
 
     #[test]
@@ -1813,6 +1964,19 @@ mod tests {
             ControlledWriteResult::Refused
         );
         assert!(handle.user_writes_poisoned.load(Ordering::Acquire));
+        assert_eq!(
+            handle.try_acquire_remote_owner(8),
+            RemoteOwnerAcquireResult::RefusedForSafety
+        );
+        assert_eq!(
+            handle
+                .user_writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remote_owner,
+            Some(7),
+            "refusal must not overwrite the existing remote owner"
+        );
         handle.shutdown();
     }
 
@@ -1888,6 +2052,68 @@ mod tests {
     }
 
     #[test]
+    fn remote_owner_acquire_refuses_without_waiting_for_contended_write_gate() {
+        let (handle, _peer, _read_rx) = actor_with_socket_pair(false);
+        let user_writes = Arc::clone(&handle.user_writes);
+        let (locked_tx, locked_rx) = std_mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std_mpsc::sync_channel(0);
+        let gate_holder = std::thread::spawn(move || {
+            let _guard = user_writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            locked_tx.send(()).expect("test observes held gate");
+            release_rx.recv().expect("test releases held gate");
+        });
+        locked_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("test thread holds the user-write gate");
+
+        let (started_tx, started_rx) = std_mpsc::sync_channel(0);
+        let (result_tx, result_rx) = std_mpsc::sync_channel(0);
+        let acquire_handle = handle.clone();
+        let acquire = std::thread::spawn(move || {
+            started_tx
+                .send(())
+                .expect("test observes acquisition start");
+            result_tx
+                .send(acquire_handle.try_acquire_remote_owner(7))
+                .expect("test receives acquisition result");
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("acquisition thread reached the gate operation");
+        let while_contended = result_rx.recv_timeout(Duration::from_millis(250));
+
+        release_tx.send(()).expect("release test gate holder");
+        gate_holder.join().expect("gate holder exits");
+        let after_release = match while_contended {
+            Ok(result) => Some(result),
+            Err(_) => result_rx.recv_timeout(Duration::from_secs(1)).ok(),
+        };
+        acquire.join().expect("acquisition thread exits");
+        handle.shutdown();
+
+        assert_eq!(
+            while_contended,
+            Ok(RemoteOwnerAcquireResult::RefusedForSafety),
+            "remote acquisition must fail closed immediately while a local writer owns the gate"
+        );
+        assert_eq!(
+            after_release,
+            Some(RemoteOwnerAcquireResult::RefusedForSafety)
+        );
+        assert_eq!(
+            handle
+                .user_writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remote_owner,
+            None,
+            "contention refusal must not acquire or replace ownership"
+        );
+    }
+
+    #[test]
     fn remote_owner_refuses_while_local_input_is_queued_then_acquires_after_drain() {
         let (handle, mut peer, _read_rx) = actor_with_socket_pair(false);
         let write_guard = handle
@@ -1908,10 +2134,18 @@ mod tests {
         peer.read_exact(&mut delivered)
             .expect("queued local input reaches the PTY in full");
         assert_eq!(&delivered, b"queued-local");
-        assert_eq!(
-            handle.try_acquire_remote_owner(7),
-            RemoteOwnerAcquireResult::Acquired
-        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match handle.try_acquire_remote_owner(7) {
+                RemoteOwnerAcquireResult::Acquired => break,
+                RemoteOwnerAcquireResult::RefusedForSafety if Instant::now() < deadline => {
+                    std::thread::yield_now();
+                }
+                result => {
+                    panic!("remote ownership did not become available after drain: {result:?}")
+                }
+            }
+        }
         handle.shutdown();
     }
 
@@ -1960,10 +2194,18 @@ mod tests {
             .expect("partial local input remainder reaches the PTY");
         prefix.extend_from_slice(&remainder);
         assert_eq!(prefix, payload);
-        assert_eq!(
-            handle.try_acquire_remote_owner(7),
-            RemoteOwnerAcquireResult::Acquired
-        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match handle.try_acquire_remote_owner(7) {
+                RemoteOwnerAcquireResult::Acquired => break,
+                RemoteOwnerAcquireResult::RefusedForSafety if Instant::now() < deadline => {
+                    std::thread::yield_now();
+                }
+                result => {
+                    panic!("remote ownership did not become available after drain: {result:?}")
+                }
+            }
+        }
         handle.shutdown();
     }
 
@@ -2043,6 +2285,7 @@ mod tests {
             on_reader_exit: None,
             on_user_writes_poisoned: None,
             pending_user_input: Arc::new(AtomicU64::new(0)),
+            input_delivery_seq: Arc::new(AtomicU64::new(0)),
         })
         .expect("actor spawn");
 
@@ -2329,6 +2572,7 @@ mod tests {
             controls: Arc::clone(&controls),
             response_order: Arc::clone(&response_order),
             pending_user_input: Arc::new(AtomicU64::new(0)),
+            input_delivery_seq: Arc::new(AtomicU64::new(0)),
             on_read: Box::new(move |_| PtyReadResult {
                 terminal_responses: vec![if query_light.load(Ordering::Acquire) {
                     Bytes::from_static(b"query-light")
@@ -2462,6 +2706,176 @@ mod tests {
             }
             _ => panic!("expected queued user input"),
         }
+    }
+
+    #[tokio::test]
+    async fn unix_input_admission_transfers_the_api_hold_without_gap_or_leak() {
+        use std::future::Future as _;
+
+        struct ApiHold(Arc<AtomicU64>);
+        impl Drop for ApiHold {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        fn api_hold(pending: &Arc<AtomicU64>) -> ApiHold {
+            pending.fetch_add(1, Ordering::AcqRel);
+            ApiHold(Arc::clone(pending))
+        }
+
+        let (data_tx, data_rx) = mpsc::channel(1);
+        let data_rx = Arc::new(Mutex::new(data_rx));
+        let (control_tx, _control_rx) = std_mpsc::channel();
+        data_tx
+            .try_send(PtyIoDataCommand::WriteUserInput {
+                bytes: Bytes::from_static(b"fill"),
+            })
+            .expect("fill data queue");
+        let (wake, _wake_read_fd) = test_wake_pair();
+        let pending = Arc::new(AtomicU64::new(0));
+        let user_writes = Arc::new(Mutex::new(UserWriteGate {
+            accepting: true,
+            remote_owner: None,
+            pending_local_writes: 0,
+        }));
+        let handle = PtyIoActorHandle {
+            data_tx,
+            control_tx,
+            wake,
+            controlled_write_fd: None,
+            user_writes: Arc::clone(&user_writes),
+            pty_write: Arc::new(Mutex::new(())),
+            user_writes_poisoned: Arc::new(AtomicBool::new(false)),
+            on_user_writes_poisoned: None,
+            controls: Arc::new(Mutex::new(SharedPtyControls::default())),
+            response_order: Arc::new(Mutex::new(())),
+            pending_user_input: Arc::clone(&pending),
+        };
+        let queued_user_input =
+            |data_rx: &Arc<Mutex<mpsc::Receiver<PtyIoDataCommand>>>| match data_rx
+                .lock()
+                .expect("data queue lock")
+                .try_recv()
+            {
+                Ok(PtyIoDataCommand::WriteUserInput { bytes }) => Some(bytes),
+                Err(_) => None,
+            };
+
+        // A capacity-blocked write that is dropped never reaches admission:
+        // its caller-owned hold is released and nothing is published.
+        let hold = api_hold(&pending);
+        let callback_ran = Arc::new(AtomicBool::new(false));
+        let callback_ran_for_write = Arc::clone(&callback_ran);
+        {
+            let write = handle.write_user_input_with_admission(Bytes::from_static(b"dropped"), {
+                move || {
+                    callback_ran_for_write.store(true, Ordering::Release);
+                    drop(hold);
+                }
+            });
+            let mut write = std::pin::pin!(write);
+            let poll = write
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+            assert!(poll.is_pending(), "a full queue keeps the write waiting");
+            assert_eq!(pending.load(Ordering::Acquire), 1, "hold spans the wait");
+        }
+        assert!(!callback_ran.load(Ordering::Acquire));
+        assert_eq!(
+            pending.load(Ordering::Acquire),
+            0,
+            "dropped wait leaks no hold"
+        );
+        assert_eq!(user_writes.lock().unwrap().pending_local_writes, 0);
+        assert_eq!(
+            queued_user_input(&data_rx),
+            Some(Bytes::from_static(b"fill"))
+        );
+        assert_eq!(
+            queued_user_input(&data_rx),
+            None,
+            "dropped write unpublished"
+        );
+
+        // A synchronous write refused for capacity also drops its hold unrun.
+        handle
+            .data_tx
+            .try_send(PtyIoDataCommand::WriteUserInput {
+                bytes: Bytes::from_static(b"fill"),
+            })
+            .expect("refill data queue");
+        let hold = api_hold(&pending);
+        assert!(matches!(
+            handle.try_write_user_input_with_admission(Bytes::from_static(b"refused"), move || {
+                drop(hold);
+                panic!("a refused write is never admitted");
+            }),
+            Err(mpsc::error::TrySendError::Full(bytes)) if bytes == Bytes::from_static(b"refused")
+        ));
+        assert_eq!(pending.load(Ordering::Acquire), 0);
+        assert_eq!(
+            queued_user_input(&data_rx),
+            Some(Bytes::from_static(b"fill"))
+        );
+
+        // An admitted write counts the actor reservation before the caller's
+        // hold is released, and publishes only after that transfer.
+        let admission_checks =
+            |pending: Arc<AtomicU64>,
+             user_writes: Arc<Mutex<UserWriteGate>>,
+             data_rx: Arc<Mutex<mpsc::Receiver<PtyIoDataCommand>>>| {
+                let hold = api_hold(&pending);
+                let held = pending.load(Ordering::Acquire);
+                move || {
+                    assert_eq!(
+                        pending.load(Ordering::Acquire),
+                        held + 1,
+                        "actor reservation is counted before the API hold is released"
+                    );
+                    assert!(
+                        matches!(user_writes.try_lock(), Err(TryLockError::WouldBlock)),
+                        "transfer happens under the user-write gate"
+                    );
+                    assert!(
+                        data_rx.lock().unwrap().try_recv().is_err(),
+                        "command is not published before the transfer"
+                    );
+                    drop(hold);
+                }
+            };
+        handle
+            .write_user_input_with_admission(
+                Bytes::from_static(b"async"),
+                admission_checks(
+                    Arc::clone(&pending),
+                    Arc::clone(&user_writes),
+                    Arc::clone(&data_rx),
+                ),
+            )
+            .await
+            .expect("async write admitted");
+        assert_eq!(pending.load(Ordering::Acquire), 1, "actor owns the write");
+        assert_eq!(
+            queued_user_input(&data_rx),
+            Some(Bytes::from_static(b"async"))
+        );
+
+        handle
+            .try_write_user_input_with_admission(
+                Bytes::from_static(b"sync"),
+                admission_checks(
+                    Arc::clone(&pending),
+                    Arc::clone(&user_writes),
+                    Arc::clone(&data_rx),
+                ),
+            )
+            .expect("sync write admitted");
+        assert_eq!(pending.load(Ordering::Acquire), 2);
+        assert_eq!(user_writes.lock().unwrap().pending_local_writes, 2);
+        assert_eq!(
+            queued_user_input(&data_rx),
+            Some(Bytes::from_static(b"sync"))
+        );
     }
 
     #[tokio::test]
@@ -2607,6 +3021,7 @@ mod tests {
             controls: Arc::new(Mutex::new(SharedPtyControls::default())),
             response_order: Arc::new(Mutex::new(())),
             pending_user_input: Arc::new(AtomicU64::new(1)),
+            input_delivery_seq: Arc::new(AtomicU64::new(0)),
             on_read: Box::new(|_| PtyReadResult::empty()),
             on_reader_exit: None,
             on_user_writes_poisoned: None,
