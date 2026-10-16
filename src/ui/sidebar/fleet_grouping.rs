@@ -220,7 +220,27 @@ pub(super) fn rows<'a>(
             continue;
         }
         for (project, (name, mut entries)) in groups {
-            entries.sort_by_key(|entry| std::cmp::Reverse(compact_activity_instant(entry)));
+            entries.sort_by(|left, right| {
+                compact_activity_instant(right)
+                    .cmp(&compact_activity_instant(left))
+                    .then_with(|| {
+                        sidebar_machine_host(app, left).cmp(sidebar_machine_host(app, right))
+                    })
+                    .then_with(|| match (&left.identity, &right.identity) {
+                        (AgentPanelIdentity::Remote(left), AgentPanelIdentity::Remote(right)) => {
+                            left.cmp(right)
+                        }
+                        (AgentPanelIdentity::Local(left), AgentPanelIdentity::Local(right)) => {
+                            left.pane_id.cmp(&right.pane_id)
+                        }
+                        (AgentPanelIdentity::Local(_), AgentPanelIdentity::Remote(_)) => {
+                            std::cmp::Ordering::Less
+                        }
+                        (AgentPanelIdentity::Remote(_), AgentPanelIdentity::Local(_)) => {
+                            std::cmp::Ordering::Greater
+                        }
+                    })
+            });
             let key = project_section_key(title, project.0);
             let collapsed = !expand_collapsed && section_is_collapsed(app, &key);
             rows.push(SidebarRow::NestedHeader {
@@ -310,6 +330,90 @@ mod tests {
             entries.push(remote_agent_as_panel_entry(remote));
         }
         (app, entries)
+    }
+
+    #[test]
+    fn refresh_with_same_remote_inventory_keeps_row_order() {
+        let (mut app, mut entries) = fixture();
+        let now = 1_792_000_000;
+        for host in &mut app.fleet_snapshot.hosts {
+            host.entries[0].last_turn_at = Some("2026-08-26T14:00:00Z".into());
+        }
+        let first = remote_agent_panel_entries_at(&app.fleet_snapshot, now, false);
+        let activity = compact_activity_instant(&first[0].entry).expect("remote activity");
+        // Put a local row between the two refresh-derived instants. The owner
+        // timestamp has not changed, so this must not move the remote row.
+        entries.truncate(1);
+        entries[0].activity_at = Some(activity + std::time::Duration::from_nanos(1));
+        let project = |remote: &[std::sync::Arc<RemoteAgentPanelEntry>]| {
+            let mut all = entries.clone();
+            all.extend(remote.iter().map(remote_agent_as_panel_entry));
+            rows(&app, &all, false)
+                .into_iter()
+                .filter_map(|row| match row {
+                    SidebarRow::Tab { entry, .. } => {
+                        Some(sidebar_machine_host(&app, &entry).to_string())
+                    }
+                    SidebarRow::RemoteAgent { entry, .. } => Some(entry.agent_ref.host.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let second = remote_agent_panel_entries_at(&app.fleet_snapshot, now + 1, false);
+        assert_eq!(
+            project(&first),
+            project(&second),
+            "unchanged remote inventory moved around a local row"
+        );
+        assert_eq!(first[0].entry.activity_at, second[0].entry.activity_at);
+        assert_eq!(first[0].entry.last_turn_at, second[0].entry.last_turn_at);
+        let mut changed = app.fleet_snapshot.clone();
+        changed.hosts[0].entries[0].last_turn_at = Some("2026-08-26T14:00:01Z".into());
+        let changed = remote_agent_panel_entries_at(&changed, now + 2, false);
+        assert!(changed[0].entry.activity_at > second[0].entry.activity_at);
+        assert_ne!(
+            project(&second),
+            project(&changed),
+            "real owner activity moves the row"
+        );
+    }
+
+    #[test]
+    fn equal_activity_uses_host_and_agent_identity() {
+        let (mut app, mut entries) = fixture();
+        entries.truncate(1);
+        entries[0].activity_at = None;
+        entries[0].last_turn_at = None;
+        for remote in &mut app.remote_agent_panel_entries {
+            let remote = std::sync::Arc::make_mut(remote);
+            remote.entry.activity_at = None;
+            remote.entry.last_turn_at = None;
+        }
+        let mut same_host = (*app.remote_agent_panel_entries[0]).clone();
+        same_host.agent_ref.agent = "another-agent".into();
+        same_host.entry.identity = AgentPanelIdentity::Remote(same_host.agent_ref.clone());
+        app.remote_agent_panel_entries
+            .push(std::sync::Arc::new(same_host));
+        entries.extend(
+            app.remote_agent_panel_entries
+                .iter()
+                .map(remote_agent_as_panel_entry),
+        );
+        let order = |entries: &[AgentPanelEntry]| {
+            rows(&app, entries, false)
+                .into_iter()
+                .filter_map(|row| match row {
+                    SidebarRow::Tab { entry, .. } => Some(entry.identity.clone()),
+                    SidebarRow::RemoteAgent { entry, .. } => {
+                        Some(AgentPanelIdentity::Remote(entry.agent_ref.clone()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = order(&entries);
+        entries.reverse();
+        assert_eq!(first, order(&entries));
     }
 
     #[test]
