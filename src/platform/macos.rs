@@ -872,7 +872,7 @@ fn try_listed_pids(kind: u32, value: u32) -> Result<Vec<u32>, ()> {
         }
 
         let returned_bytes = returned_bytes as usize;
-        if returned_bytes % std::mem::size_of::<libc::pid_t>() != 0 {
+        if !returned_bytes.is_multiple_of(std::mem::size_of::<libc::pid_t>()) {
             return Err(());
         }
         let count = returned_bytes / std::mem::size_of::<libc::pid_t>();

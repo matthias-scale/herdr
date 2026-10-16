@@ -1059,6 +1059,7 @@ struct ProcessSnapshot {
 }
 
 impl ProcessSnapshot {
+    #[cfg(test)]
     fn new(entries: Vec<WindowsProcessEntry>) -> Self {
         Self::new_with_completeness(entries, true)
     }
