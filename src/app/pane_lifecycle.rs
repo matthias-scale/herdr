@@ -243,10 +243,10 @@ impl App {
         for (ws_idx, workspace) in state.workspaces.iter().enumerate() {
             for tab in &workspace.tabs {
                 for (pane_id, pane) in &tab.panes {
-                    if !pane
+                    if pane
                         .activity
                         .deadline_after(state.close_empty_panes_after)
-                        .is_some_and(|deadline| now >= deadline)
+                        .is_none_or(|deadline| now < deadline)
                     {
                         continue;
                     }
