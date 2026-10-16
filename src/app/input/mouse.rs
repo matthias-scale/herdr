@@ -5261,10 +5261,19 @@ mod tests {
     fn install_remote_click_snapshot(app: &mut App, first_age: u64, include_first: bool) {
         let mut first =
             crate::fleet::FleetRow::test_agent_row_with_state("ub1", "pane/first", "working");
+        // Sidebar order follows the owner's turn timestamp, not the polled age.
+        let now = time::OffsetDateTime::now_utc();
+        let turn_at = |age: u64| {
+            (now - time::Duration::seconds(i64::try_from(age).expect("test age")))
+                .format(&time::format_description::well_known::Rfc3339)
+                .expect("turn timestamp")
+        };
         first.age_s = Some(first_age);
+        first.last_turn_at = Some(turn_at(first_age));
         let mut second =
             crate::fleet::FleetRow::test_agent_row_with_state("ub1", "pane/second", "working");
         second.age_s = Some(10);
+        second.last_turn_at = Some(turn_at(10));
         let entries = if include_first {
             vec![first, second]
         } else {
