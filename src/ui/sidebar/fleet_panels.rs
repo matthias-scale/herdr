@@ -342,16 +342,103 @@ fn reset_exact(at: i64, now: i64) -> String {
     format!("{duration} · {local}")
 }
 
-fn meter(percent: u8, cells: usize) -> String {
+fn meter(percent_used: u8, cells: usize) -> String {
+    let half_cells = usize::from(100u8.saturating_sub(percent_used)) * cells * 2 / 100;
     (0..cells)
-        .map(|cell| {
-            if usize::from(percent) * cells >= (cell + 1) * 100 {
-                '━'
-            } else {
-                '─'
-            }
+        .map(|cell| match half_cells.saturating_sub(cell * 2) {
+            0 => '─',
+            1 => '╾',
+            _ => '━',
         })
         .collect()
+}
+
+fn compact_columns(width: u16) -> usize {
+    (usize::from(width).saturating_sub(3) / 3).max(1)
+}
+
+fn compact_group_rows(count: usize, width: u16) -> usize {
+    count.div_ceil(compact_columns(width))
+}
+
+fn compact_window(account: &Account, now: i64) -> (&'static str, Option<QuotaWindow>) {
+    let usage = &account.account.usage;
+    let dual = matches!(
+        account.account.provider,
+        QuotaProvider::Claude | QuotaProvider::Codex
+    );
+    let candidates = [
+        (if dual { "5h" } else { "quota" }, usage.five_hour),
+        (
+            if dual { "7d" } else { "additional allowance" },
+            usage.seven_day,
+        ),
+    ];
+    candidates
+        .into_iter()
+        .filter_map(|(name, window)| window.map(|window| (name, window)))
+        .max_by(|left, right| {
+            left.1
+                .used_percent
+                .cmp(&right.1.used_percent)
+                .then_with(|| {
+                    // A tie picks the earliest reported reset. Keep an unknown reset unknown.
+                    let future = |at: Option<i64>| at.filter(|at| *at >= now).unwrap_or(i64::MAX);
+                    future(right.1.resets_at).cmp(&future(left.1.resets_at))
+                })
+        })
+        .map_or(("quota", None), |(name, window)| (name, Some(window)))
+}
+
+fn compact_bar(account: &Account, app: &AppState, now: i64) -> (String, Color) {
+    let (_, window) = compact_window(account, now);
+    let known = severity(&account.account.usage, account.fresh).is_some();
+    if known {
+        let used = window.map_or(100, |window| window.used_percent);
+        (meter(used, 2), severity_color(Some(used), app))
+    } else {
+        ("──".into(), app.palette.overlay0)
+    }
+}
+
+fn append_bar(
+    parts: &mut Vec<(String, Color)>,
+    bar: &str,
+    color: Color,
+    known: bool,
+    app: &AppState,
+) {
+    let empty_critical = known && !bar.contains(['━', '╾']);
+    for (index, glyph) in bar.chars().enumerate() {
+        let glyph_color = if glyph == '─' {
+            if empty_critical && index == 0 {
+                color
+            } else {
+                app.palette.surface1
+            }
+        } else {
+            color
+        };
+        parts.push((glyph.to_string(), glyph_color));
+    }
+}
+
+fn append_field(
+    parts: &mut Vec<(String, Color)>,
+    field: (String, Color),
+    known: bool,
+    app: &AppState,
+) {
+    let bar: String = field.0.chars().take(2).collect();
+    append_bar(parts, &bar, field.1, known, app);
+    parts.push((
+        field.0.chars().skip(2).collect(),
+        if known {
+            app.palette.text
+        } else {
+            app.palette.overlay0
+        },
+    ));
 }
 
 fn window_parts(
@@ -360,15 +447,13 @@ fn window_parts(
     app: &AppState,
     cells: usize,
     known: bool,
-    single_allowance: bool,
+    _single_allowance: bool,
 ) -> (String, Color) {
-    let prefix = if single_allowance { "Q" } else { "" };
-    let bar_cells = cells - usize::from(single_allowance);
     match window {
         Some(window) => (
             format!(
-                "{prefix}{} {:<3}",
-                meter(window.used_percent, bar_cells),
+                "{} {:<3} ",
+                meter(window.used_percent, cells),
                 reset_label(Some(window), now)
             ),
             if known {
@@ -378,7 +463,7 @@ fn window_parts(
             },
         ),
         None => (
-            format!("{prefix}{} {:<3}", "─".repeat(bar_cells), "—"),
+            format!("{} {:<3} ", "─".repeat(cells), "—"),
             app.palette.overlay0,
         ),
     }
@@ -398,6 +483,21 @@ fn account_tip(account: &Account, now: i64) -> String {
         ),
         format!("Profile: {}", account.account.profile_id),
     ];
+    let (limiting_name, limiting_window) = compact_window(account, now);
+    if severity(usage, account.fresh).is_some() {
+        if let Some(window) = limiting_window {
+            lines.push(format!(
+                "Compact bar: {limiting_name} · {}% used · {}% remaining · resets {}",
+                window.used_percent,
+                100u8.saturating_sub(window.used_percent),
+                window
+                    .resets_at
+                    .map_or_else(|| "unknown".into(), |at| reset_exact(at, now))
+            ));
+        }
+    } else {
+        lines.push("Compact bar: unknown (stale, unavailable, or no valid quota)".into());
+    }
     if let Some(email) = &usage.email {
         lines.push(format!("Account: {email}"));
     }
@@ -586,45 +686,49 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
     usage_header.section = Some(Section::Usage);
     usage_header.pinned = true;
     if usage_collapsed {
-        let mut compact = vec![usage_header];
-        for (account, identity) in accounts.iter().zip(labels::plan(app, width)) {
-            while compact.len() <= identity.row {
-                compact.push(Row::styled(
-                    vec![("    ".into(), app.palette.overlay1)],
-                    "Fleet usage · hover an account for details",
-                ));
+        rows.push(usage_header);
+        let columns = compact_columns(width);
+        for provider in [
+            QuotaProvider::Claude,
+            QuotaProvider::Codex,
+            QuotaProvider::Kimi,
+            QuotaProvider::Agy,
+            QuotaProvider::OpenCode,
+        ] {
+            let group: Vec<_> = accounts
+                .iter()
+                .filter(|account| account.account.provider == provider)
+                .collect();
+            for (line_index, chunk) in group.chunks(columns).enumerate() {
+                let icon = if line_index == 0 {
+                    crate::ui::icons::themed_usage_label(provider, app.nerd_font, &app.palette)
+                } else {
+                    ""
+                };
+                let mut line = Row::styled(
+                    vec![(pad_right(icon, 4), provider_color(provider, app))],
+                    "Fleet usage · hover a bar for account details",
+                );
+                for (slot, account) in chunk.iter().enumerate() {
+                    if slot > 0 {
+                        line.spans.push((" ".into(), app.palette.overlay1));
+                        line.text.push(' ');
+                    }
+                    let (bar, color) = compact_bar(account, app, now);
+                    line.targets
+                        .push((4 + (slot * 3) as u16, 2, account_tip(account, now)));
+                    line.text.push_str(&bar);
+                    append_bar(
+                        &mut line.spans,
+                        &bar,
+                        color,
+                        color != app.palette.overlay0,
+                        app,
+                    );
+                }
+                rows.push(line);
             }
-            let value = severity(&account.account.usage, account.fresh);
-            let icon = crate::ui::icons::themed_usage_label(
-                account.account.provider,
-                app.nerd_font,
-                &app.palette,
-            );
-            let prefix = " ".repeat(identity.gap);
-            let token = format!(
-                "{prefix}{icon}{}{} {}",
-                identity.clearance,
-                identity.tag,
-                severity_dot(value)
-            );
-            let line = &mut compact[identity.row];
-            line.targets.push((
-                display_width(&line.text) as u16,
-                display_width(&token) as u16,
-                account_tip(account, now),
-            ));
-            line.spans.push((
-                format!("{prefix}{icon}{}", identity.clearance),
-                provider_color(account.account.provider, app),
-            ));
-            line.spans.push((identity.tag, app.palette.text));
-            line.spans.push((
-                format!(" {}", severity_dot(value)),
-                severity_color(value, app),
-            ));
-            line.text.push_str(&token);
         }
-        rows.extend(compact);
     } else {
         if app.nerd_font {
             usage_header.text.push_str(" Usage");
@@ -633,33 +737,27 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
                 .push((" Usage".into(), app.palette.overlay1));
         }
         rows.push(usage_header);
-        let cells = if width < 22 {
-            2
-        } else if width < 32 {
-            3
+        let narrow = width < 22;
+        let wide = width >= 32;
+        let first_window = if narrow {
+            0
+        } else if wide {
+            12
         } else {
-            4
+            10
         };
-        let field_width = cells + 4;
-        let header = if width < 22 {
-            format!(
-                "    {} {}",
-                pad_right("5h/Q", field_width),
-                pad_right("7d", field_width)
-            )
-        } else {
-            let first_window = usize::from(width).saturating_sub(2 * field_width + 1);
-            format!(
-                "  {}{} {}",
-                pad_right("Name", first_window.saturating_sub(2)),
-                pad_right("5h/Q", field_width),
-                pad_right("7d", field_width),
-            )
-        };
+        let field_width = if wide { 11 } else { 7 };
+        let header = format!(
+            "{}{}{}{}",
+            pad_right(if narrow { "" } else { "Name" }, first_window),
+            pad_right(if wide { "5h/Quota" } else { "5h/Q" }, field_width),
+            if narrow { "  " } else { " " },
+            if wide { "7d/Extra" } else { "7d/Add" },
+        );
         let mut header = Row::plain(
             header,
             app.palette.overlay1,
-            "Usage columns: bars show percent used; reset estimates follow each bar",
+            "Usage columns: bars show quota remaining; reset estimates follow each bar",
         );
         header.pinned = true;
         rows.push(header);
@@ -692,84 +790,84 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
                 QuotaProvider::Claude | QuotaProvider::Codex
             );
             let narrow = width < 22;
-            let cells = if narrow {
-                2
-            } else if width < 32 {
-                3
-            } else {
-                4
-            };
+            let wide = width >= 32;
             let known = value.is_some();
-            let five = window_parts(
-                account.account.usage.five_hour,
-                now,
-                app,
-                cells,
-                known,
-                !dual,
-            );
-            let weekly = dual.then(|| {
-                window_parts(
-                    account.account.usage.seven_day,
-                    now,
-                    app,
-                    cells,
-                    known,
-                    false,
-                )
-            });
-            let field_width = cells + 4;
-            let dual_quota_width = 2 * field_width + 1;
-            let label_budget = if narrow && dual {
-                usize::from(width).saturating_sub(display_width(icon) + 3)
-            } else {
-                usize::from(width).saturating_sub(
-                    display_width(icon)
-                        + 4
-                        + if narrow {
-                            field_width
-                        } else {
-                            dual_quota_width
-                        },
-                )
+            let field = |window: Option<QuotaWindow>| {
+                let displayed = if known { window } else { None };
+                if wide {
+                    let color = if known {
+                        severity_color(window.map(|window| window.used_percent), app)
+                    } else {
+                        app.palette.overlay0
+                    };
+                    let bar = displayed
+                        .map_or_else(|| "──".into(), |window| meter(window.used_percent, 2));
+                    let remaining = displayed.map_or("—".into(), |window| {
+                        100u8.saturating_sub(window.used_percent).to_string()
+                    });
+                    (
+                        format!("{bar} {remaining:>3} {:<3} ", reset_label(displayed, now)),
+                        color,
+                    )
+                } else {
+                    window_parts(displayed, now, app, 2, known, !dual)
+                }
             };
-            let label_budget = label_budget.min(if narrow {
+            let five = field(account.account.usage.five_hour);
+            let weekly = field(account.account.usage.seven_day);
+            let first_window = if narrow {
+                usize::from(width)
+            } else if wide {
                 12
-            } else if width < 32 {
-                7
             } else {
-                14
-            });
+                10
+            };
+            let label_budget = first_window.saturating_sub(5);
             let mut parts = vec![
                 (
-                    format!(" {icon}"),
+                    pad_right(icon, 2),
                     provider_color(account.account.provider, app),
                 ),
                 (severity_dot(value).into(), severity_color(value, app)),
+                (" ".into(), app.palette.overlay1),
                 (
-                    format!(
-                        " {}",
-                        pad_right(&truncate_end(&label, label_budget), label_budget)
-                    ),
+                    pad_right(&truncate_end(&label, label_budget), label_budget),
                     app.palette.text,
                 ),
+                (" ".into(), app.palette.overlay1),
             ];
             let tooltip = account_tip(account, now);
-            if narrow && dual {
+            if narrow {
                 rows.push(Row::styled(parts, tooltip.clone()));
-                let mut second = vec![("    ".into(), app.palette.overlay1), five];
-                if let Some(weekly) = weekly {
-                    second.push((" ".into(), app.palette.overlay1));
-                    second.push(weekly);
-                }
+                let mut second = Vec::new();
+                append_field(
+                    &mut second,
+                    five,
+                    known && account.account.usage.five_hour.is_some(),
+                    app,
+                );
+                second.push(("  ".into(), app.palette.overlay1));
+                append_field(
+                    &mut second,
+                    weekly,
+                    known && account.account.usage.seven_day.is_some(),
+                    app,
+                );
                 rows.push(Row::styled(second, tooltip));
             } else {
+                append_field(
+                    &mut parts,
+                    five,
+                    known && account.account.usage.five_hour.is_some(),
+                    app,
+                );
                 parts.push((" ".into(), app.palette.overlay1));
-                parts.push(five);
-                if let Some(weekly) = weekly {
-                    parts.push((" ".into(), app.palette.overlay1));
-                    parts.push(weekly);
-                }
+                append_field(
+                    &mut parts,
+                    weekly,
+                    known && account.account.usage.seven_day.is_some(),
+                    app,
+                );
                 rows.push(Row::styled(parts, tooltip));
             }
         }
@@ -884,22 +982,20 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
                 .get(&host.name)
                 .map(|alias| labels::render(&alias.to_string(), app))
                 .unwrap_or_else(|| "?".into());
-            let token = format!(" {dot}{alias}");
-            let line = compact_resource_rows
-                .last_mut()
-                .unwrap_or(&mut resource_header);
-            if display_width(&line.text) + display_width(&token) > width as usize {
-                compact_resource_rows.push(Row::styled(
-                    vec![("  ".into(), app.palette.overlay1)],
-                    "Fleet resources",
-                ));
+            if compact_resource_rows
+                .last()
+                .is_none_or(|line: &Row| line.targets.len() >= (usize::from(width) / 4).max(1))
+            {
+                compact_resource_rows.push(Row::styled(Vec::new(), "Fleet resources"));
             }
-            let line = compact_resource_rows
-                .last_mut()
-                .unwrap_or(&mut resource_header);
+            let line = compact_resource_rows.last_mut().unwrap();
+            if !line.targets.is_empty() {
+                line.text.push_str("  ");
+                line.spans.push(("  ".into(), app.palette.overlay1));
+            }
             line.targets.push((
                 display_width(&line.text) as u16,
-                display_width(&token) as u16,
+                2,
                 resource_tip(
                     &host.name,
                     observation,
@@ -907,9 +1003,10 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
                     host.state != HostState::Unreachable,
                 ),
             ));
-            line.spans.push((format!(" {dot}"), color));
+            line.spans.push((dot.into(), color));
             line.spans.push((alias, app.palette.text));
-            line.text.push_str(&token);
+            line.text
+                .push_str(&format!("{dot}{}", line.spans.last().unwrap().0));
         } else {
             let name = pad_right(&truncate_end(&host.name, host_width), host_width);
             resource_rows.push(Row::styled(
@@ -1012,19 +1109,16 @@ fn row_count(app: &AppState, width: u16) -> usize {
     }
     let notices = notice_count(app);
     let usage_extra = if app.collapsed_sidebar_groups.contains(USAGE_KEY) {
-        labels::plan(app, width).last().map_or(0, |entry| entry.row)
+        let mut counts = BTreeMap::new();
+        for (provider, _) in &identities {
+            *counts.entry(*provider).or_insert(0usize) += 1;
+        }
+        counts
+            .values()
+            .map(|count| compact_group_rows(*count, width))
+            .sum()
     } else {
-        1 + identities.len().max(1)
-            + if width < 22 {
-                identities
-                    .iter()
-                    .filter(|(provider, _)| {
-                        matches!(provider, QuotaProvider::Claude | QuotaProvider::Codex)
-                    })
-                    .count()
-            } else {
-                0
-            }
+        1 + identities.len().max(1) + if width < 22 { identities.len() } else { 0 }
     };
     2 + notices + usage_extra + resource_extra(app, width)
 }
@@ -1057,20 +1151,10 @@ fn notice_count(app: &AppState) -> usize {
 
 fn resource_extra(app: &AppState, width: u16) -> usize {
     if app.collapsed_sidebar_groups.contains(RESOURCES_KEY) {
-        let mut lines = 0;
-        let mut used = display_width(if app.nerd_font {
-            "▸ 󰍛"
-        } else {
-            "▸ Resources"
-        });
-        for _ in &app.fleet_snapshot.hosts {
-            if used + 3 > width as usize {
-                lines += 1;
-                used = 2;
-            }
-            used += 3;
-        }
-        lines
+        app.fleet_snapshot
+            .hosts
+            .len()
+            .div_ceil((usize::from(width) / 4).max(1))
     } else {
         1 + app.fleet_snapshot.hosts.len()
     }
@@ -1457,7 +1541,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_is_one_strip_per_section_and_expanded_accounts_have_both_bars() {
+    fn compact_groups_have_separate_headers_and_expanded_accounts_have_both_bars() {
         let now = 1_000_000;
         let mut app = AppState::test_new();
         app.status_now_unix = Some(now);
@@ -1470,14 +1554,14 @@ mod tests {
         app.collapsed_sidebar_groups.insert(USAGE_KEY.into());
         app.collapsed_sidebar_groups.insert(RESOURCES_KEY.into());
         let compact = rows(&app, 40);
-        assert_eq!(compact.len(), 2);
+        assert_eq!(compact.len(), 5);
         assert_eq!(compact[0].section, Some(Section::Usage));
-        assert_eq!(compact[1].section, Some(Section::Resources));
+        assert_eq!(compact[4].section, Some(Section::Resources));
         assert_eq!(
-            compact[0]
-                .spans
+            compact
                 .iter()
-                .filter(|(part, _)| part.trim() == "●")
+                .flat_map(|row| &row.targets)
+                .filter(|(_, _, tip)| tip.contains("Profile:"))
                 .count(),
             3
         );
@@ -1495,6 +1579,144 @@ mod tests {
         assert_eq!(claude.spans[1].1, app.palette.green);
         let narrow = rows(&app, 18);
         assert!(display_width(&narrow[1].text) <= 18, "{}", narrow[1].text);
+    }
+
+    #[test]
+    fn compact_account_bars_use_fixed_slots_and_keep_individual_hover_details() {
+        let now = 1_000_000;
+        let mut app = AppState::test_new();
+        app.status_now_unix = Some(now);
+        app.provider_usage.accounts = (0..6)
+            .map(|index| {
+                account(
+                    QuotaProvider::Claude,
+                    &format!("claude{index}"),
+                    usage(20, now),
+                )
+            })
+            .chain([account(QuotaProvider::Codex, "codex", usage(82, now))])
+            .collect();
+        app.provider_usage.collected_unix = Some(now);
+        app.collapsed_sidebar_groups.insert(USAGE_KEY.into());
+        for (width, claude_rows) in [(17, 2), (25, 1), (35, 1)] {
+            let all = rows(&app, width);
+            assert_eq!(all[0].section, Some(Section::Usage));
+            assert!(
+                all[0].targets.is_empty(),
+                "heading owns no account hover target"
+            );
+            let account_rows: Vec<_> = all
+                .iter()
+                .filter(|row| {
+                    row.targets
+                        .iter()
+                        .any(|(_, _, tip)| tip.contains("Profile:"))
+                })
+                .collect();
+            assert_eq!(account_rows.len(), claude_rows + 1, "width {width}");
+            assert!(account_rows
+                .iter()
+                .all(|row| display_width(&row.text) <= usize::from(width)));
+            assert!(account_rows
+                .iter()
+                .all(|row| !row.text.chars().any(|ch| ch.is_ascii_digit())));
+            assert!(account_rows
+                .iter()
+                .all(|row| !row.text.contains('●') && !row.text.contains('○')));
+            let mut seen = Vec::new();
+            for row in &account_rows {
+                for (index, (start, cells, tip)) in row.targets.iter().enumerate() {
+                    assert_eq!((*start, *cells), (4 + 3 * index as u16, 2), "width {width}");
+                    seen.push(tip.clone());
+                }
+            }
+            assert_eq!(seen.len(), 7);
+            for index in 0..6 {
+                assert!(seen
+                    .iter()
+                    .any(|tip| tip.contains(&format!("Profile: claude{index}"))));
+            }
+            assert!(seen.iter().any(|tip| tip.contains("Profile: codex")));
+            assert!(account_rows[0].text.contains(crate::ui::icons::usage_label(
+                QuotaProvider::Claude,
+                app.nerd_font
+            )));
+            assert!(
+                !account_rows[1].text.contains(crate::ui::icons::usage_label(
+                    QuotaProvider::Claude,
+                    app.nerd_font
+                )) || claude_rows == 1
+            );
+            assert!(account_rows[claude_rows]
+                .text
+                .contains(crate::ui::icons::usage_label(
+                    QuotaProvider::Codex,
+                    app.nerd_font
+                )));
+        }
+    }
+
+    #[test]
+    fn quota_bars_fill_from_remaining_capacity_and_unknown_stays_muted() {
+        let now = 1_000_000;
+        let app = AppState::test_new();
+        let window = |used_percent| {
+            Some(QuotaWindow {
+                used_percent,
+                resets_at: Some(now + 3600),
+            })
+        };
+        let (ample, ample_color) = window_parts(window(20), now, &app, 2, true, false);
+        let (scarce, scarce_color) = window_parts(window(92), now, &app, 2, true, false);
+        let (unknown, unknown_color) = window_parts(None, now, &app, 2, false, false);
+        let fill = |text: &str| text.chars().filter(|ch| matches!(ch, '━' | '╾')).count();
+        assert!(
+            fill(&ample) > fill(&scarce),
+            "available capacity must fill more of the bar"
+        );
+        assert_eq!(ample_color, app.palette.green);
+        assert_eq!(scarce_color, app.palette.red);
+        assert_eq!(fill(&unknown), 0);
+        assert_eq!(unknown_color, app.palette.overlay0);
+    }
+
+    #[test]
+    fn compact_bar_uses_limiting_window_and_never_borrows_another_reset() {
+        let now = 1_000_000;
+        let mut app = AppState::test_new();
+        app.status_now_unix = Some(now);
+        let mut dual = account(QuotaProvider::Claude, "dual", usage(70, now));
+        dual.usage.five_hour = Some(QuotaWindow {
+            used_percent: 85,
+            resets_at: None,
+        });
+        dual.usage.seven_day = Some(QuotaWindow {
+            used_percent: 20,
+            resets_at: Some(now + 3600),
+        });
+        app.provider_usage.accounts = vec![dual];
+        app.provider_usage.collected_unix = Some(now);
+        let selected = accounts(&app, now);
+        let (name, window) = compact_window(&selected[0], now);
+        assert_eq!(name, "5h");
+        assert_eq!(window.unwrap().resets_at, None);
+        let tip = account_tip(&selected[0], now);
+        assert!(tip.contains("Compact bar: 5h · 85% used · 15% remaining · resets unknown"));
+
+        app.provider_usage.accounts[0].usage.seven_day = Some(QuotaWindow {
+            used_percent: 85,
+            resets_at: Some(now + 3600),
+        });
+        let selected = accounts(&app, now);
+        assert_eq!(compact_window(&selected[0], now).0, "7d");
+        app.provider_usage.accounts[0]
+            .usage
+            .five_hour
+            .as_mut()
+            .unwrap()
+            .resets_at = Some(now + 1800);
+        let selected = accounts(&app, now);
+        assert_eq!(compact_window(&selected[0], now).0, "5h");
     }
 
     #[test]
@@ -1623,10 +1845,9 @@ mod tests {
                 .iter()
                 .filter(|row| row.tooltip.contains("Profile: demo"))
                 .collect();
-            assert_eq!(allowances.len(), 2);
+            assert_eq!(allowances.len(), if width < 22 { 4 } else { 2 });
             for row in allowances {
                 assert!(display_width(&row.text) <= usize::from(width));
-                assert!(row.text.contains(" Q"));
                 assert!(!row.text.contains("5h") && !row.text.contains("7d"));
                 assert!(row.tooltip.contains("Quota: 42% used"));
                 assert!(!row.tooltip.contains("5h") && !row.tooltip.contains("weekly"));
@@ -1801,7 +2022,7 @@ mod tests {
         app.collapsed_sidebar_groups.insert(USAGE_KEY.into());
         app.collapsed_sidebar_groups.insert(RESOURCES_KEY.into());
         let panel = area(&app, app.view.sidebar_rect);
-        assert_eq!(panel.height, 2);
+        assert_eq!(panel.height, 3);
         assert_eq!(row_at(&app, 2, panel.y), Some(0));
         assert_eq!(row_at(&app, 2, panel.y.saturating_sub(1)), None);
         assert_eq!(row_at(&app, 2, panel.bottom()), None);
@@ -1815,7 +2036,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_tags_keep_identity_tooltips_when_shared_accounts_and_hosts_reorder() {
+    fn compact_bars_keep_identity_tooltips_when_shared_accounts_and_hosts_reorder() {
         let now = 1_000_000;
         let mut app = AppState::test_new();
         app.status_now_unix = Some(now);
@@ -1860,10 +2081,11 @@ mod tests {
                 .collect::<BTreeMap<_, _>>()
         };
         let before = tokens(&app);
-        assert_eq!(before.len(), 3); // Shared alder is one identity, with its own tag.
-        assert!(before["alder"].contains(&labels::render("AL", &app)));
-        assert!(before["atlas"].contains(&labels::render("AT", &app)));
-        assert!(!before["birch"].contains(&labels::render("B", &app))); // Single Codex has no tag.
+        assert_eq!(before.len(), 3); // Shared alder is one identity, with its own bar.
+        assert!(before.values().all(|bar| bar.chars().count() == 2));
+        assert!(before
+            .values()
+            .all(|bar| bar.chars().all(|glyph| matches!(glyph, '━' | '╾' | '─'))));
         app.fleet_snapshot.observations.reverse();
         for observation in &mut app.fleet_snapshot.observations {
             observation.usage.accounts.reverse();
@@ -1917,16 +2139,8 @@ mod tests {
                         .skip(usize::from(*start))
                         .take(usize::from(*width))
                         .collect();
-                    let label = token
-                        .trim_start()
-                        .strip_prefix('\u{EC82}')
-                        .unwrap()
-                        .strip_suffix(" ●")
-                        .unwrap();
-                    assert!((1..=2).contains(&label.len()));
-                    assert!(label
-                        .chars()
-                        .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit()));
+                    assert_eq!(token.chars().count(), 2);
+                    assert!(token.chars().all(|glyph| matches!(glyph, '━' | '╾' | '─')));
                 }
             }
         }
