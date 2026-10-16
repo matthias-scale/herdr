@@ -323,6 +323,84 @@ mod tests {
     }
 
     #[test]
+    fn capability_probe_reuses_warm_channel_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = PathBuf::from("/tmp").join(format!(
+            "hc-probe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        crate::platform::create_remote_private_dir(&root).expect("fixture directory");
+        let program = root.join("ssh");
+        std::fs::write(&program, r#"#!/bin/sh
+socket=''
+operation=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -S) socket="$2"; shift 2 ;;
+    -O) operation="$2"; shift 2 ;;
+    -o) shift 2 ;;
+    -fN) operation=start; shift ;;
+    *) shift ;;
+  esac
+done
+case "$operation" in
+  start) echo master >> "${socket}.starts"; touch "$socket" ;;
+  exit) rm -f "$socket" ;;
+  *)
+    test -f "$socket" || exit 255
+    cat >> "${socket}.requests"
+    echo '{"id":"fleet-agent-events-capability","result":{"type":"pong","version":"test","protocol":1,"capabilities":{"live_handoff":false,"fleet_agent_events":true,"session_events":false}}}'
+    ;;
+esac
+"#).expect("fake ssh");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+            .expect("executable");
+        let target = format!("capability-probe-{}", root.display());
+        let channel = Arc::new(HostChannel::new(&target, program.into(), &root).expect("channel"));
+        CHANNELS
+            .get_or_init(Mutex::default)
+            .lock()
+            .expect("channels")
+            .insert(target.clone(), Arc::clone(&channel));
+        let host = crate::config::FleetHostConfig {
+            name: "probe".into(),
+            target: target.clone(),
+            socket: Some("/test/socket".into()),
+            session: Some("test-session".into()),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                super::super::remote_host_event_capabilities(&host, Duration::from_secs(2))
+                    .expect("capabilities over injected channel"),
+                (true, false)
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(channel.directory.join("control.starts"))
+                .expect("master count"),
+            "master\n"
+        );
+        let requests =
+            std::fs::read_to_string(channel.directory.join("control.requests")).expect("requests");
+        assert_eq!(requests.matches("fleet-agent-events-capability").count(), 2);
+        assert!(requests.contains("HERDR_SOCKET_PATH='/test/socket'"));
+        assert!(requests.contains("HERDR_SESSION='test-session'"));
+        CHANNELS
+            .get()
+            .expect("channels")
+            .lock()
+            .expect("channels")
+            .remove(&target);
+        drop(channel);
+        std::fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[test]
     fn five_ticks_spawn_one_master_per_host_and_share_commands() {
         use std::os::unix::fs::PermissionsExt;
         let root = std::path::PathBuf::from("/tmp").join(format!(

@@ -2549,6 +2549,8 @@ fn remote_host_event_capabilities(
         id: "fleet-agent-events-capability".into(),
         method: Method::Ping(crate::api::schema::PingParams::default()),
     };
+    // The default SSH program routes through channel::run on Unix, sharing
+    // the same master as inventory reads and subscription sessions.
     let response = route_api_request_with_ssh_program(&route, &request, timeout, "ssh")?;
     let value = serde_json::from_str(&response).map_err(|error| error.to_string())?;
     let response =
@@ -2655,7 +2657,9 @@ impl RemoteStreamConsumer<'_> {
                     )?;
                 }
                 self.started = true;
-                if self.agent_events {
+                // Agent-only subscriptions have no snapshot seed. Keep normal
+                // polling until an authoritative agent inventory arrives.
+                if self.agent_events && self.session_events {
                     self.poller.set_agent_stream_live(
                         &self.host.name,
                         self.config_generation,
@@ -2677,6 +2681,8 @@ impl RemoteStreamConsumer<'_> {
                         agents,
                     })
                     .map_err(|error| format!("cannot enqueue remote fleet event: {error}"))?;
+                self.poller
+                    .set_agent_stream_live(&self.host.name, self.config_generation, true);
             }
             RemoteAgentStreamMessage::SessionChanged(snapshot) if self.started => {
                 send_remote_session_inventory_update(
@@ -8386,6 +8392,57 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].agent_status, AgentStatus::Working);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn agent_only_events_lost_keeps_poll_due_until_fresh_inventory() {
+        let host = FleetHostConfig {
+            name: "remote".into(),
+            target: "remote".into(),
+            ..Default::default()
+        };
+        let poller = Arc::new(FleetPollerConfig::new(FleetConfig::default()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut retry = RetryBackoff::default();
+        let mut consumer = RemoteStreamConsumer {
+            host: &host,
+            config_generation: poller.generation(),
+            poller: &poller,
+            event_tx: &tx,
+            agent_events: true,
+            session_events: false,
+            started: true,
+            retry: &mut retry,
+        };
+        poller.set_agent_stream_live(&host.name, poller.generation(), true);
+        assert!(consumer
+            .consume(
+                r#"{"id":"stream","error":{"code":"events_lost","message":"behind"}}"#,
+                || panic!("agent-only host has no session seed"),
+            )
+            .expect("lost"));
+        assert!(!consumer
+            .consume(
+                r#"{"id":"stream","result":{"type":"subscription_started"}}"#,
+                || panic!("agent-only host has no session seed"),
+            )
+            .expect("resubscribe"));
+        assert!(!poller.agent_stream_is_live(&host.name));
+        assert!(inventory_poll_due(
+            false,
+            poller.agent_stream_is_live(&host.name),
+            Some(Duration::from_secs(2)),
+            Duration::from_secs(2),
+        ));
+        assert!(!consumer
+            .consume(
+                r#"{"event":"fleet.agents_changed","data":{"agents":[]}}"#,
+                || panic!("agent-only host has no session seed"),
+            )
+            .expect("fresh inventory"));
+        assert!(matches!(rx.try_recv().expect("inventory"),
+            crate::events::AppEvent::FleetAgentInventoryChanged { agents, .. } if agents.is_empty()));
+        assert!(poller.agent_stream_is_live(&host.name));
     }
 
     #[test]

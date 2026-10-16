@@ -118,8 +118,10 @@ connection. Live subscriptions deliver agent and session changes immediately;
 inventory polling slows to a 60-second safety net. If a stream disconnects,
 reads return to `refresh_interval_ms`. Reconnect attempts back off from 250 ms
 to 10 seconds. A subscription that falls behind resubscribes immediately and
-reloads `session.snapshot`, without waiting for a poll. Older servers without
-event support continue using polling. Local host polling is unchanged.
+reloads `session.snapshot` when session events are supported. Agent-only
+subscriptions keep polling at `refresh_interval_ms` until fresh agent inventory
+arrives. Older servers without event support continue using polling. Local host
+polling is unchanged.
 
 ```toml
 [remote.fleet]
