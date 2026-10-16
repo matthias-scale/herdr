@@ -8613,14 +8613,14 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
     #[test]
     fn equal_safety_poll_preserves_rows_and_activity() {
         let (mut current, _) = pane_lifecycle_snapshot(HostState::Reachable);
-        current.hosts[0].entries[0].last_turn_at = Some("2026-08-26T14:00:00Z".into());
-        let before =
-            crate::ui::sidebar::remote_agent_panel_entries_at(&current, 1_792_000_000, false);
+        let now = unix_now_s();
+        current.hosts[0].entries[0].last_turn_at = Some(format_utc_timestamp(now));
+        let before = crate::ui::sidebar::remote_agent_panel_entries_at(&current, now, false);
+        assert!(before[0].entry.activity_at.is_some());
         let mut incoming = current.clone();
         incoming.preserve_live_agent_inventory_from(&current, |_| true);
         assert_eq!(incoming.hosts[0].entries, current.hosts[0].entries);
-        let after =
-            crate::ui::sidebar::remote_agent_panel_entries_at(&incoming, 1_792_000_000, false);
+        let after = crate::ui::sidebar::remote_agent_panel_entries_at(&incoming, now + 1, false);
         assert_eq!(before[0].entry.activity_at, after[0].entry.activity_at);
     }
 

@@ -335,9 +335,17 @@ mod tests {
     #[test]
     fn refresh_with_same_remote_inventory_keeps_row_order() {
         let (mut app, mut entries) = fixture();
-        let now = 1_792_000_000;
+        // Keep the owner time within the monotonic clock's representable range
+        // on short-lived Windows/macOS runners as well as Linux.
+        let owner_time = time::OffsetDateTime::now_utc()
+            .replace_nanosecond(0)
+            .expect("whole-second owner timestamp");
+        let now = u64::try_from(owner_time.unix_timestamp()).expect("Unix time");
+        let timestamp = owner_time
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("owner timestamp");
         for host in &mut app.fleet_snapshot.hosts {
-            host.entries[0].last_turn_at = Some("2026-08-26T14:00:00Z".into());
+            host.entries[0].last_turn_at = Some(timestamp.clone());
         }
         let first = remote_agent_panel_entries_at(&app.fleet_snapshot, now, false);
         let activity = compact_activity_instant(&first[0].entry).expect("remote activity");
@@ -368,7 +376,11 @@ mod tests {
         assert_eq!(first[0].entry.activity_at, second[0].entry.activity_at);
         assert_eq!(first[0].entry.last_turn_at, second[0].entry.last_turn_at);
         let mut changed = app.fleet_snapshot.clone();
-        changed.hosts[0].entries[0].last_turn_at = Some("2026-08-26T14:00:01Z".into());
+        changed.hosts[0].entries[0].last_turn_at = Some(
+            (owner_time + time::Duration::seconds(1))
+                .format(&time::format_description::well_known::Rfc3339)
+                .expect("new owner timestamp"),
+        );
         let changed = remote_agent_panel_entries_at(&changed, now + 2, false);
         assert!(changed[0].entry.activity_at > second[0].entry.activity_at);
         assert_ne!(
