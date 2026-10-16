@@ -747,9 +747,14 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
             10
         };
         let field_width = if wide { 11 } else { 7 };
+        let identity_heading = if narrow {
+            String::new()
+        } else {
+            format!("    {}", pad_right("Name", first_window - 4))
+        };
         let header = format!(
             "{}{}{}{}",
-            pad_right(if narrow { "" } else { "Name" }, first_window),
+            identity_heading,
             pad_right(if wide { "5h/Quota" } else { "5h/Q" }, field_width),
             if narrow { "  " } else { " " },
             if wide { "7d/Extra" } else { "7d/Add" },
@@ -814,7 +819,11 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
                 }
             };
             let five = field(account.account.usage.five_hour);
-            let weekly = field(account.account.usage.seven_day);
+            let weekly = if !dual && account.account.usage.seven_day.is_none() {
+                (" ".repeat(if wide { 11 } else { 7 }), app.palette.overlay1)
+            } else {
+                field(account.account.usage.seven_day)
+            };
             let first_window = if narrow {
                 usize::from(width)
             } else if wide {
@@ -847,12 +856,16 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
                     app,
                 );
                 second.push(("  ".into(), app.palette.overlay1));
-                append_field(
-                    &mut second,
-                    weekly,
-                    known && account.account.usage.seven_day.is_some(),
-                    app,
-                );
+                if !dual && account.account.usage.seven_day.is_none() {
+                    second.push(weekly);
+                } else {
+                    append_field(
+                        &mut second,
+                        weekly,
+                        known && account.account.usage.seven_day.is_some(),
+                        app,
+                    );
+                }
                 rows.push(Row::styled(second, tooltip));
             } else {
                 append_field(
@@ -862,12 +875,16 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
                     app,
                 );
                 parts.push((" ".into(), app.palette.overlay1));
-                append_field(
-                    &mut parts,
-                    weekly,
-                    known && account.account.usage.seven_day.is_some(),
-                    app,
-                );
+                if !dual && account.account.usage.seven_day.is_none() {
+                    parts.push(weekly);
+                } else {
+                    append_field(
+                        &mut parts,
+                        weekly,
+                        known && account.account.usage.seven_day.is_some(),
+                        app,
+                    );
+                }
                 rows.push(Row::styled(parts, tooltip));
             }
         }
@@ -1760,6 +1777,15 @@ mod tests {
                 machine.text
             );
             assert_eq!(account_rows.len(), if width < 22 { 2 } else { 1 });
+            if width >= 22 {
+                let heading = all
+                    .iter()
+                    .find(|row| row.tooltip.starts_with("Usage columns:"))
+                    .unwrap();
+                assert_eq!(heading.text.find("Name"), Some(4));
+                let name_byte = account.text.find("pri").unwrap();
+                assert_eq!(display_width(&account.text[..name_byte]), 4);
+            }
             assert!(all
                 .iter()
                 .any(|row| row.text.contains("5h/Q") && row.text.contains("7d")));
@@ -1849,6 +1875,13 @@ mod tests {
             for row in allowances {
                 assert!(display_width(&row.text) <= usize::from(width));
                 assert!(!row.text.contains("5h") && !row.text.contains("7d"));
+                assert!(
+                    row.text
+                        .chars()
+                        .filter(|ch| matches!(ch, '━' | '╾' | '─'))
+                        .count()
+                        <= 2
+                );
                 assert!(row.tooltip.contains("Quota: 42% used"));
                 assert!(!row.tooltip.contains("5h") && !row.tooltip.contains("weekly"));
                 assert!(!row.tooltip.contains("Additional allowance"));
