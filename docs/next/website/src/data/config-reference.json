@@ -1478,6 +1478,12 @@
           "description": "Render Nerd Font glyphs for agents, Spaces, usage providers, and file kinds. Disable this to use text labels and portable two-character file kinds."
         },
         {
+          "key": "ui.subscript_glyphs",
+          "type": "boolean",
+          "default": "false",
+          "description": "Render compact account tags and machine aliases with the companion Herdr Icons subscript alphabet. Enable only when every displaying client has that font; otherwise keep readable ordinary text labels. Requires nerd_font."
+        },
+        {
           "key": "ui.icons.spaces",
           "type": "table",
           "default": "{}",

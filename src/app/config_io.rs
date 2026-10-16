@@ -326,6 +326,25 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn select_visible_note(app: &mut App, dir: &std::path::Path) {
+        let path = dir.join("notes/todo.md");
+        std::fs::create_dir_all(path.parent().expect("note directory"))
+            .expect("create note directory");
+        std::fs::write(&path, "todo\n").expect("seed note");
+        app.state
+            .notepad
+            .set_files(vec![crate::notepad::NotepadFile {
+                path,
+                name: "todo".into(),
+            }]);
+        app.state.notepad.set_visible_tabs(vec!["note:todo".into()]);
+        assert_eq!(
+            app.state.notepad.active_tab_target(),
+            Some(crate::notepad::NotepadTabTarget::Note(0))
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn notification_toggle_restores_last_delivery_through_a_symlink() {
         let mut env = crate::config::TestConfigEnvGuard::acquire();
@@ -389,7 +408,7 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(
             &path,
-            "[ui.sidebar]\nlayout = \"sections\"\n[ui.sidebar.areas]\nnotes = true\n[notepad]\nenabled = true\nheight = 4\n",
+            "[ui.sidebar]\nlayout = \"sections\"\n[ui.sidebar.areas]\nnotes = true\n[notepad]\nenabled = true\nheight = 4\nvisible_tabs = [\"note:todo\"]\n",
         )
         .expect("seed config");
         env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -401,6 +420,7 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         );
+        select_visible_note(&mut app, &dir);
         app.state.hyperspace.enabled = false;
         app.state.notepad.focused = true;
         let sidebar = ratatui::layout::Rect::new(0, 0, 36, 24);
@@ -448,7 +468,7 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(
             &path,
-            "[ui.sidebar]\nlayout = \"current\"\n[ui.sidebar.areas]\nnotes = false\n[notepad]\nenabled = true\nheight = 4\n",
+            "[ui.sidebar]\nlayout = \"current\"\n[ui.sidebar.areas]\nnotes = false\n[notepad]\nenabled = true\nheight = 4\nvisible_tabs = [\"note:todo\"]\n",
         )
         .expect("seed config");
         env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -460,6 +480,7 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         );
+        select_visible_note(&mut app, &dir);
         app.state.hyperspace.enabled = false;
         assert!(!app.state.sidebar_areas.notes);
         assert!(crate::ui::sidebar::sidebar_area_is_visible(
