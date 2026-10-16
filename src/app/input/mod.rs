@@ -585,40 +585,146 @@ impl App {
                 self.state.capture = None;
             }
             Some(crate::app::capture::CaptureAction::Consumed) => self.persist_capture_draft(),
-            Some(crate::app::capture::CaptureAction::Save(research)) => {
-                let text = self
+            Some(crate::app::capture::CaptureAction::Spawn) => {
+                let active = self.focus_active_count();
+                let spawned = crate::focus_capture::queue_counts(&self.state.focus_dir).spawned;
+                if active + spawned >= self.state.focus_spawn_limit {
+                    if let Some(capture) = self.state.capture.as_mut() {
+                        capture.gate_reason = Some(String::new());
+                        capture.entering_reason = true;
+                        capture.error = Some(format!("{} agents already active — type a reason for urgent, Enter to spawn, Esc to just save", active + spawned));
+                    }
+                    return;
+                }
+                self.save_capture(false, true, None);
+            }
+            Some(crate::app::capture::CaptureAction::ConfirmSpawn) => {
+                let reason = self
                     .state
                     .capture
                     .as_ref()
-                    .map(|capture| capture.text.clone())
-                    .unwrap_or_default();
-                if text.trim().is_empty() {
-                    return;
-                }
-                match crate::focus_capture::add_item(&self.state.focus_dir, &text, research) {
-                    Ok(_) => {
-                        self.state.sidebar_presentation.save_capture_draft(None);
-                        self.state.capture = None;
-                        self.state.capture_ack = Some(crate::app::capture::CaptureAck {
-                            text: if research {
-                                "saved · research queued".into()
-                            } else {
-                                "saved to focus list".into()
-                            },
-                            deadline: std::time::Instant::now() + std::time::Duration::from_secs(2),
-                        });
-                    }
-                    Err(crate::focus_capture::AddError::Empty) => {}
-                    Err(crate::focus_capture::AddError::Io(error)) => {
-                        if let Some(capture) = self.state.capture.as_mut() {
-                            capture.error = Some(error.to_string());
-                            capture.restored_age = None;
-                        }
-                        self.persist_capture_draft();
-                    }
+                    .and_then(|capture| capture.gate_reason.clone());
+                if reason
+                    .as_deref()
+                    .is_none_or(|reason| reason.trim().is_empty())
+                {
+                    self.save_capture(false, false, None);
+                } else {
+                    self.save_capture(false, true, reason.as_deref());
                 }
             }
+            Some(crate::app::capture::CaptureAction::Save(research)) => {
+                self.save_capture(research, false, None);
+            }
             None => {}
+        }
+    }
+
+    fn focus_active_count(&self) -> usize {
+        self.state
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.panes.values())
+            .filter(|pane| {
+                self.state
+                    .terminals
+                    .get(&pane.attached_terminal_id)
+                    .is_some_and(|terminal| {
+                        matches!(
+                            terminal.raw_agent_state(),
+                            crate::detect::AgentState::Working | crate::detect::AgentState::Blocked
+                        )
+                    })
+            })
+            .count()
+    }
+
+    fn save_capture(&mut self, research: bool, spawn: bool, reason: Option<&str>) {
+        let text = self
+            .state
+            .capture
+            .as_ref()
+            .map(|capture| capture.text.clone())
+            .unwrap_or_default();
+        if text.trim().is_empty() {
+            return;
+        }
+        if crate::focus_capture::queue_is_full(&self.state.focus_dir, self.state.focus_queue_limit)
+        {
+            let message = format!(
+                "queue full ({}): drop or promote one",
+                self.state.focus_queue_limit
+            );
+            let _ = crate::focus_capture::append_capture_log(
+                &self.state.focus_dir,
+                "refused",
+                crate::focus_capture::split_capture(&text).0.as_str(),
+                Some(&message),
+            );
+            if let Some(capture) = self.state.capture.as_mut() {
+                capture.error = Some(message);
+                capture.restored_age = None;
+            }
+            self.persist_capture_draft();
+            return;
+        }
+        match crate::focus_capture::add_item(&self.state.focus_dir, &text, research) {
+            Ok(item) => {
+                let action = if spawn {
+                    "spawn"
+                } else if research {
+                    "research"
+                } else {
+                    "save"
+                };
+                let _ = crate::focus_capture::append_capture_log(
+                    &self.state.focus_dir,
+                    action,
+                    &item.title,
+                    reason,
+                );
+                if spawn {
+                    if let Err(error) = crate::focus_capture::mark_spawned(&item.path, reason) {
+                        if let Some(capture) = self.state.capture.as_mut() {
+                            capture.error = Some(error.to_string());
+                        }
+                        return;
+                    }
+                }
+                self.state.sidebar_presentation.save_capture_draft(None);
+                self.state.capture = None;
+                if spawn {
+                    let mut home = self.state.new_home_state();
+                    home.prompt = text;
+                    self.state.home = Some(home);
+                    self.dispatch_home_prompt();
+                    return;
+                }
+                self.state.capture_ack = Some(crate::app::capture::CaptureAck {
+                    text: if research {
+                        "saved · research queued".into()
+                    } else {
+                        "saved to focus list".into()
+                    },
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(2),
+                });
+            }
+            Err(crate::focus_capture::AddError::Empty) => {}
+            Err(crate::focus_capture::AddError::Io(error)) => {
+                let title = crate::focus_capture::split_capture(&text).0;
+                let _ = crate::focus_capture::append_capture_log(
+                    &self.state.focus_dir,
+                    "refused",
+                    &title,
+                    Some(&error.to_string()),
+                );
+                if let Some(capture) = self.state.capture.as_mut() {
+                    capture.error = Some(error.to_string());
+                    capture.restored_age = None;
+                }
+                self.persist_capture_draft();
+            }
         }
     }
 
@@ -7999,7 +8105,10 @@ sidebar_visible = true
             let saved = std::fs::read_dir(&capture_dir)
                 .expect("capture item directory")
                 .collect::<Result<Vec<_>, _>>()
-                .expect("capture item entry");
+                .expect("capture item entry")
+                .into_iter()
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
+                .collect::<Vec<_>>();
             assert_eq!(saved.len(), 1, "Enter saves the capture for {view:?}");
             std::fs::remove_dir_all(capture_dir).expect("remove capture test directory");
         }

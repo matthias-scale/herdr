@@ -137,6 +137,27 @@ pub(crate) fn render(app: &AppState, frame: &mut Frame, screen: Rect) {
         .style(panel),
         text_area,
     );
+    if state.entering_reason {
+        let reason = format!(
+            "urgent reason: {}",
+            state.gate_reason.as_deref().unwrap_or_default()
+        );
+        line(
+            frame,
+            Rect::new(
+                text_area.x,
+                text_area.y + text_area.height.saturating_sub(1),
+                text_area.width,
+                1,
+            ),
+            vec![Span::styled(
+                reason,
+                Style::default()
+                    .fg(app.palette.yellow)
+                    .bg(app.palette.panel_bg),
+            )],
+        );
+    }
     let divider_y = rect.y.saturating_add(rect.height.saturating_sub(4));
     let divider_rect = Rect::new(
         rect.x.saturating_add(1),
@@ -168,79 +189,30 @@ fn footer(app: &AppState, frame: &mut Frame, rect: Rect) {
     if rect.height < 5 {
         return;
     }
-    let left = [("↵  ", "save"), ("⌃↵ ", "save + research")];
-    let center = ["→ focus list · dumped", "→ focus list · ◆ research queued"];
-    let right = [("⇧↵  ", "new line  "), ("esc ", "keep draft")];
-    for i in 0..2usize {
+    let Some(capture) = app.capture.as_ref() else {
+        return;
+    };
+    let queued = capture.queued_count;
+    let active = capture.spawned_count + capture.active_count;
+    let rows = [
+        "Enter save · Ctrl+S spawn · Esc close".to_string(),
+        format!(
+            "queue {queued}/{} · active {active}/{}",
+            app.focus_queue_limit, app.focus_spawn_limit
+        ),
+    ];
+    for (i, row) in rows.iter().enumerate() {
         let width = rect.width.saturating_sub(4);
-        let left_width = 22_u16.min(width);
-        let show_right = width >= 58;
-        let right_text = if show_right {
-            format!("{}{}", right[i].0, right[i].1)
-        } else {
-            String::new()
-        };
-        let right_width = right_text.chars().count() as u16;
-        let center_width =
-            width.saturating_sub(left_width + right_width + if show_right { 4 } else { 2 });
-        let center_text = if center_width >= center[i].chars().count() as u16 {
-            center[i]
-        } else if i == 0 {
-            "→ dumped"
-        } else {
-            "→ ◆ research queued"
-        };
-        let center_text: String = center_text.chars().take(center_width as usize).collect();
-        let gap =
-            width.saturating_sub(left_width + center_text.chars().count() as u16 + right_width);
-        let mut spans =
-            vec![
-                Span::styled(
-                    left[i].0,
-                    Style::default()
-                        .fg(app.palette.accent)
-                        .bg(app.palette.panel_bg),
-                ),
-                Span::styled(
-                    left[i].1,
-                    Style::default()
-                        .fg(app.palette.subtext0)
-                        .bg(app.palette.panel_bg),
-                ),
-                Span::raw(" ".repeat(
-                    left_width.saturating_sub(3 + left[i].1.chars().count() as u16) as usize,
-                )),
-                Span::raw(" ".repeat(gap as usize / 2)),
-                Span::styled(
-                    center_text,
-                    Style::default()
-                        .fg(if i == 0 {
-                            app.palette.subtext0
-                        } else {
-                            app.palette.teal
-                        })
-                        .bg(app.palette.panel_bg),
-                ),
-                Span::raw(" ".repeat(gap as usize - gap as usize / 2)),
-            ];
-        if show_right {
-            spans.push(Span::styled(
-                right[i].0,
-                Style::default()
-                    .fg(app.palette.accent)
-                    .bg(app.palette.panel_bg),
-            ));
-            spans.push(Span::styled(
-                right[i].1,
-                Style::default()
-                    .fg(app.palette.subtext0)
-                    .bg(app.palette.panel_bg),
-            ));
-        }
+        let text: String = row.chars().take(width as usize).collect();
         line(
             frame,
             Rect::new(rect.x + 2, rect.y + rect.height - 3 + i as u16, width, 1),
-            spans,
+            vec![Span::styled(
+                text,
+                Style::default()
+                    .fg(app.palette.subtext0)
+                    .bg(app.palette.panel_bg),
+            )],
         );
     }
 }
@@ -308,6 +280,11 @@ mod tests {
             text: text.into(),
             restored_age: None,
             error: None,
+            gate_reason: None,
+            entering_reason: false,
+            queued_count: 0,
+            spawned_count: 0,
+            active_count: 0,
         });
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
@@ -346,20 +323,16 @@ mod tests {
         let rect = capture_rect(&app, terminal.backend().buffer().area).unwrap();
         let footer1 = row(&terminal, rect.y + rect.height - 3);
         let footer2 = row(&terminal, rect.y + rect.height - 2);
-        assert!(footer1.contains("↵  save"));
-        assert!(footer1.contains("→ focus list · dumped"));
-        assert!(footer1.contains("⇧↵  new line"));
-        assert!(footer2.contains("⌃↵ save + research"));
-        assert!(footer2.contains("◆ research queued"));
-        assert!(footer2.contains("esc keep draft"));
+        assert!(footer1.contains("Enter save · Ctrl+S spawn · Esc close"));
+        assert!(footer2.contains("queue 0/10 · active 0/3"));
         let cell = &terminal.backend().buffer()[(0, 0)];
         assert_eq!(cell.fg, app.palette.overlay1);
         assert!(!cell.modifier.contains(Modifier::BOLD));
         let (_, narrow) = draw(100, 24, "");
         let narrow_area = narrow.backend().buffer().area;
         let narrow_rect = Rect::new(1, narrow_area.height - 9, 98, 8);
-        assert!(row(&narrow, narrow_rect.y + 5).contains("save"));
-        assert!(row(&narrow, narrow_rect.y + 6).contains("save + research"));
+        assert!(row(&narrow, narrow_rect.y + 5).contains("Enter save"));
+        assert!(row(&narrow, narrow_rect.y + 6).contains("queue"));
         let mut closed = AppState::test_new();
         let mut empty = Terminal::new(TestBackend::new(30, 10)).unwrap();
         empty
@@ -379,6 +352,11 @@ mod tests {
             text: "hello".into(),
             restored_age: None,
             error: None,
+            gate_reason: None,
+            entering_reason: false,
+            queued_count: 0,
+            spawned_count: 0,
+            active_count: 0,
         });
         let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
         terminal

@@ -1125,6 +1125,8 @@ impl App {
             capture_ack: None,
             focus_room_ui: crate::app::focus_room::FocusRoomUiState::default(),
             focus_dir,
+            focus_spawn_limit: config.focus.spawn_limit,
+            focus_queue_limit: config.focus.queue_limit,
             focus_vellum: config.focus.vellum.clone(),
             home_agent_choices: Vec::new(),
             home_catalog: if cfg!(test) {
@@ -3233,6 +3235,8 @@ impl App {
         }
         if !invalid_section("focus") {
             self.state.focus_dir = crate::worktree::expand_tilde_path(&config.focus.dir);
+            self.state.focus_spawn_limit = config.focus.spawn_limit;
+            self.state.focus_queue_limit = config.focus.queue_limit;
             self.state.focus_vellum = config.focus.vellum.clone();
         }
         if !invalid_section("notepad") {

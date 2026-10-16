@@ -4589,6 +4589,8 @@ pub struct AppState {
     pub(crate) capture_ack: Option<crate::app::capture::CaptureAck>,
     pub(crate) focus_room_ui: crate::app::focus_room::FocusRoomUiState,
     pub(crate) focus_dir: std::path::PathBuf,
+    pub(crate) focus_spawn_limit: usize,
+    pub(crate) focus_queue_limit: usize,
     pub(crate) focus_vellum: String,
     /// Client-local provider choices retained when Home closes.
     pub(crate) home_agent_choices: Vec<crate::app::home::HomeAgentChoice>,
@@ -8201,6 +8203,8 @@ impl AppState {
             capture_ack: None,
             focus_room_ui: crate::app::focus_room::FocusRoomUiState::default(),
             focus_dir: crate::worktree::expand_tilde_path(crate::focus_capture::DEFAULT_DIR),
+            focus_spawn_limit: 3,
+            focus_queue_limit: 10,
             focus_vellum: "vellum".into(),
             home_agent_choices: Vec::new(),
             home_catalog: crate::app::home_catalog::HomeCatalog::fallback(),

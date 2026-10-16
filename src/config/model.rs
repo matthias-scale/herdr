@@ -563,12 +563,16 @@ pub struct ScratchConfig {
 pub struct FocusConfig {
     pub dir: String,
     pub vellum: String,
+    pub spawn_limit: usize,
+    pub queue_limit: usize,
 }
 impl Default for FocusConfig {
     fn default() -> Self {
         Self {
             dir: crate::focus_capture::DEFAULT_DIR.into(),
             vellum: "vellum".into(),
+            spawn_limit: 3,
+            queue_limit: 10,
         }
     }
 }

@@ -2698,6 +2698,18 @@
           "type": "string",
           "default": "\"vellum\"",
           "description": "Vellum executable used by Focus Room. ~ expands to the home directory."
+        },
+        {
+          "key": "focus.spawn_limit",
+          "type": "integer",
+          "default": "3",
+          "description": "Maximum number of active agents and already spawned focus items before capture requires an urgent reason."
+        },
+        {
+          "key": "focus.queue_limit",
+          "type": "integer",
+          "default": "10",
+          "description": "Maximum number of unspawned captured focus items."
         }
       ]
     }

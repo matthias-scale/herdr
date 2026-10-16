@@ -69,6 +69,102 @@ pub(crate) struct SavedItem {
     pub research: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct QueueCounts {
+    pub queued: usize,
+    pub spawned: usize,
+}
+
+pub(crate) fn queue_counts(dir: &Path) -> QueueCounts {
+    let mut counts = QueueCounts {
+        queued: 0,
+        spawned: 0,
+    };
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "md") {
+            if let Ok(raw) = std::fs::read_to_string(path) {
+                if let Some(header) = parse_header(&raw) {
+                    if header.fields.iter().any(|(key, _)| key == "spawned") {
+                        counts.spawned += 1;
+                    } else {
+                        counts.queued += 1;
+                    }
+                }
+            }
+        }
+    }
+    counts
+}
+
+pub(crate) fn queue_is_full(dir: &Path, limit: usize) -> bool {
+    queue_counts(dir).queued >= limit
+}
+
+pub(crate) fn mark_spawned(path: &Path, reason: Option<&str>) -> std::io::Result<()> {
+    let raw = std::fs::read_to_string(path)?;
+    let Some(end) = raw.find("\n---") else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid focus item header",
+        ));
+    };
+    let timestamp = time::OffsetDateTime::now_utc()
+        .format(
+            &time::format_description::parse_borrowed::<2>(
+                "[year]-[month]-[day]T[hour]:[minute]:[second]Z",
+            )
+            .expect("constant timestamp format"),
+        )
+        .unwrap_or_default();
+    let mut updated = format!("{}\nspawned: {}", &raw[..end], timestamp);
+    if let Some(reason) = reason.filter(|reason| !reason.trim().is_empty()) {
+        updated.push_str(&format!(
+            "\nreason: \"{}\"",
+            reason.replace('\\', "\\\\").replace('"', "\\\"")
+        ));
+    }
+    updated.push_str(&raw[end..]);
+    let temp = path.with_file_name(format!(".spawned-{}.tmp", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    use std::io::Write;
+    file.write_all(updated.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(temp, path)
+}
+
+pub(crate) fn append_capture_log(
+    dir: &Path,
+    action: &str,
+    title: &str,
+    reason: Option<&str>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    crate::platform::create_private_dir_all(dir)?;
+    let ts = time::OffsetDateTime::now_utc()
+        .format(
+            &time::format_description::parse_borrowed::<2>(
+                "[year]-[month]-[day]T[hour]:[minute]:[second]Z",
+            )
+            .expect("constant timestamp format"),
+        )
+        .unwrap_or_default();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("capture-log.jsonl"))?;
+    serde_json::to_writer(
+        &mut file,
+        &serde_json::json!({"ts": ts, "action": action, "title": title, "reason": reason}),
+    )
+    .map_err(std::io::Error::other)?;
+    file.write_all(b"\n")
+}
+
 #[derive(Debug)]
 pub(crate) enum AddError {
     Empty,
@@ -426,6 +522,43 @@ mod tests {
         assert_eq!(first.slug.len(), 60);
         assert_eq!(second.slug.len(), 60);
         assert!(second.slug.ends_with("-2"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spawned_marker_queue_counts_and_capture_log_round_trip() {
+        let root = temp();
+        let queued = add_item(&root, "Queued", false).unwrap();
+        let spawned = add_item(&root, "Urgent", false).unwrap();
+        mark_spawned(&spawned.path, Some("urgent work")).unwrap();
+        assert_eq!(
+            queue_counts(&root),
+            QueueCounts {
+                queued: 1,
+                spawned: 1
+            }
+        );
+        let saved = std::fs::read_to_string(spawned.path).unwrap();
+        assert!(saved.contains("spawned: 20"));
+        assert!(saved.contains("reason: \"urgent work\""));
+        append_capture_log(&root, "spawn", "Urgent", Some("urgent work")).unwrap();
+        let line = std::fs::read_to_string(root.join("capture-log.jsonl")).unwrap();
+        let record: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(record["action"], "spawn");
+        assert_eq!(record["title"], "Urgent");
+        assert_eq!(record["reason"], "urgent work");
+        assert!(record["ts"].as_str().is_some());
+        let _ = queued;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn queue_cap_counts_only_unspawned_items() {
+        let root = temp();
+        let first = add_item(&root, "First", false).unwrap();
+        assert!(queue_is_full(&root, 1));
+        mark_spawned(&first.path, None).unwrap();
+        assert!(!queue_is_full(&root, 1));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
