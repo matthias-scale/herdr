@@ -948,6 +948,50 @@ class WezTermEvidenceTests(unittest.TestCase):
 
 
 class ScenarioContractTests(unittest.TestCase):
+    def test_aligned_d_preserves_client_a_while_d_and_shared_focus_are_d(self):
+        scenario = capture.HerdrScenario.__new__(capture.HerdrScenario)
+        scenario.workspace_a = "workspace-a"
+        scenario.workspace_d = "workspace-d"
+        scenario.pane_a = "pane-a"
+        scenario.pane_d = "pane-d"
+        scenario.a_id = "client-a"
+        scenario.d_id = "client-d"
+        scenario.workspace_markers = {"a": "marker-a", "d": "marker-d"}
+        scenario.workspace_layouts = {"a": {"layout": "a"}, "d": {"layout": "d"}}
+        scenario.session = "session"
+        scenario.run = SimpleNamespace(manifest={})
+        scenario.cli = mock.Mock(return_value={"focused": "workspace-d"})
+        scenario.workspace_id = mock.Mock(return_value="workspace-d")
+        evidence_by_client = {
+            "client-a": {"marker": "marker-a"},
+            "client-d": {"marker": "marker-d"},
+        }
+        scenario.wait_for_marker = mock.Mock(
+            side_effect=lambda client, *_args: (None, evidence_by_client[client])
+        )
+
+        evidence = scenario.align_and_verify_d()
+
+        self.assertEqual(
+            scenario.wait_for_marker.call_args_list,
+            [
+                mock.call(
+                    "client-d", "marker-d", "marker-a", {"layout": "d"}, "pane-d"
+                ),
+                mock.call(
+                    "client-a", "marker-a", "marker-d", {"layout": "a"}, "pane-a"
+                ),
+            ],
+        )
+        self.assertEqual(
+            evidence["predicates"],
+            {
+                "shared_workspace_d_focused": True,
+                "client_a_a_marker_visible": True,
+                "client_d_d_marker_visible": True,
+            },
+        )
+
     def default_config_keys(self):
         source = (Path(__file__).resolve().parents[1] / "src" / "main.rs").read_text(
             encoding="utf-8"

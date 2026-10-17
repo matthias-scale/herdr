@@ -1703,7 +1703,7 @@ class HerdrScenario:
         return evidence
 
     def align_and_verify_d(self) -> dict:
-        """Deliberately align both clients to D after the A/D mismatch journey."""
+        """Align shared selection with client D; preserve client A."""
         if not all((self.workspace_a, self.workspace_d, self.pane_a, self.pane_d)):
             raise CaptureError("aligned workspace control lacks pair identities")
         self.cli("workspace", "focus", self.workspace_d, log_name="focus-d")
@@ -1719,10 +1719,10 @@ class HerdrScenario:
         )
         _a_screen, a_evidence = self.wait_for_marker(
             self.a_id,
-            self.workspace_markers["d"],
             self.workspace_markers["a"],
-            self.workspace_layouts["d"],
-            self.pane_d,
+            self.workspace_markers["d"],
+            self.workspace_layouts["a"],
+            self.pane_a,
         )
         evidence = {
             "session": self.session,
@@ -1732,8 +1732,8 @@ class HerdrScenario:
             "client_d": d_evidence,
             "predicates": {
                 "shared_workspace_d_focused": focused == self.workspace_d,
-                "client_a_d_marker_visible": a_evidence["marker"]
-                == self.workspace_markers["d"],
+                "client_a_a_marker_visible": a_evidence["marker"]
+                == self.workspace_markers["a"],
                 "client_d_d_marker_visible": d_evidence["marker"]
                 == self.workspace_markers["d"],
             },
