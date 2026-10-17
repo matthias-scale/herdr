@@ -634,6 +634,7 @@ class WezTermEvidenceTests(unittest.TestCase):
             Path("/tmp/herdr"),
             "owned-session",
         )
+        self.assertEqual(command[0], "/usr/bin/wezterm-gui")
         self.assertIn("--no-auto-connect", command)
         self.assertIn("--always-new-process", command)
         self.assertIn("herdr-private-d", command)

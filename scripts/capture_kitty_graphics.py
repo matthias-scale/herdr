@@ -575,7 +575,7 @@ def wezterm_start_command(
     session: str,
 ) -> list[str]:
     return [
-        executable,
+        str(Path(executable).with_name("wezterm-gui")),
         "--config-file",
         str(config),
         "start",
@@ -2030,7 +2030,6 @@ class Harness:
             "font pango:monospace 10\n"
             "default_border pixel 0\n"
             "default_floating_border pixel 0\n"
-            "default_layout splith\n"
             "focus_follows_mouse no\n"
             "workspace_auto_back_and_forth yes\n"
             "output * mode 1600x1000\n",
@@ -2061,7 +2060,7 @@ class Harness:
         config = home / ".config" / "herdr-dev" / "config.toml"
         env = private_environment(home, runtime, config, self.display)
         command = [
-            self.tools["wezterm"],
+            str(Path(self.tools["wezterm"]).with_name("wezterm-gui")),
             "--config-file",
             str(self.wezterm_config),
             "start",
