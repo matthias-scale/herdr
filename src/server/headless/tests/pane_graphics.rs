@@ -70,6 +70,150 @@ fn active_gate() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
     std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true))
 }
 
+fn two_workspace_kitty_server() -> (
+    HeadlessServer,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+    crate::layout::PaneId,
+    crate::layout::PaneId,
+) {
+    let (mut server, client_a_rx, pane_a) = retained_test_server(b"WORKSPACE-A-MARKER");
+    server.app.state.workspaces[0].id = "wA".into();
+    let mut workspace_d = crate::workspace::Workspace::test_new("workspace-d");
+    workspace_d.id = "wD".into();
+    let pane_d = workspace_d.focused_pane_id().expect("workspace D pane");
+    workspace_d.insert_test_runtime(
+        pane_d,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"WORKSPACE-D-MARKER"),
+    );
+    let terminal_a = server.app.state.workspaces[0]
+        .terminal_id(pane_a)
+        .cloned()
+        .expect("workspace A terminal id");
+    let terminal_d = workspace_d
+        .terminal_id(pane_d)
+        .cloned()
+        .expect("workspace D terminal id");
+    assert_ne!(pane_a, pane_d, "workspace panes must be distinct");
+    assert_ne!(
+        terminal_a, terminal_d,
+        "workspace runtimes must be distinct"
+    );
+    server.app.state.workspaces.push(workspace_d);
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.kitty_graphics_enabled = true;
+
+    let cell_size = crate::kitty_graphics::HostCellSize {
+        width_px: 10,
+        height_px: 20,
+    };
+    {
+        let client_a = server.clients.get_mut(&1).expect("client A");
+        client_a.cell_size = cell_size;
+        client_a.focus_initialized = true;
+        client_a.active_workspace = Some(0);
+        client_a.active_workspace_id = Some("wA".into());
+        client_a.selected_pane = 0;
+    }
+    let (client_d_writer, _control_rx, client_d_rx) = test_client_writer();
+    let mut client_d = ClientConnection::new(
+        (80, 24),
+        cell_size,
+        crate::terminal_theme::TerminalTheme::default(),
+        None,
+        2,
+        RenderEncoding::SemanticFrame,
+        Some(client_d_writer),
+    );
+    client_d.focus_initialized = true;
+    client_d.active_workspace = Some(1);
+    client_d.active_workspace_id = Some("wD".into());
+    client_d.selected_pane = 0;
+    server.clients.insert(2, client_d);
+
+    (server, client_a_rx, client_d_rx, pane_a, pane_d)
+}
+
+fn inject_workspace_d_kitty_image(server: &HeadlessServer, pane_d: crate::layout::PaneId) {
+    let runtime = server
+        .app
+        .state
+        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 1, pane_d)
+        .expect("workspace D runtime");
+    let mut input = b"\x1b[12;1H".to_vec();
+    input.extend(crate::kitty_graphics::tests::identity_fixture_apc());
+    runtime.test_process_pty_bytes(&input);
+}
+
+fn assert_two_workspace_retained_panes(
+    server: &HeadlessServer,
+    pane_a: crate::layout::PaneId,
+    pane_d: crate::layout::PaneId,
+) {
+    assert!(server.clients[&1]
+        .retained_pane_infos
+        .iter()
+        .any(|info| info.id == pane_a));
+    assert!(server.clients[&2]
+        .retained_pane_infos
+        .iter()
+        .any(|info| info.id == pane_d));
+}
+
+fn assert_two_workspace_client_state(server: &HeadlessServer) {
+    let client_a = &server.clients[&1];
+    assert_eq!(client_a.active_workspace, Some(0));
+    assert_eq!(client_a.active_workspace_id.as_deref(), Some("wA"));
+    assert_eq!(client_a.selected_pane, 0);
+    let client_d = &server.clients[&2];
+    assert_eq!(client_d.active_workspace, Some(1));
+    assert_eq!(client_d.active_workspace_id.as_deref(), Some("wD"));
+    assert_eq!(client_d.selected_pane, 0);
+}
+
+fn assert_workspace_d_fixture_geometry(
+    server: &HeadlessServer,
+    pane_d: crate::layout::PaneId,
+    bytes: &[u8],
+) {
+    let info = server.clients[&2]
+        .retained_pane_infos
+        .iter()
+        .find(|info| info.id == pane_d)
+        .expect("client D retained its workspace pane geometry");
+    assert_eq!(
+        server.clients[&2].cell_size,
+        crate::kitty_graphics::HostCellSize {
+            width_px: 10,
+            height_px: 20,
+        }
+    );
+    assert!(
+        crate::kitty_graphics::tests::identity_has_fixture_placement_at(
+            bytes,
+            (info.inner_rect.y + 12, info.inner_rect.x + 1),
+            4,
+            2,
+        ),
+        "client D fixture placement must use its pane origin, terminal cursor, and 4x2 Kitty cell geometry"
+    );
+}
+
+fn receive_optional_graphics(receiver: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
+    match receiver.recv_timeout(Duration::from_millis(100)) {
+        Ok(bytes) => match read_server_message(bytes) {
+            ServerMessage::Graphics { bytes } => bytes,
+            ServerMessage::Frame(frame) => frame.graphics,
+            other => panic!("expected graphics update, got {other:?}"),
+        },
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Vec::new(),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("graphics receiver disconnected")
+        }
+    }
+}
+
 fn set_graphics_layer(server: &mut HeadlessServer, pane_id: crate::layout::PaneId, data: Vec<u8>) {
     set_named_graphics_layer(
         server,
@@ -1049,6 +1193,114 @@ async fn retained_graphics_uses_each_receiving_clients_surface_geometry() {
     assert_ne!(
         client_1_graphics, client_2_graphics,
         "retained placements must reflect each client's own pane rectangle"
+    );
+}
+
+#[tokio::test]
+async fn full_render_kitty_graphics_uses_the_client_workspace() {
+    let (mut server, client_a_rx, client_d_rx, pane_a, pane_d) = two_workspace_kitty_server();
+    inject_workspace_d_kitty_image(&server, pane_d);
+
+    server.render_and_stream();
+    let frame_a = read_server_frame(receive_render(&client_a_rx, Duration::from_millis(100)));
+    let frame_d = read_server_frame(receive_render(&client_d_rx, Duration::from_millis(100)));
+    assert!(
+        frame_text(&frame_d).contains("WORKSPACE-D-MARKER"),
+        "client D text must render its own workspace before graphics are checked"
+    );
+    let client_d_has_fixture =
+        crate::kitty_graphics::tests::identity_has_fixture_upload_and_placement(&frame_d.graphics);
+    assert!(
+        !crate::kitty_graphics::tests::identity_has_image_activity(&frame_a.graphics),
+        "client A must not receive image activity from workspace D"
+    );
+    assert_eq!(
+        server.app.state.active,
+        Some(0),
+        "global workspace must remain A"
+    );
+    assert_two_workspace_retained_panes(&server, pane_a, pane_d);
+    assert_two_workspace_client_state(&server);
+    if client_d_has_fixture {
+        assert_workspace_d_fixture_geometry(&server, pane_d, &frame_d.graphics);
+    }
+    assert!(
+        client_d_has_fixture,
+        "client D is missing the fixture Kitty upload and matching placement"
+    );
+}
+
+#[tokio::test]
+async fn retained_graphics_uses_the_client_workspace() {
+    let (mut server, client_a_rx, client_d_rx, pane_a, pane_d) = two_workspace_kitty_server();
+
+    server.render_and_stream();
+    let _frame_a = read_server_frame(receive_render(&client_a_rx, Duration::from_millis(100)));
+    let frame_d = read_server_frame(receive_render(&client_d_rx, Duration::from_millis(100)));
+    assert!(
+        frame_text(&frame_d).contains("WORKSPACE-D-MARKER"),
+        "client D text must render its own workspace before graphics are checked"
+    );
+    assert_two_workspace_retained_panes(&server, pane_a, pane_d);
+
+    inject_workspace_d_kitty_image(&server, pane_d);
+    assert_eq!(
+        server.render_retained_graphics_update_and_stream(),
+        RetainedGraphicsOutcome::Sent
+    );
+    let graphics_a = receive_optional_graphics(&client_a_rx);
+    let graphics_d = receive_optional_graphics(&client_d_rx);
+    let client_d_has_fixture =
+        crate::kitty_graphics::tests::identity_has_fixture_upload_and_placement(&graphics_d);
+    assert!(
+        !crate::kitty_graphics::tests::identity_has_image_activity(&graphics_a),
+        "client A must not receive image activity from workspace D"
+    );
+    assert_eq!(
+        server.app.state.active,
+        Some(0),
+        "global workspace must remain A"
+    );
+    assert_two_workspace_retained_panes(&server, pane_a, pane_d);
+    assert_two_workspace_client_state(&server);
+    if client_d_has_fixture {
+        assert_workspace_d_fixture_geometry(&server, pane_d, &graphics_d);
+    }
+    assert!(
+        client_d_has_fixture,
+        "client D is missing the fixture Kitty upload and matching placement"
+    );
+}
+
+#[tokio::test]
+async fn full_render_kitty_graphics_aligned_workspace_control() {
+    let (mut server, client_a_rx, client_d_rx, pane_a, pane_d) = two_workspace_kitty_server();
+    inject_workspace_d_kitty_image(&server, pane_d);
+    server.app.state.active = Some(1);
+
+    server.render_and_stream();
+    let frame_a = read_server_frame(receive_render(&client_a_rx, Duration::from_millis(100)));
+    let frame_d = read_server_frame(receive_render(&client_d_rx, Duration::from_millis(100)));
+    assert!(
+        frame_text(&frame_d).contains("WORKSPACE-D-MARKER"),
+        "the aligned client must render workspace D text"
+    );
+    let client_d_has_fixture =
+        crate::kitty_graphics::tests::identity_has_fixture_upload_and_placement(&frame_d.graphics);
+    assert!(
+        !crate::kitty_graphics::tests::identity_has_image_activity(&frame_a.graphics),
+        "client A must not receive workspace D image activity"
+    );
+    assert_eq!(
+        server.app.state.active,
+        Some(1),
+        "global workspace must remain D"
+    );
+    assert_two_workspace_retained_panes(&server, pane_a, pane_d);
+    assert_two_workspace_client_state(&server);
+    assert!(
+        client_d_has_fixture,
+        "aligned client D is missing the fixture Kitty upload and matching placement"
     );
 }
 

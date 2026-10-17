@@ -1696,6 +1696,7 @@ pub(crate) struct ClientPresentationPolicy<'a> {
     mode: Mode,
     pomodoro_owns_input: bool,
     tab_surface_visible: bool,
+    graphics_workspace: Option<usize>,
     geometry: ClientPresentationGeometry<'a>,
 }
 
@@ -1706,6 +1707,7 @@ impl ClientPresentationPolicy<'static> {
         dock: &DockPresentationState,
         pomodoro_owns_input: bool,
         tab_surface_visible: bool,
+        graphics_workspace: Option<usize>,
         retained_pane_infos: std::sync::Arc<Vec<crate::layout::PaneInfo>>,
     ) -> Self {
         let owner = ClientInputOwnerState::from_presentations(sidebar, dock).resolve();
@@ -1722,6 +1724,7 @@ impl ClientPresentationPolicy<'static> {
             mode,
             pomodoro_owns_input,
             tab_surface_visible,
+            graphics_workspace,
             geometry: ClientPresentationGeometry::Shared(retained_pane_infos),
         }
     }
@@ -1740,6 +1743,7 @@ impl<'a> ClientPresentationPolicy<'a> {
             mode: app.effective_interaction_mode(),
             pomodoro_owns_input,
             tab_surface_visible: !app.tab_surface_replaced(),
+            graphics_workspace: app.active,
             geometry: ClientPresentationGeometry::Borrowed(&app.view.pane_infos),
         }
     }
@@ -1762,6 +1766,10 @@ impl<'a> ClientPresentationPolicy<'a> {
 
     pub(crate) fn tab_surface_visible(&self) -> bool {
         self.tab_surface_visible
+    }
+
+    pub(crate) fn graphics_workspace(&self) -> Option<usize> {
+        self.graphics_workspace
     }
 
     pub(crate) fn tab_surface(&self) -> crate::ui::TabSurfaceView<'_> {
@@ -9387,6 +9395,7 @@ mod tests {
                 &dock,
                 false,
                 true,
+                state.active,
                 std::sync::Arc::new(Vec::new()),
             );
             assert_eq!(

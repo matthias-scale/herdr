@@ -74,8 +74,8 @@ impl HostCellSize {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HostViewKey {
-    workspace_index: usize,
-    tab_index: usize,
+    workspace_id: String,
+    tab_root_pane: PaneId,
     /// Opening a full-terminal overlay is a view change: the placements from the
     /// panes underneath must be cleared, not carried over.
     overlay_open: bool,
@@ -349,6 +349,7 @@ pub(crate) fn encode_local_pane_graphics_for_client(
     cache: &mut HostGraphicsCache,
 ) -> EncodedGraphics {
     let surface = presentation_policy.tab_surface();
+    let graphics_workspace = presentation_policy.graphics_workspace();
     let visible = presentation_policy.pane_graphics_visible() && cell_size.is_known();
     tracing::debug!(
         visible,
@@ -375,11 +376,12 @@ pub(crate) fn encode_local_pane_graphics_for_client(
             graphics,
             terminal_runtimes,
             surface,
+            graphics_workspace,
             cell_size,
             &cache.images,
             &cache.oversized,
         );
-        let view_changed = cache.update_view(active_view_key(app));
+        let view_changed = cache.update_view(active_view_key(app, graphics_workspace));
         let mut encoded =
             encode_terminal_graphics_update(cache, &placements, view_changed, transaction_budget);
         if !bytes.is_empty() {
@@ -404,6 +406,7 @@ pub(crate) fn encode_local_pane_graphics_for_client(
             graphics,
             terminal_runtimes,
             surface,
+            graphics_workspace,
             cell_size,
             &cache.images,
             &cache.oversized,
@@ -411,7 +414,11 @@ pub(crate) fn encode_local_pane_graphics_for_client(
     } else {
         Vec::new()
     };
-    cache.update_view(visible.then(|| active_view_key(app)).flatten());
+    cache.update_view(
+        visible
+            .then(|| active_view_key(app, graphics_workspace))
+            .flatten(),
+    );
     // The host text blit overwrites Kitty placements, so every rendered frame must
     // display cached images again even when their data and geometry are unchanged.
     cache.request_placement_replay();
@@ -429,13 +436,14 @@ pub(crate) fn has_visible_pane_graphics(
     graphics: &crate::app::pane_graphics::Runtime,
     terminal_runtimes: &TerminalRuntimeRegistry,
     surface: crate::ui::TabSurfaceView<'_>,
+    graphics_workspace: Option<usize>,
     cell_size: HostCellSize,
 ) -> bool {
     if app.effective_interaction_mode() != Mode::Terminal || !cell_size.is_known() {
         return false;
     }
 
-    let Some(ws_idx) = app.active else {
+    let Some(ws_idx) = graphics_workspace else {
         return false;
     };
     if app
@@ -1241,12 +1249,13 @@ impl HostGraphicsCache {
     }
 }
 
-fn active_view_key(app: &AppState) -> Option<HostViewKey> {
-    let ws_idx = app.active?;
+fn active_view_key(app: &AppState, workspace_index: Option<usize>) -> Option<HostViewKey> {
+    let ws_idx = workspace_index?;
     let ws = app.workspaces.get(ws_idx)?;
+    let active_tab = ws.active_tab()?;
     Some(HostViewKey {
-        workspace_index: ws_idx,
-        tab_index: ws.active_tab_index(),
+        workspace_id: ws.id.clone(),
+        tab_root_pane: active_tab.root_pane,
         overlay_open: app.home.is_some() || app.inbox.is_some(),
     })
 }
@@ -1256,11 +1265,12 @@ fn collect_visible_placements(
     graphics: &crate::app::pane_graphics::Runtime,
     terminal_runtimes: &TerminalRuntimeRegistry,
     surface: crate::ui::TabSurfaceView<'_>,
+    workspace_index: Option<usize>,
     cell_size: HostCellSize,
     uploaded_images: &HashMap<u32, ImageSignature>,
     oversized_images: &HashMap<HostSourceKey, ImageSignature>,
 ) -> Vec<HostPlacement> {
-    let ws_idx = match app.active {
+    let ws_idx = match workspace_index {
         Some(idx) => idx,
         None => {
             tracing::debug!("collect_visible_placements: no active workspace");
@@ -1547,6 +1557,7 @@ pub(crate) fn prepare_direct_terminal_transfer(
         graphics,
         terminal_runtimes,
         presentation_policy.tab_surface(),
+        presentation_policy.graphics_workspace(),
         cell_size,
         &cache.images,
         &cache.oversized,
@@ -2011,12 +2022,344 @@ fn encode_kitty_data(out: &mut Vec<u8>, control: &str, data: &[u8]) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     #[cfg(unix)]
     use std::ffi::CString;
     #[cfg(unix)]
     use std::os::fd::FromRawFd;
+
+    const IDENTITY_FIXTURE_BASE64: &str = "/wAA/wD/AP8AAP////8A/w==";
+    const IDENTITY_FIXTURE_SHA256: &str =
+        "5b48123a1babb9efe5965cb75028f1dbd7083cfbc848cd2abb380cbc809f9d73";
+
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct IdentityKittyCommand {
+        action: Option<String>,
+        transmission: Option<String>,
+        format: Option<u32>,
+        width: Option<u32>,
+        height: Option<u32>,
+        image_id: Option<u32>,
+        placement_id: Option<u32>,
+        columns: Option<u32>,
+        rows: Option<u32>,
+        cursor: Option<(u16, u16)>,
+        payload: Vec<u8>,
+    }
+
+    pub(crate) fn identity_fixture_image_bytes() -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(IDENTITY_FIXTURE_BASE64)
+            .expect("identity fixture is valid base64")
+    }
+
+    pub(crate) fn identity_fixture_apc() -> Vec<u8> {
+        format!("\x1b_Ga=T,f=32,t=d,i=42,p=1,s=2,v=2,c=4,r=2,q=2;{IDENTITY_FIXTURE_BASE64}\x1b\\")
+            .into_bytes()
+    }
+
+    fn identity_kitty_commands(bytes: &[u8]) -> Vec<IdentityKittyCommand> {
+        fn field<'a>(control: &'a str, key: &str) -> Option<&'a str> {
+            control.split(',').find_map(|part| part.strip_prefix(key))
+        }
+
+        fn decode_payload(encoded: &str) -> Vec<u8> {
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("Kitty payload is valid base64")
+        }
+
+        fn command(control: &str, cursor: Option<(u16, u16)>) -> IdentityKittyCommand {
+            let number = |key| field(control, key).and_then(|value| value.parse().ok());
+            IdentityKittyCommand {
+                action: field(control, "a=").map(str::to_owned),
+                transmission: field(control, "t=").map(str::to_owned),
+                format: number("f="),
+                width: number("s="),
+                height: number("v="),
+                image_id: number("i="),
+                placement_id: number("p="),
+                columns: number("c="),
+                rows: number("r="),
+                cursor,
+                payload: Vec::new(),
+            }
+        }
+
+        fn latest_cursor(bytes: &[u8]) -> Option<(u16, u16)> {
+            let mut latest = None;
+            let mut offset = 0;
+            while let Some(relative) = bytes[offset..]
+                .windows(2)
+                .position(|window| window == b"\x1b[")
+            {
+                let params_start = offset + relative + 2;
+                let Some(final_offset) = bytes[params_start..]
+                    .iter()
+                    .position(|byte| (0x40..=0x7e).contains(byte))
+                    .map(|end| params_start + end)
+                else {
+                    break;
+                };
+                if matches!(bytes[final_offset], b'H' | b'f') {
+                    let params = std::str::from_utf8(&bytes[params_start..final_offset]).ok();
+                    if let Some((row, column)) = params.and_then(|params| {
+                        let mut parts = params.split(';');
+                        Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+                    }) {
+                        latest = Some((row, column));
+                    }
+                }
+                offset = final_offset + 1;
+            }
+            latest
+        }
+
+        let mut commands = Vec::new();
+        let mut pending: Option<(IdentityKittyCommand, Vec<u8>)> = None;
+        let mut remaining = bytes;
+        let mut cursor = None;
+        while let Some(start) = remaining.windows(3).position(|window| window == b"\x1b_G") {
+            cursor = latest_cursor(&remaining[..start]).or(cursor);
+            remaining = &remaining[start + 3..];
+            let Some(end) = remaining.windows(2).position(|window| window == b"\x1b\\") else {
+                break;
+            };
+            let body = &remaining[..end];
+            remaining = &remaining[end + 2..];
+            let separator = body.iter().position(|byte| *byte == b';');
+            let control_bytes = separator.map_or(body, |index| &body[..index]);
+            let payload_bytes = separator.map_or(&[][..], |index| &body[index + 1..]);
+            let control = std::str::from_utf8(control_bytes).expect("Kitty controls are UTF-8");
+            let payload = std::str::from_utf8(payload_bytes).expect("Kitty payload is base64");
+            let payload_chunk = decode_payload(payload);
+            let is_continuation = field(control, "a=").is_none()
+                && control.split(',').all(|part| part.starts_with("m="));
+
+            if let Some((mut first, mut decoded)) = pending.take() {
+                if is_continuation {
+                    decoded.extend(payload_chunk);
+                    if field(control, "m=") == Some("1") {
+                        pending = Some((first, decoded));
+                    } else {
+                        first.payload = decoded;
+                        commands.push(first);
+                    }
+                    continue;
+                }
+            }
+
+            let parsed = command(control, cursor);
+            if field(control, "m=") == Some("1") {
+                pending = Some((parsed, payload_chunk));
+            } else {
+                let mut parsed = parsed;
+                parsed.payload = payload_chunk;
+                commands.push(parsed);
+            }
+        }
+        commands
+    }
+
+    pub(crate) fn identity_has_fixture_upload_and_placement(bytes: &[u8]) -> bool {
+        let fixture = identity_fixture_image_bytes();
+        let commands = identity_kitty_commands(bytes);
+        let uploaded_ids = commands
+            .iter()
+            .filter(|command| {
+                matches!(command.action.as_deref(), Some("t" | "T"))
+                    && command.transmission.as_deref() == Some("d")
+                    && command.format == Some(32)
+                    && command.width == Some(2)
+                    && command.height == Some(2)
+                    && command.payload == fixture
+            })
+            .filter_map(|command| command.image_id)
+            .collect::<HashSet<_>>();
+        let placed_ids = commands
+            .iter()
+            .filter(|command| {
+                matches!(command.action.as_deref(), Some("T" | "p"))
+                    && command.placement_id.is_some()
+            })
+            .filter_map(|command| command.image_id)
+            .collect::<HashSet<_>>();
+        uploaded_ids
+            .iter()
+            .any(|image_id| placed_ids.contains(image_id))
+    }
+
+    pub(crate) fn identity_has_image_activity(bytes: &[u8]) -> bool {
+        identity_kitty_commands(bytes).iter().any(|command| {
+            matches!(command.action.as_deref(), Some("t" | "T" | "p")) && command.image_id.is_some()
+        })
+    }
+
+    pub(crate) fn identity_has_fixture_placement_at(
+        bytes: &[u8],
+        cursor: (u16, u16),
+        columns: u32,
+        rows: u32,
+    ) -> bool {
+        let fixture = identity_fixture_image_bytes();
+        let commands = identity_kitty_commands(bytes);
+        let uploaded_ids = commands
+            .iter()
+            .filter(|command| {
+                matches!(command.action.as_deref(), Some("t" | "T"))
+                    && command.transmission.as_deref() == Some("d")
+                    && command.format == Some(32)
+                    && command.width == Some(2)
+                    && command.height == Some(2)
+                    && command.payload == fixture
+            })
+            .filter_map(|command| command.image_id)
+            .collect::<HashSet<_>>();
+        commands.iter().any(|command| {
+            matches!(command.action.as_deref(), Some("T" | "p"))
+                && command.placement_id.is_some()
+                && command.cursor == Some(cursor)
+                && command.columns == Some(columns)
+                && command.rows == Some(rows)
+                && command
+                    .image_id
+                    .is_some_and(|image_id| uploaded_ids.contains(&image_id))
+        })
+    }
+
+    fn identity_chunked_fixture_transcript(fixture: &[u8]) -> Vec<u8> {
+        let split = fixture.len() / 2;
+        let first = base64::engine::general_purpose::STANDARD.encode(&fixture[..split]);
+        let second = base64::engine::general_purpose::STANDARD.encode(&fixture[split..]);
+        format!(
+            "\x1b_Ga=t,t=d,f=32,s=2,v=2,i=91,m=1;{first}\x1b\\\x1b_Gm=0;{second}\x1b\\\x1b_Ga=p,i=91,p=7,c=4,r=2,q=2;\x1b\\"
+        )
+        .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn kitty_graphics_hidden_surface_suppresses_fixture_placements() {
+        use sha2::Digest as _;
+
+        let fixture = identity_fixture_image_bytes();
+        assert_eq!(fixture.len(), 16);
+        assert_eq!(
+            format!("{:x}", sha2::Sha256::digest(&fixture)),
+            IDENTITY_FIXTURE_SHA256
+        );
+        assert!(identity_has_fixture_upload_and_placement(
+            &identity_chunked_fixture_transcript(&fixture)
+        ));
+
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("hidden-graphics-surface");
+        let pane_id = workspace.tabs[0].root_pane;
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"hidden");
+        let mut input = b"\x1b[12;1H".to_vec();
+        input.extend(identity_fixture_apc());
+        runtime.test_process_pty_bytes(&input);
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.selected = 0;
+        app.set_server_mode(Mode::Terminal);
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 80, 24));
+
+        let sidebar = crate::app::state::SidebarPresentationState::default();
+        let dock = crate::app::state::DockPresentationState::default();
+        let policy = crate::app::state::ClientPresentationPolicy::from_presentations(
+            Mode::Terminal,
+            &sidebar,
+            &dock,
+            false,
+            false,
+            app.active,
+            std::sync::Arc::new(app.view.pane_infos.clone()),
+        );
+        let mut cache = HostGraphicsCache::default();
+        let encoded = encode_local_pane_graphics_for_client(
+            &app,
+            &crate::app::pane_graphics::Runtime::default(),
+            &TerminalRuntimeRegistry::new(),
+            policy,
+            HostCellSize {
+                width_px: 10,
+                height_px: 20,
+            },
+            None,
+            &mut cache,
+        );
+
+        assert!(encoded.bytes.is_empty());
+        assert!(!identity_has_image_activity(&encoded.bytes));
+    }
+
+    #[tokio::test]
+    async fn invalid_client_workspace_suppresses_global_api_and_terminal_graphics() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("global-workspace");
+        let pane_id = workspace.tabs[0].root_pane;
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(
+            80,
+            24,
+            b"invalid-view-terminal-image",
+        );
+        let mut terminal_input = b"\x1b[12;1H".to_vec();
+        terminal_input.extend(identity_fixture_apc());
+        runtime.test_process_pty_bytes(&terminal_input);
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.selected = 0;
+        app.set_server_mode(Mode::Terminal);
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 80, 24));
+
+        let key = (pane_id, "invalid-view-control".to_owned());
+        let mut graphics = crate::app::pane_graphics::Runtime::default();
+        graphics.slots.insert(
+            key,
+            crate::app::pane_graphics::Slot::test(
+                42,
+                Some(crate::app::pane_graphics::Layer::inline(
+                    crate::api::schema::PaneGraphicsFormat::Rgba,
+                    1,
+                    1,
+                    vec![255, 0, 0, 255],
+                    Default::default(),
+                    0,
+                )),
+            ),
+        );
+        let sidebar = crate::app::state::SidebarPresentationState::default();
+        let dock = crate::app::state::DockPresentationState::default();
+        let policy = crate::app::state::ClientPresentationPolicy::from_presentations(
+            Mode::Terminal,
+            &sidebar,
+            &dock,
+            false,
+            true,
+            None,
+            std::sync::Arc::new(app.view.pane_infos.clone()),
+        );
+        assert!(policy.pane_graphics_visible());
+        let mut cache = HostGraphicsCache::default();
+        let encoded = encode_local_pane_graphics_for_client(
+            &app,
+            &graphics,
+            &TerminalRuntimeRegistry::new(),
+            policy,
+            HostCellSize {
+                width_px: 10,
+                height_px: 20,
+            },
+            None,
+            &mut cache,
+        );
+
+        assert!(encoded.bytes.is_empty());
+        assert!(!identity_has_image_activity(&encoded.bytes));
+    }
 
     #[cfg(unix)]
     const AWRIT_FRAME_WIDTH: usize = 2_800;

@@ -13,7 +13,7 @@ test:
 
 # Run repository maintenance contract tests
 maintenance-test:
-    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_pr_gate_workflow scripts.test_preview scripts.test_qa_preview_adapter scripts.test_release scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_watch_pr_checks scripts.test_watchdog_replay scripts.test_watchdog_service scripts.test_windows_cross scripts.test_windows_input
+    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_capture_kitty_graphics scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_pr_gate_workflow scripts.test_preview scripts.test_qa_preview_adapter scripts.test_release scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_watch_pr_checks scripts.test_watchdog_replay scripts.test_watchdog_service scripts.test_windows_cross scripts.test_windows_input
     bun test scripts/release-workflows.test.ts
 
 # Local interactive Windows Terminal input qualification (never runs in normal CI).
@@ -125,6 +125,10 @@ bench-render-scale:
 # Non-gating PTY parse scaling profile with and without link extraction
 bench-parse-scale:
     cargo test --release --locked --bin herdr parse_scale_profile -- --ignored --nocapture --test-threads=1
+
+# Opt-in isolated compositor pixel check for explicit baseline and candidate binaries
+capture-kitty-graphics *args:
+    python3 scripts/capture_kitty_graphics.py {{args}}
 
 # ~3-5 minute CPU comparison; downloads stable unless HERDR_PERF_BASELINE_BIN is set
 bench-release-smoke:
