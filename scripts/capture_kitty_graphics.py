@@ -2357,7 +2357,7 @@ class Harness:
         aligned = self.capture_run.expect_stable(
             f"{binary_label}-aligned-client-d-image",
             scenario.d_id,
-            binary_label == "candidate",
+            True,
             FIXTURE_COLORS,
             region,
         )
