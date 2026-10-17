@@ -25,8 +25,12 @@ fn is_dark(p: &Palette) -> bool {
 
 /// Swaps an icon for its dark-theme variant where the brand mark has one.
 pub(crate) fn themed<'a>(icon: &'a str, p: &Palette) -> &'a str {
-    if icon == SCALABLE && is_dark(p) {
-        SCALABLE_DARK
+    if is_dark(p) {
+        match icon {
+            SCALABLE => SCALABLE_DARK,
+            HERDR => HERDR_DARK,
+            _ => icon,
+        }
     } else {
         icon
     }
@@ -43,6 +47,7 @@ const KIMI: &str = "\u{F6001}";
 const SCALABLE: &str = "\u{F6002}";
 const SCALABLE_DARK: &str = "\u{F6007}";
 const HERDR: &str = "\u{F6003}";
+const HERDR_DARK: &str = "\u{F6036}";
 const INBOX: &str = "\u{F6004}";
 const OPENCODE: &str = "\u{F6005}";
 pub(crate) const GITHUB: &str = "\u{F6006}";
@@ -336,7 +341,9 @@ pub(crate) fn keyword_icon_matches(title: &str, icon: &str) -> bool {
         .any(|word| {
             KEYWORD_ICONS.iter().any(|(keyword, matched)| {
                 word.eq_ignore_ascii_case(keyword)
-                    && (*matched == icon || (*matched == SCALABLE && icon == SCALABLE_DARK))
+                    && (*matched == icon
+                        || (*matched == SCALABLE && icon == SCALABLE_DARK)
+                        || (*matched == HERDR && icon == HERDR_DARK))
             })
         })
 }
@@ -581,8 +588,19 @@ mod tests {
         assert_eq!(claude_color(&palette), Color::Rgb(217, 97, 31));
         palette.panel_bg = Color::Rgb(30, 30, 46);
         assert_eq!(themed(SCALABLE, &palette), SCALABLE_DARK);
-        assert_eq!(themed(HERDR, &palette), HERDR);
+        assert_eq!(themed(HERDR, &palette), HERDR_DARK);
         assert_eq!(claude_color(&palette), Color::Rgb(240, 122, 53));
+    }
+
+    #[test]
+    fn herdr_icon_uses_approved_dark_glyph_and_preserves_builtin_identity() {
+        let mut palette = crate::app::state::AppState::test_new().palette;
+        assert_eq!(builtin_repo_icon("herdr"), Some(HERDR));
+        palette.panel_bg = Color::Rgb(250, 250, 250);
+        assert_eq!(themed(HERDR, &palette), HERDR);
+        palette.panel_bg = Color::Rgb(30, 30, 46);
+        assert_eq!(themed(HERDR, &palette), "\u{F6036}");
+        assert!(keyword_icon_matches("Herdr workspace", HERDR_DARK));
     }
 
     #[test]

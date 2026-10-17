@@ -1132,7 +1132,7 @@ mod tests {
                     "herdr",
                     3,
                     Some((0, 3)),
-                    "herdr 3",
+                    "herdr 3 of 3",
                 ),
                 (
                     "fleet-working:org/mable",
@@ -1146,7 +1146,7 @@ mod tests {
                     "working",
                     4,
                     None,
-                    "~ 4 working ▸",
+                    "~ 4 working ›",
                 ),
             ] {
                 let header = NestedHeaderArea {
@@ -1178,7 +1178,11 @@ mod tests {
                     let expected = super::super::opacity_style(
                         &app,
                         50,
-                        Style::default().fg(app.palette.overlay0),
+                        Style::default().fg(if activity_count.is_some() {
+                            app.palette.blue
+                        } else {
+                            app.palette.overlay0
+                        }),
                         None,
                     )
                     .fg

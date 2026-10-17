@@ -1526,6 +1526,7 @@ fn render_compact_agent_row_body(
             Some(section_header_glyph_for_app(app, name))
         } else if app.nerd_font {
             crate::ui::icons::builtin_repo_icon(name)
+                .map(|icon| crate::ui::icons::themed(icon, &app.palette))
         } else {
             None
         }
@@ -12963,6 +12964,28 @@ fn render_section_header(
     }
     let rect = sidebar_row_content_rect(header.rect);
     let p = &app.palette;
+    if app.sidebar_sections_layout && header.title == NO_REPO_YET_SECTION_TITLE {
+        let glyph = section_header_glyph_for_app(app, header.title);
+        let count_label = format!(" {count} of {count}");
+        let title_width = usize::from(header.rect.width)
+            .saturating_sub(3 + display_width(glyph) + display_width(&count_label));
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    if collapsed { "› " } else { "⌄ " },
+                    Style::default().fg(p.overlay0),
+                ),
+                Span::styled(format!("{glyph} "), Style::default().fg(p.overlay0)),
+                Span::styled(
+                    truncate_end(header.title, title_width),
+                    Style::default().fg(p.overlay0),
+                ),
+                Span::styled(count_label, Style::default().fg(p.overlay0)),
+            ])),
+            header.rect,
+        );
+        return;
+    }
     if app.sidebar_sections_layout
         && matches!(
             header.title,
@@ -13306,7 +13329,106 @@ pub(super) fn fleet_header_label(
     }
 }
 
+fn dim_header_spans(app: &AppState, spans: &mut [Span<'_>], row_bg: Color) {
+    for span in spans {
+        let chip_bg = span.style.bg;
+        let style = if span.style.fg.is_none() {
+            span.style.fg(app.palette.overlay0)
+        } else {
+            span.style
+        };
+        span.style = opacity_style(app, 50, style, Some(row_bg));
+        if let Some(bg) = chip_bg {
+            span.style.bg = opacity_style(app, 50, Style::default().fg(bg), Some(row_bg)).fg;
+        }
+    }
+}
+
 fn render_fleet_header(app: &AppState, frame: &mut Frame, header: &NestedHeaderArea) {
+    if app.sidebar_sections_layout {
+        let p = &app.palette;
+        let working = header.key.starts_with("fleet-working:") && header.activity_count.is_none();
+        let selected = app
+            .sidebar_selected_work_group
+            .as_deref()
+            .is_some_and(|key| key.strip_prefix("group:") == Some(header.key.as_str()));
+        let row_bg = if selected {
+            p.surface1
+        } else {
+            p.sidebar_background()
+        };
+        let muted = Style::default().fg(p.overlay0);
+        let mut spans = if working {
+            let marker = if app.nerd_font { "●" } else { "~" };
+            vec![
+                Span::raw("  "),
+                Span::styled(marker, Style::default().fg(p.blue)),
+                Span::styled(format!(" {} working ›", header.count), muted),
+            ]
+        } else {
+            let (working, total) = header.activity_count.unwrap_or((0, header.count));
+            let all_working = working > 0 && working == total;
+            let count = if all_working {
+                let marker = if app.nerd_font { "●" } else { "~" };
+                format!(" {marker} {working} working")
+            } else {
+                format!(" {} of {total}", total.saturating_sub(working))
+            };
+            let icon = if header.title == NO_REPO_YET_SECTION_TITLE {
+                Some(section_header_glyph_for_app(app, NO_REPO_YET_SECTION_TITLE))
+            } else if app.nerd_font {
+                crate::ui::icons::builtin_repo_icon(&header.title)
+                    .map(|icon| crate::ui::icons::themed(icon, &app.palette))
+            } else {
+                None
+            };
+            let badge_width = icon.map_or(2, display_width);
+            let title_width = usize::from(header.rect.width)
+                .saturating_sub(2 + badge_width + 1 + display_width(&count));
+            let mut spans = vec![Span::styled(
+                if header.collapsed { "› " } else { "⌄ " },
+                muted,
+            )];
+            if let Some(icon) = icon {
+                spans.push(Span::styled(icon, muted));
+            } else {
+                let (first, last) = repo_chip_chars(&header.title);
+                let (bg, fg) = repo_chip_colors(&header.title);
+                spans.push(Span::styled(
+                    format!("{first}{last}"),
+                    Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+                ));
+            }
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                truncate_end(&header.title, title_width),
+                Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                count,
+                if all_working {
+                    Style::default().fg(p.blue)
+                } else {
+                    muted
+                },
+            ));
+            spans
+        };
+        // Apply opacity after every span's colour, including the blue marker
+        // and chip backgrounds, so an all-working row fades uniformly.
+        if working
+            || header
+                .activity_count
+                .is_some_and(|(n, total)| n > 0 && n == total)
+        {
+            dim_header_spans(app, &mut spans, row_bg);
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(Style::default().bg(row_bg)),
+            header.rect,
+        );
+        return;
+    }
     let rect = sidebar_row_content_rect(header.rect);
     let p = &app.palette;
     let working = header.key.starts_with("fleet-working:");
@@ -13396,6 +13518,7 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
             Some(section_header_glyph_for_app(app, NO_REPO_YET_SECTION_TITLE))
         } else if app.nerd_font {
             crate::ui::icons::builtin_repo_icon(&header.title)
+                .map(|icon| crate::ui::icons::themed(icon, &app.palette))
         } else {
             None
         };
@@ -13430,7 +13553,9 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
                 }),
         ));
     }
-    let title_style = if all_working {
+    let title_style = if app.sidebar_sections_layout {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    } else if all_working {
         opacity_style(app, 50, Style::default().fg(color), None)
     } else {
         Style::default().fg(color).add_modifier(if header.dim {
@@ -13445,7 +13570,11 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
             let activity = format!(" ● {working} working");
             spans.push(Span::styled(
                 activity,
-                opacity_style(app, 50, Style::default().fg(p.blue), None),
+                if app.sidebar_sections_layout {
+                    Style::default().fg(p.blue)
+                } else {
+                    opacity_style(app, 50, Style::default().fg(p.blue), None)
+                },
             ));
         }
     }
@@ -13487,6 +13616,17 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
                 "▎ ▾ "
             },
             Style::default().fg(p.accent),
+        );
+    }
+    if app.sidebar_sections_layout && all_working {
+        dim_header_spans(
+            app,
+            &mut spans,
+            if selected {
+                p.surface1
+            } else {
+                p.sidebar_background()
+            },
         );
     }
     let paragraph = if selected {
@@ -13639,7 +13779,8 @@ fn render_workspace_list(
         });
         let builtin_icon = (app.sidebar_sections_layout && app.nerd_font)
             .then(|| crate::ui::icons::builtin_repo_icon(&display_label))
-            .flatten();
+            .flatten()
+            .map(|icon| crate::ui::icons::themed(icon, &app.palette));
         let space_icon = builtin_icon
             .or(space_icon)
             .filter(|_| crate::ui::icons::leading_label_icon(&display_label).is_none());
@@ -14559,17 +14700,39 @@ pub(crate) fn sidebar_display_settings_menu_layout(
     area: Rect,
 ) -> Option<super::dropdown::DropdownLayout> {
     let anchor = sidebar_display_settings_anchor_rect(app, app.view.sidebar_rect);
-    super::dropdown::layout_dropdown(
+    // Dropdown layouts are borderless. Reserve the two border rows before
+    // laying out items, then expose the exact inner rect to hit testing.
+    let inner_anchor = Rect::new(
+        anchor.x,
+        anchor.y.saturating_add(1),
+        anchor.width,
+        anchor.height,
+    );
+    let inner_area = Rect::new(area.x, area.y, area.width, area.height.checked_sub(1)?);
+    let mut layout = super::dropdown::layout_dropdown(
         &super::dropdown::DropdownSpec {
-            anchor,
+            anchor: inner_anchor,
             item_count: 3,
             selected: 0,
             has_filter: false,
             max_rows: 3,
             min_width: 24,
         },
-        area,
-    )
+        inner_area,
+    )?;
+    layout.rect = Rect::new(
+        layout.rect.x,
+        layout.rect.y.saturating_sub(1),
+        layout.rect.width,
+        layout.rect.height.saturating_add(2),
+    );
+    layout.list_rect = Rect::new(
+        layout.rect.x.saturating_add(1),
+        layout.rect.y.saturating_add(1),
+        layout.rect.width.saturating_sub(2),
+        layout.rect.height.saturating_sub(2),
+    );
+    Some(layout)
 }
 
 pub(crate) fn sidebar_display_settings_menu_item_at(
@@ -15985,6 +16148,8 @@ pub(super) fn render_sidebar_display_settings_menu(app: &AppState, frame: &mut F
     frame.render_widget(ratatui::widgets::Clear, layout.rect);
     let lines = rows
         .iter()
+        .skip(layout.first_visible)
+        .take(layout.visible_rows)
         .map(|label| {
             Line::from(Span::styled(
                 super::dropdown::pad_menu_row(label, layout.list_rect.width),
@@ -15995,14 +16160,13 @@ pub(super) fn render_sidebar_display_settings_menu(app: &AppState, frame: &mut F
         })
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(app.palette.overlay0))
-                .style(Style::default().bg(app.palette.panel_bg)),
-        ),
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.palette.overlay0))
+            .style(Style::default().bg(app.palette.panel_bg)),
         layout.rect,
     );
+    frame.render_widget(Paragraph::new(lines), layout.list_rect);
 }
 
 fn sidebar_display_settings_labels(app: &AppState) -> [String; 3] {
@@ -16107,6 +16271,215 @@ fn render_sidebar_toggle(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn round7_fleet_headers_keep_badges_counts_and_uniform_opacity() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        for nerd in [false, true] {
+            app.nerd_font = nerd;
+            for (name, activity, working) in [
+                ("herdr", (0, 7), false),
+                ("scalable-agent-fleet-very-long", (1, 6), false),
+                ("mable", (3, 3), false),
+                ("working", (3, 3), true),
+            ] {
+                let header = NestedHeaderArea {
+                    key: if working {
+                        "fleet-working:repo".into()
+                    } else {
+                        "fleet-repo:test".into()
+                    },
+                    action_key: None,
+                    sort_key: None,
+                    sort_mode: SidebarSortMode::Default,
+                    title: name.into(),
+                    count: activity.1,
+                    activity_count: if working { None } else { Some(activity) },
+                    collapsed: false,
+                    dim: false,
+                    status: None,
+                    spawn: false,
+                    rect: Rect::new(0, 0, 34, 1),
+                };
+                let mut terminal = Terminal::new(TestBackend::new(34, 1)).expect("terminal");
+                terminal
+                    .draw(|frame| render_nested_header(&app, frame, &header))
+                    .expect("render");
+                let buffer = terminal.backend().buffer();
+                let text = row_text(buffer, 0, 34);
+                if working {
+                    assert!(text.contains("3 working ›"), "{text}");
+                    let marker = if nerd { "●" } else { "~" };
+                    let marker_x = find_symbol_x(buffer, 0, 34, marker);
+                    assert_eq!(
+                        buffer[(marker_x, 0)].fg,
+                        opacity_style(&app, 50, Style::default().fg(app.palette.blue), None)
+                            .fg
+                            .expect("fg")
+                    );
+                } else {
+                    assert_eq!(buffer[(0, 0)].symbol(), "⌄");
+                    if activity.0 == activity.1 {
+                        assert!(text.contains("3 working"), "{text}");
+                    } else {
+                        assert!(
+                            text.contains(&format!(
+                                "{} of {}",
+                                activity.1 - activity.0,
+                                activity.1
+                            )),
+                            "{text}"
+                        );
+                    }
+                    let title_x = if nerd && crate::ui::icons::builtin_repo_icon(name).is_some() {
+                        4
+                    } else {
+                        5
+                    };
+                    assert!(buffer[(title_x, 0)].modifier.contains(Modifier::BOLD));
+                    if activity.0 == activity.1 {
+                        let (bg, fg) = repo_chip_colors(name);
+                        assert_eq!(
+                            buffer[(2, 0)].fg,
+                            opacity_style(&app, 50, Style::default().fg(fg), None)
+                                .fg
+                                .expect("fg")
+                        );
+                        assert_eq!(
+                            buffer[(2, 0)].bg,
+                            opacity_style(&app, 50, Style::default().fg(bg), None)
+                                .fg
+                                .expect("bg")
+                        );
+                        assert_eq!(
+                            buffer[(0, 0)].fg,
+                            opacity_style(
+                                &app,
+                                50,
+                                Style::default().fg(app.palette.overlay0),
+                                None
+                            )
+                            .fg
+                            .expect("fg")
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn round7_spaces_header_has_bold_title_and_uniform_working_dim() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.nerd_font = false;
+        for all_working in [false, true] {
+            let header = NestedHeaderArea {
+                key: "device:test".into(),
+                action_key: None,
+                sort_key: None,
+                sort_mode: SidebarSortMode::Default,
+                title: "mable".into(),
+                count: 3,
+                activity_count: Some((if all_working { 3 } else { 0 }, 3)),
+                collapsed: false,
+                dim: all_working,
+                status: None,
+                spawn: false,
+                rect: Rect::new(0, 0, 34, 1),
+            };
+            let mut terminal = Terminal::new(TestBackend::new(34, 1)).expect("terminal");
+            terminal
+                .draw(|frame| render_nested_header(&app, frame, &header))
+                .expect("render");
+            let buffer = terminal.backend().buffer();
+            assert!(buffer[(5, 0)].modifier.contains(Modifier::BOLD));
+            if all_working {
+                let (bg, fg) = repo_chip_colors("mable");
+                for (x, color) in [
+                    (0, app.palette.overlay0),
+                    (2, fg),
+                    (5, app.palette.overlay0),
+                ] {
+                    assert_eq!(
+                        buffer[(x, 0)].fg,
+                        opacity_style(&app, 50, Style::default().fg(color), None)
+                            .fg
+                            .expect("fg")
+                    );
+                }
+                assert_eq!(
+                    buffer[(2, 0)].bg,
+                    opacity_style(&app, 50, Style::default().fg(bg), None)
+                        .fg
+                        .expect("bg")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn round7_display_popup_renders_three_clickable_rows_inside_border() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.sidebar_display_settings_open = true;
+        app.view.sidebar_rect = Rect::new(0, 0, 34, 30);
+        let area = Rect::new(0, 0, 80, 30);
+        let layout = sidebar_display_settings_menu_layout(&app, area).expect("layout");
+        assert_eq!(layout.rect.height, 5);
+        assert_eq!(layout.list_rect.height, 3);
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).expect("terminal");
+        terminal
+            .draw(|frame| render_sidebar_display_settings_menu(&app, frame))
+            .expect("render");
+        for (index, label) in ["Provider icon", "Machine name", "Machine: all hosts"]
+            .iter()
+            .enumerate()
+        {
+            let y = layout.list_rect.y + index as u16;
+            assert!(row_text(terminal.backend().buffer(), y, 80).contains(label));
+            assert_eq!(
+                sidebar_display_settings_menu_item_at(&app, area, layout.list_rect.x, y),
+                Some(index)
+            );
+            assert_eq!(
+                sidebar_display_settings_menu_item_at(&app, area, layout.rect.x, y),
+                None
+            );
+        }
+        assert_eq!(
+            sidebar_display_settings_menu_item_at(&app, area, layout.list_rect.x, layout.rect.y),
+            None
+        );
+        assert_eq!(
+            sidebar_display_settings_menu_item_at(
+                &app,
+                area,
+                layout.list_rect.x,
+                layout.rect.bottom() - 1
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn round7_empty_repo_header_starts_at_column_zero() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        let header = SectionHeaderArea {
+            title: NO_REPO_YET_SECTION_TITLE,
+            rect: Rect::new(0, 0, 34, 1),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(34, 1)).expect("terminal");
+        terminal
+            .draw(|frame| render_section_header(&app, frame, &header, 0, &[], true))
+            .expect("render");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].symbol(), "›");
+        assert!(row_text(buffer, 0, 34).contains("No repo yet 0 of 0"));
+        assert_eq!(buffer[(0, 0)].fg, app.palette.overlay0);
+    }
+
     #[test]
     fn sidebar_restyle_chip_and_blocked_icon_have_plain_fallbacks() {
         let mut app = AppState::test_new();
@@ -33791,7 +34164,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let x = find_symbol_x(buffer, 0, width, "h");
         assert_eq!(
             buffer[(x, 0)].fg,
-            opacity_style(&app, 50, Style::default().fg(app.palette.overlay0), None,)
+            opacity_style(&app, 50, Style::default().fg(app.palette.subtext0), None,)
                 .fg
                 .expect("opacity preserves the foreground color")
         );
