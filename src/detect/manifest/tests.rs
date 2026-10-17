@@ -2298,6 +2298,36 @@ fn codex_quoted_hook_prompt_above_idle_composer_is_not_blocked() {
 }
 
 #[test]
+fn codex_wrapped_hooks_review_is_blocked_at_narrow_and_wide_widths() {
+    let narrow = "  Hooks need review\n  4 hooks are new or\n  changed.\n  Hooks can run outside\n  the sandbox after you\n  trust them.\n› 1. Review hooks\n  2. Trust all and\n     continue\n  3. Continue without\n     trusting (hooks\n     won't run)\n  enter confirm · esc\n  skip\n";
+    let wide = "  Hooks need review\n  4 hooks are new or changed.\n  Hooks can run outside the sandbox after you trust them.\n› 1. Review hooks\n  2. Trust all and continue\n  3. Continue without trusting (hooks won't run)\n  enter confirm · esc skip\n";
+
+    for (label, screen) in [("narrow", narrow), ("wide", wide)] {
+        let result = bundled_explain(Agent::Codex, screen);
+        assert_eq!(result.state, AgentState::Blocked, "{label}");
+        assert!(result.visible_blocker, "{label}");
+    }
+}
+
+#[test]
+fn codex_other_numbered_confirmation_dialog_is_blocked() {
+    let screen = "› 1. Keep changes\n  2. Revert changes\n  enter confirm · esc cancel\n";
+    assert_eq!(
+        bundled_explain(Agent::Codex, screen).state,
+        AgentState::Blocked
+    );
+}
+
+#[test]
+fn codex_idle_prompt_is_not_blocked_by_selection_dialog_rule() {
+    let screen = "› Ask Codex to do anything\n";
+    assert_ne!(
+        bundled_explain(Agent::Codex, screen).state,
+        AgentState::Blocked
+    );
+}
+
+#[test]
 fn ordinary_claude_permission_prompt_keeps_its_existing_rule() {
     let screen = include_str!(
         "../../../tests/fixtures/agent-detection/claude-native-bash-permission-20260825.txt"

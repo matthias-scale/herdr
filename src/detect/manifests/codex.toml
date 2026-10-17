@@ -62,13 +62,24 @@ all = [
 [[rules]]
 id = "startup_hooks_review"
 state = "blocked"
-priority = 980
+priority = 985
 region = "bottom_non_empty_lines(16)"
 visible_blocker = true
 all = [
-  { contains = ["Hooks need review", "Trust all and continue"] },
-  { line_regex = ['^[ \t]*(?:›[ \t]+)?1\. Review hooks[ \t]*$'] },
-  { regex = ['(?s)(?:^|\n)[ \t]*enter confirm · esc skip[ \t]*(?:\r?\n[ \t]*)*\z'] },
+  { regex = ['(?s)Hooks\s+need\s+review'] },
+  { regex = ['(?s)Trust\s+all\s+and\s+continue'] },
+  { regex = ['(?s)(?:^|\n)[ \t]*enter\s+confirm\s*·\s*esc\s+skip[ \t]*(?:\r?\n[ \t]*)*\z'] },
+]
+
+[[rules]]
+id = "selection_dialog"
+state = "blocked"
+priority = 800
+region = "bottom_non_empty_lines(16)"
+visible_blocker = true
+all = [
+  { regex = ['(?m)^[ \t]*›[ \t]+[0-9]+\.'] },
+  { regex = ['(?s)(?:^|\n)[ \t]*enter\s+confirm\s*·\s*esc(?:\s+[^\r\n]+)?[ \t]*(?:\r?\n[ \t]*)*\z'] },
 ]
 
 [[rules]]

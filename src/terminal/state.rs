@@ -6874,6 +6874,30 @@ mod tests {
             "screen blocker detection remains authoritative over unknown closing state"
         );
 
+        let mut malformed_codex = test_terminal();
+        malformed_codex.set_detected_state(Some(Agent::Codex), AgentState::Blocked);
+        malformed_codex.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Missing),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Malformed),
+            Some(false),
+            now,
+        );
+        malformed_codex.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Unknown,
+            None,
+            None,
+            Some(1),
+            now,
+        );
+        assert_eq!(
+            malformed_codex.sidebar_projection(true),
+            (AgentState::Blocked, true),
+            "a malformed Codex report must yield to the visible screen blocker"
+        );
+
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Unknown);
         terminal.set_hook_authority_at(
