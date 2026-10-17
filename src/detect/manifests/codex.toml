@@ -78,8 +78,7 @@ priority = 800
 region = "bottom_non_empty_lines(16)"
 visible_blocker = true
 all = [
-  { regex = ['(?m)^[ \t]*›[ \t]+[0-9]+\.'] },
-  { regex = ['(?s)(?:^|\n)[ \t]*enter\s+confirm\s*·\s*esc(?:\s+[^\r\n]+)?[ \t]*(?:\r?\n[ \t]*)*\z'] },
+  { regex = ['(?s)(?:^|\n)[ \t]*›[ \t]+[0-9]+\.[^\r\n]*(?:\r?\n[ \t]*(?:›[ \t]+)?[0-9]+\.[^\r\n]*)+\r?\n[ \t]*enter\s+confirm\s*·\s*esc(?:[ \t]+[^\r\n]+)?(?:\r?\n[ \t]+[^\r\n]+)?[ \t]*(?:\r?\n[ \t]*)*\z'] },
 ]
 
 [[rules]]

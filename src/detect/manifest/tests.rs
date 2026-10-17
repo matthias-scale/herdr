@@ -2319,6 +2319,15 @@ fn codex_other_numbered_confirmation_dialog_is_blocked() {
 }
 
 #[test]
+fn codex_quoted_selection_dialog_above_active_prompt_is_not_blocked() {
+    let screen = "Earlier transcript: a dialog showed\n› 1. Keep changes\n  2. Revert changes\n  enter confirm · esc cancel\n\n› Continue with the current task\n";
+    let result = bundled_explain(Agent::Codex, screen);
+
+    assert_ne!(result.state, AgentState::Blocked);
+    assert!(!result.visible_blocker);
+}
+
+#[test]
 fn codex_idle_prompt_is_not_blocked_by_selection_dialog_rule() {
     let screen = "› Ask Codex to do anything\n";
     assert_ne!(
