@@ -1702,6 +1702,45 @@ class HerdrScenario:
         self.run.manifest.setdefault("workspace_content_checks", []).append(evidence)
         return evidence
 
+    def align_and_verify_d(self) -> dict:
+        """Deliberately align both clients to D after the A/D mismatch journey."""
+        if not all((self.workspace_a, self.workspace_d, self.pane_a, self.pane_d)):
+            raise CaptureError("aligned workspace control lacks pair identities")
+        self.cli("workspace", "focus", self.workspace_d, log_name="focus-d")
+        focused = self.workspace_id(self.cli("workspace", "list"), True)
+        if focused != self.workspace_d:
+            raise CaptureError("aligned control did not focus shared workspace D")
+        _d_screen, d_evidence = self.wait_for_marker(
+            self.d_id,
+            self.workspace_markers["d"],
+            self.workspace_markers["a"],
+            self.workspace_layouts["d"],
+            self.pane_d,
+        )
+        _a_screen, a_evidence = self.wait_for_marker(
+            self.a_id,
+            self.workspace_markers["d"],
+            self.workspace_markers["a"],
+            self.workspace_layouts["d"],
+            self.pane_d,
+        )
+        evidence = {
+            "session": self.session,
+            "stage": "aligned-workspace-d-control",
+            "shared_focused_workspace": focused,
+            "client_a": a_evidence,
+            "client_d": d_evidence,
+            "predicates": {
+                "shared_workspace_d_focused": focused == self.workspace_d,
+                "client_a_d_marker_visible": a_evidence["marker"]
+                == self.workspace_markers["d"],
+                "client_d_d_marker_visible": d_evidence["marker"]
+                == self.workspace_markers["d"],
+            },
+        }
+        self.run.manifest.setdefault("workspace_content_checks", []).append(evidence)
+        return evidence
+
     def create_pair(self) -> tuple[str, str, str, str]:
         self.start_server()
         deadline = time.monotonic() + 20
@@ -2312,6 +2351,19 @@ class Harness:
             self.manifest["cases"].append(
                 {"case": "candidate-image-removal", **removed}
             )
+        scenario.align_and_verify_d()
+        scenario.emit(pane_d, marker_d, FIXTURE_COLORS)
+        region = scenario.capture_region(pane_d, scenario.d_id)
+        aligned = self.capture_run.expect_stable(
+            f"{binary_label}-aligned-client-d-image",
+            scenario.d_id,
+            binary_label == "candidate",
+            FIXTURE_COLORS,
+            region,
+        )
+        self.manifest["cases"].append(
+            {"case": f"{binary_label}-aligned-client-d-image", **aligned}
+        )
         scenario.stop_server()
         self.mark_session_stopped(scenario.session)
         for process in scenario.processes:

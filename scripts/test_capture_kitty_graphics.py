@@ -84,6 +84,41 @@ class FixtureOracleTests(unittest.TestCase):
 
 
 class IsolationTests(unittest.TestCase):
+    def test_pane_run_accepts_empty_success_but_json_queries_require_json(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            scenario = capture.HerdrScenario.__new__(capture.HerdrScenario)
+            scenario.run = SimpleNamespace(root=root)
+            scenario.label = "cli-contract"
+            scenario.binary = root / "herdr"
+            scenario.session = "capture-test"
+            scenario.env = {}
+            scenario.server_identity = object()
+
+            with mock.patch.object(
+                capture.subprocess,
+                "run",
+                side_effect=[
+                    SimpleNamespace(returncode=0, stdout="", stderr=""),
+                    SimpleNamespace(
+                        returncode=0, stdout='{"result": {}}', stderr=""
+                    ),
+                    SimpleNamespace(returncode=0, stdout="", stderr=""),
+                ],
+            ):
+                self.assertEqual(scenario.cli("pane", "run", "p1", "true"), {})
+                self.assertEqual(scenario.cli("workspace", "list"), {"result": {}})
+                with self.assertRaisesRegex(capture.CaptureError, "invalid JSON"):
+                    scenario.cli("workspace", "list")
+
+            with mock.patch.object(
+                capture.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=1, stdout="", stderr="failed"),
+            ):
+                with self.assertRaisesRegex(capture.CaptureError, "failed"):
+                    scenario.cli("pane", "run", "p1", "false")
+
     def test_missing_compositor_is_explicitly_blocked_before_binary_validation(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temp:
             root = Path(temp)
