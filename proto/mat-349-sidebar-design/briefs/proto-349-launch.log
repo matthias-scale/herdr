@@ -1,0 +1,4 @@
+ra-launch: auto host: ub2 (preferred; within limits)
+ra-launch: preflight passed: host=ub2 target=/home/ubuntu2/wt/ra-261016-mat-349-design-proto-01d4d65 repo=https://github.com/matthias-scale/herdr.git
+ra-launch: launch transport disconnected; recovering exact turn ub2/ra-261016-mat-349-design-proto-01d4d65 turn-5972fa29cf99c5abd487a93b
+ra-launch: UNKNOWN_DISCONNECTED ub2/ra-261016-mat-349-design-proto-01d4d65 turn-5972fa29cf99c5abd487a93b

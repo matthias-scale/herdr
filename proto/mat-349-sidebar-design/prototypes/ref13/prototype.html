@@ -1,0 +1,970 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Herdr sidebar prototype — reference layout</title>
+<style>
+  :root {
+    --bg: #000000;
+    --sidebar-bg: #050505;
+    --row-active: #1c1c1e;
+    --row-hover: #131314;
+    --text: #e8e8e8;
+    --text-dim: #9a9a9e;
+    --text-mute: #808086;
+    --text-faint: #636369;
+    --green: #30d158;
+    --amber: #ffd60a;
+    --blue: #4c8dff;
+    --divider: #1a1a1c;
+    --focus: #5e9cff;
+    --radius: 8px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-kerning: normal;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: #2c4a7c; color: #fff; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; border-radius: 4px; }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+
+  .app { display: flex; min-height: 100vh; }
+
+  /* ---------- Sidebar ---------- */
+  .sidebar {
+    width: 380px;
+    flex: 0 0 auto;
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--divider);
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+  .search-wrap {
+    padding: 12px 14px 8px;
+    position: sticky;
+    top: 0;
+    background: var(--sidebar-bg);
+    z-index: 5;
+  }
+  .search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 32px;
+    padding: 0 10px;
+    border-radius: 6px;
+    color: var(--text-dim);
+  }
+  .search svg { flex: 0 0 auto; color: var(--text-mute); }
+  .search input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: var(--text);
+    font: inherit;
+    caret-color: var(--text);
+  }
+  .search input::placeholder { color: var(--text-mute); }
+  .search input:focus { outline: none; }
+  .search:focus-within { box-shadow: 0 0 0 1px #2c2c2e; }
+  .search kbd {
+    font: 12px/1 inherit;
+    color: var(--text-mute);
+    letter-spacing: 0;
+    white-space: nowrap;
+    user-select: none;
+  }
+
+  .projects-head {
+    display: flex;
+    align-items: center;
+    height: 32px;
+    padding: 0 14px;
+    margin-top: 6px;
+    position: relative;
+  }
+  .projects-head h2 {
+    flex: 1;
+    margin: 0;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-dim);
+  }
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-mute);
+    cursor: pointer;
+  }
+  .icon-btn:hover { background: var(--row-hover); color: var(--text-dim); }
+  .icon-btn[aria-pressed="true"] { color: var(--text-dim); background: var(--row-active); }
+
+  /* display options dropdown */
+  .menu {
+    position: absolute;
+    top: 32px;
+    right: 14px;
+    min-width: 220px;
+    background: #161617;
+    border: 1px solid #2a2a2d;
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0,0,0,.55);
+    padding: 6px;
+    z-index: 20;
+  }
+  .menu[hidden] { display: none; }
+  .menu-title {
+    padding: 6px 10px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-mute);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .menu label {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .menu label:hover, .menu label:focus-within { background: var(--row-hover); }
+  .menu input[type="checkbox"] {
+    appearance: none;
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    border: 1px solid #55555a;
+    border-radius: 4px;
+    background: transparent;
+    display: inline-grid;
+    place-content: center;
+    cursor: pointer;
+    flex: 0 0 auto;
+  }
+  .menu input[type="checkbox"]:checked {
+    background: var(--focus);
+    border-color: var(--focus);
+  }
+  .menu input[type="checkbox"]:checked::before {
+    content: "";
+    width: 9px;
+    height: 9px;
+    clip-path: polygon(14% 44%, 0 62%, 40% 100%, 100% 18%, 86% 4%, 39% 70%);
+    background: #fff;
+  }
+  .menu .menu-foot {
+    margin-top: 4px;
+    padding-top: 6px;
+    border-top: 1px solid var(--divider);
+  }
+  .menu .reset-btn {
+    width: 100%;
+    padding: 7px 10px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-mute);
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .menu .reset-btn:hover { background: var(--row-hover); color: var(--text-dim); }
+
+  .tree { flex: 1; overflow-y: auto; padding-bottom: 12px; }
+  .tree::-webkit-scrollbar { width: 8px; }
+  .tree::-webkit-scrollbar-thumb { background: #262628; border-radius: 4px; }
+  .tree::-webkit-scrollbar-track { background: transparent; }
+
+  .group { margin-top: 2px; }
+  .group-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    height: 34px;
+    padding: 0 14px;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 6px;
+  }
+  .group-head:hover { background: var(--row-hover); }
+  .group-head .chev { flex: 0 0 auto; color: var(--text-mute); transition: transform .12s ease-out; }
+  .group-head[aria-expanded="false"] .chev { transform: rotate(-90deg); }
+  .repo-badge {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .02em;
+    color: #fff;
+  }
+  .group-head .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .group-head .count {
+    flex: 0 0 auto;
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--text-mute);
+  }
+
+  .rows { position: relative; margin: 0 8px; padding-left: 24px; }
+  .rows::before {
+    content: "";
+    position: absolute;
+    left: 20px;
+    top: 4px;
+    bottom: 8px;
+    width: 1px;
+    background: var(--divider);
+  }
+
+  .row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    height: 36px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .row:hover { background: var(--row-hover); }
+  .row[aria-current="true"] { background: var(--row-active); color: var(--text); }
+  .row .status { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+  .row .status .dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+  .dot.completed { background: var(--green); }
+  .dot.running { background: var(--blue); }
+  .dot.blocked { background: var(--amber); }
+  .dot.exited { background: #636366; }
+  .row .status-label {
+    font-size: 12px;
+    color: var(--text-mute);
+    white-space: nowrap;
+  }
+  .row[aria-current="true"] .status-label { color: var(--text-dim); }
+  .row .picon { flex: 0 0 auto; display: inline-flex; color: var(--text-mute); }
+  .row[aria-current="true"] .picon { color: var(--text-dim); }
+  .row .title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+  }
+  .row[aria-current="true"] .title { font-weight: 500; }
+  .row .machine {
+    flex: 0 0 auto;
+    font-size: 11px;
+    color: var(--text-mute);
+    white-space: nowrap;
+  }
+  .row .age {
+    flex: 0 0 auto;
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--text-mute);
+    white-space: nowrap;
+  }
+  .row .machine + .age { margin-left: 0; }
+  .row mark { background: transparent; color: inherit; font-weight: 600; text-decoration: underline; text-decoration-color: #4a4a4f; text-underline-offset: 2px; }
+
+  .show-more {
+    display: block;
+    width: 100%;
+    height: 34px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 14px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .show-more:hover { background: var(--row-hover); }
+
+  /* search results mode */
+  .results-meta {
+    padding: 4px 22px 2px;
+    font-size: 12px;
+    color: var(--text-mute);
+  }
+  .result-group-label {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 10px 22px 2px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+  }
+  .results .row { margin: 0 8px; padding-left: 10px; width: calc(100% - 16px); }
+  .results .row .match-src {
+    flex: 0 0 auto;
+    font-size: 10px;
+    color: var(--text-mute);
+    border: 1px solid #2a2a2d;
+    border-radius: 4px;
+    padding: 1px 4px;
+    text-transform: lowercase;
+  }
+  .empty {
+    padding: 28px 22px;
+    color: var(--text-mute);
+    font-size: 13px;
+    text-align: center;
+  }
+  .empty button {
+    margin-top: 10px;
+    padding: 6px 12px;
+    border: 1px solid #2a2a2d;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .empty button:hover { background: var(--row-hover); }
+
+  /* ---------- Main mock ---------- */
+  .main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+  }
+  .main-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 16px 22px 10px;
+    border-bottom: 1px solid var(--divider);
+  }
+  .main-head h1 { margin: 0; font-size: 15px; font-weight: 600; }
+  .main-head .crumb { font-size: 12px; color: var(--text-mute); }
+  .mock-note {
+    font-size: 11px;
+    color: var(--text-mute);
+    border: 1px dashed #2a2a2d;
+    border-radius: 6px;
+    padding: 3px 8px;
+    white-space: nowrap;
+  }
+  .terminal {
+    flex: 1;
+    margin: 18px 22px;
+    border: 1px solid var(--divider);
+    border-radius: 10px;
+    padding: 14px 16px;
+    font: 12.5px/1.55 ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--text-dim);
+    overflow: auto;
+    white-space: pre-wrap;
+  }
+  .terminal .tm { color: var(--text-mute); }
+  .terminal .tg { color: var(--green); }
+  .terminal .tb { color: var(--blue); }
+
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    background: #161617;
+    border: 1px solid #2a2a2d;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 13px;
+    color: var(--text-dim);
+    box-shadow: 0 8px 24px rgba(0,0,0,.5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .15s ease-out;
+    z-index: 50;
+  }
+  .toast.show { opacity: 1; }
+
+  @media (max-width: 720px) {
+    .app { flex-direction: column; }
+    .sidebar { width: 100%; border-right: 0; border-bottom: 1px solid var(--divider); min-height: auto; }
+    .main { min-height: 40vh; }
+    .main-head { flex-wrap: wrap; row-gap: 6px; }
+    .main-head h1 { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
+    .main-head .crumb { flex: 1 1 auto; min-width: 0; }
+    .main-head .mock-note { flex: 0 1 auto; white-space: normal; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="sidebar" aria-label="Projects and agent tabs">
+    <div class="search-wrap">
+      <div class="search">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <input id="searchInput" type="text" placeholder="Search" autocomplete="off" spellcheck="false"
+               aria-label="Search agent tabs — same scope as Herdr prefix+f agent finder">
+        <kbd title="Herdr binds agent search to prefix+f; browsers reserve prefix chords, so this prototype uses Cmd/Ctrl+K">⌘K</kbd>
+      </div>
+    </div>
+
+    <div class="projects-head">
+      <h2 id="projectsHeading">Projects</h2>
+      <button class="icon-btn" id="sortBtn" type="button" aria-pressed="false"
+              aria-label="Sort projects by name" title="Sort: recent activity (click for name)"></button>
+      <button class="icon-btn" id="displayBtn" type="button" aria-haspopup="true" aria-expanded="false"
+              aria-controls="displayMenu" aria-label="Display options" title="Display options"></button>
+      <button class="icon-btn" id="newProjectBtn" type="button"
+              aria-label="New project" title="New project (prototype)"></button>
+      <div class="menu" id="displayMenu" role="menu" aria-label="Display options" hidden>
+        <div class="menu-title">Display options</div>
+        <label role="menuitemcheckbox" aria-checked="false" id="optProviderRow">
+          <input type="checkbox" id="optProvider"> Provider icon
+        </label>
+        <label role="menuitemcheckbox" aria-checked="false" id="optMachineRow">
+          <input type="checkbox" id="optMachine"> Machine name
+        </label>
+        <div class="menu-foot">
+          <button class="reset-btn" id="resetDisplay" type="button">Reset to defaults</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="tree" id="tree" role="tree" aria-labelledby="projectsHeading"></div>
+  </nav>
+
+  <main class="main" aria-label="Selected tab context (mock)">
+    <div class="main-head">
+      <h1 id="detailTitle">—</h1>
+      <span class="crumb" id="detailCrumb"></span>
+      <span class="mock-note">mock data · prototype, not a live Herdr session</span>
+    </div>
+    <div class="terminal" id="detailBody" aria-live="polite"></div>
+  </main>
+</div>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- Fixture: representative synthetic tabs ----------
+  // Fields mirror Herdr's search scope: title, provider/agent, machine/host
+  // (src/ui/sidebar.rs search_key_lowercase). `tail` and `session` simulate
+  // the agent-finder's terminal-tail and session-file sources
+  // (src/app/api/agents.rs) — labeled [sim] in the match badge.
+  var GROUPS = [
+    { id: "scalablev2", repo: "scalable-so/scalablev2", badge: "SV", badgeBg: "#8e3b46",
+      tabs: [
+        { id: "sv1", title: "Clarify What to Test", status: "completed", age: "just now", machine: "mbpro", provider: "claude",
+          tail: "qa card rendered · 4 acceptance checks listed", session: "clarify-what-to-test" },
+        { id: "sv2", title: "Identify the Current Model", status: "idle", age: "1h ago", machine: "mbpro", provider: "claude",
+          tail: "model identified as k2-preview in footer", session: "identify-current-model" },
+        { id: "sv3", title: "restore quality raw experiments", status: "blocked", age: "2h ago", machine: "ub1", provider: "codex",
+          tail: "waiting on you: keep raw arm or drop it?", session: "restore-quality-raw" },
+        { id: "sv4", title: "n8n-review-nodes-move-to-3-8-flash-with-low-think · Notes", status: "running", age: "2h ago", machine: "ub1", provider: "claude",
+          tail: "moving review nodes to flash lane, low effort", session: "n8n-review-nodes" },
+        { id: "sv5", title: "hi", status: "exited", age: "2h ago", machine: "mbpro", provider: "claude",
+          tail: "session exited", session: "hi" },
+        { id: "sv6", title: "hi", status: "exited", age: "2h ago", machine: "mbpro", provider: "codex",
+          tail: "session exited", session: "hi-2" },
+        { id: "sv7", title: "rate-limit retry backoff sweep", status: "completed", age: "5h ago", machine: "ub2", provider: "codex",
+          tail: "sweep done, 12/12 green", session: "retry-backoff-sweep" }
+      ] },
+    { id: "obsidian", repo: "matthiasclaw/obsidian-vault", badge: "VO", badgeBg: "#5b3f8c",
+      tabs: [
+        { id: "ob1", title: "hi", status: "exited", age: "1h ago", machine: "mbpro", provider: "claude",
+          tail: "session exited", session: "hi" },
+        { id: "ob2", title: "mcs-bank-checks-and-concise-topic-todos-continue · Active", status: "running", age: "2h ago", machine: "ub2", provider: "codex",
+          tail: "writing bank-check note, trimming topic todos", session: "mcs-bank-checks-active" },
+        { id: "ob3", title: "hi", status: "exited", age: "2h ago", machine: "mbpro", provider: "claude",
+          tail: "session exited", session: "hi-2" },
+        { id: "ob4", title: "mcs-bank-checks-and-concise-topic-todos-continue · Notes", status: "idle", age: "3h ago", machine: "ub2", provider: "claude",
+          tail: "notes pass complete", session: "mcs-bank-checks-notes" },
+        { id: "ob5", title: "hi", status: "exited", age: "3h ago", machine: "mbpro", provider: "gemini",
+          tail: "session exited", session: "hi-3" },
+        { id: "ob6", title: "hi", status: "exited", age: "4h ago", machine: "mbpro", provider: "claude",
+          tail: "session exited", session: "hi-4" },
+        { id: "ob7", title: "weekly review outline", status: "completed", age: "1d ago", machine: "mbpro", provider: "claude",
+          tail: "outline committed to vault", session: "weekly-review-outline" }
+      ] },
+    { id: "fleet", repo: "scalable-so/scalable-agent-fleet", badge: "HS", badgeBg: "#2f5d3f",
+      tabs: [
+        { id: "fl1", title: "merge harness PR #2219", status: "completed", age: "3h ago", machine: "ub1", provider: "claude",
+          tail: "checks green, merged", session: "merge-2219" },
+        { id: "fl2", title: "codex profile drift check", status: "running", age: "3h ago", machine: "ub2", provider: "codex",
+          tail: "diffing deployed skills against fleet source", session: "profile-drift" },
+        { id: "fl3", title: "skill routing doc pass", status: "idle", age: "6h ago", machine: "mbpro", provider: "claude",
+          tail: "draft in shared/docs/skill-routing.md", session: "skill-routing-pass" },
+        { id: "fl4", title: "token-report weekday gate", status: "blocked", age: "1d ago", machine: "ub1", provider: "codex",
+          tail: "waiting on you: include Sunday in week N?", session: "token-report-gate" },
+        { id: "fl5", title: "observatory backfill", status: "exited", age: "1d ago", machine: "ub2", provider: "claude",
+          tail: "backfill finished, session exited", session: "observatory-backfill" },
+        { id: "fl6", title: "hmode health parse fix", status: "completed", age: "2d ago", machine: "mbpro", provider: "claude",
+          tail: "exit code keyed, prose parsing removed", session: "hmode-parse-fix" }
+      ] },
+    { id: "personal", repo: "Personal", badge: "PL", badgeBg: "#6b4f2a",
+      tabs: [
+        { id: "pe1", title: "tax folder 2026 scan", status: "idle", age: "2d ago", machine: "mbpro", provider: "claude",
+          tail: "receipts sorted by month", session: "tax-2026-scan" },
+        { id: "pe2", title: "kleinanzeigen listing copy", status: "completed", age: "3d ago", machine: "mbpro", provider: "gemini",
+          tail: "draft listing ready for review", session: "ka-listing-copy" },
+        { id: "pe3", title: "printer driver rabbit hole", status: "exited", age: "4d ago", machine: "mbpro", provider: "claude",
+          tail: "session exited", session: "printer-driver" }
+      ] }
+  ];
+
+  var PROVIDERS = {
+    claude: { name: "Claude", svg: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1.5v13M1.5 8h13M3.4 3.4l9.2 9.2M12.6 3.4l-9.2 9.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>' },
+    codex:  { name: "Codex",  svg: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1.8c3.4 0 6.2 2.8 6.2 6.2S11.4 14.2 8 14.2 1.8 11.4 1.8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M8 4.6c1.9 0 3.4 1.5 3.4 3.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>' },
+    gemini: { name: "Gemini", svg: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1.5c.6 3.4 3.1 5.9 6.5 6.5-3.4.6-5.9 3.1-6.5 6.5C7.4 11.1 4.9 8.6 1.5 8c3.4-.6 5.9-3.1 6.5-6.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>' }
+  };
+
+  var ICONS = {
+    sort: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 2v10M4 12l-2.2-2.2M4 12l2.2-2.2M12 14V4M12 4L9.8 6.2M12 4l2.2 2.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    display: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 5h12M2 11h12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="6" cy="5" r="1.8" stroke="currentColor" stroke-width="1.4"/><circle cx="10.5" cy="11" r="1.8" stroke="currentColor" stroke-width="1.4"/></svg>',
+    folderPlus: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M1.8 4.5c0-.7.5-1.2 1.2-1.2h3l1.5 1.7h5.7c.7 0 1.2.5 1.2 1.2v5.6c0 .7-.5 1.2-1.2 1.2H3c-.7 0-1.2-.5-1.2-1.2V4.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 7v3.4M6.3 8.7h3.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>',
+    chevron: '<svg class="chev" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+  };
+
+  var STORE_KEY = "herdr-sidebar-proto:display";
+  var PREVIEW_ROWS = 5;
+
+  var state = {
+    query: "",
+    sortByName: false,
+    collapsed: {},       // groupId -> true
+    expanded: {},        // groupId -> true (show more)
+    selectedId: "sv4",
+    showProvider: false,
+    showMachine: false,
+    resultIndex: -1
+  };
+
+  // ---------- persistence (namespaced, guarded) ----------
+  (function load() {
+    try {
+      var raw = window.localStorage.getItem(STORE_KEY);
+      if (raw) {
+        var saved = JSON.parse(raw);
+        state.showProvider = saved.showProvider === true;
+        state.showMachine = saved.showMachine === true;
+      }
+    } catch (e) { /* storage unavailable: keep defaults */ }
+  })();
+  function save() {
+    try {
+      window.localStorage.setItem(STORE_KEY, JSON.stringify({
+        showProvider: state.showProvider,
+        showMachine: state.showMachine
+      }));
+    } catch (e) { /* ignore */ }
+  }
+
+  // ---------- search: one fixture/result function for input and shortcut ----------
+  // Terms: whitespace split, case-insensitive substring, like sidebar_query_parts
+  // (src/ui/sidebar.rs:4093). Scope: title, provider name, machine, repo — the
+  // row search key — plus simulated tail/session fields of the agent finder.
+  function searchTabs(query) {
+    var terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    var out = [];
+    GROUPS.forEach(function (g) {
+      g.tabs.forEach(function (t) {
+        var key = [
+          t.title,
+          PROVIDERS[t.provider].name, t.provider,
+          t.machine,
+          g.repo,
+          t.tail,   // [sim] terminal tail
+          t.session // [sim] session file path
+        ].join(" ").toLowerCase();
+        var hit = terms.every(function (term) { return key.indexOf(term) !== -1; });
+        if (terms.length === 0 || hit) {
+          var src = "title";
+          if (terms.length) {
+            var primary = [t.title, PROVIDERS[t.provider].name, t.provider, t.machine, g.repo].join(" ").toLowerCase();
+            var inPrimary = terms.every(function (term) { return primary.indexOf(term) !== -1; });
+            if (!inPrimary) src = t.tail.toLowerCase().indexOf(terms[0]) !== -1 ? "tail ·sim" : "session ·sim";
+          }
+          out.push({ tab: t, group: g, source: src });
+        }
+      });
+    });
+    return out;
+  }
+
+  // ---------- DOM ----------
+  var tree = document.getElementById("tree");
+  var input = document.getElementById("searchInput");
+  var toast = document.getElementById("toast");
+  var toastTimer = null;
+
+  function showToast(msg) {
+    toast.textContent = msg;
+    toast.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toast.classList.remove("show"); }, 2400);
+  }
+
+  function esc(s) {
+    return s.replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function highlight(title, query) {
+    var terms = query.trim().split(/\s+/).filter(Boolean);
+    if (!terms.length) return esc(title);
+    var out = esc(title);
+    terms.forEach(function (term) {
+      var re = new RegExp("(" + term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ")", "ig");
+      out = out.replace(re, "<mark>$1</mark>");
+    });
+    return out;
+  }
+
+  function statusCell(t) {
+    if (t.status === "completed") return '<span class="status"><span class="dot completed" aria-hidden="true"></span><span class="status-label">Completed</span></span>';
+    if (t.status === "blocked") return '<span class="status" title="Blocked — needs an answer"><span class="dot blocked" aria-hidden="true"></span></span>';
+    if (t.status === "running") return '<span class="status" title="Running"><span class="dot running" aria-hidden="true"></span></span>';
+    if (t.status === "exited") return '<span class="status" title="Exited"><span class="dot exited" aria-hidden="true"></span></span>';
+    return "";
+  }
+
+  function rowHtml(t, g, opts) {
+    opts = opts || {};
+    var sel = t.id === state.selectedId;
+    var title = opts.query ? highlight(t.title, opts.query) : esc(t.title);
+    var picon = state.showProvider
+      ? '<span class="picon" role="img" aria-label="' + PROVIDERS[t.provider].name + '" title="' + PROVIDERS[t.provider].name + '">' + PROVIDERS[t.provider].svg + "</span>"
+      : "";
+    var machine = state.showMachine ? '<span class="machine">' + esc(t.machine) + "</span>" : "";
+    var badge = opts.source && opts.source !== "title" ? '<span class="match-src">' + esc(opts.source) + "</span>" : "";
+    return '<button class="row" role="treeitem" data-id="' + t.id + '" aria-current="' + (sel ? "true" : "false") + '"' +
+      (opts.resultIndex != null ? ' data-result-index="' + opts.resultIndex + '"' : "") + ">" +
+      statusCell(t) + picon +
+      '<span class="title">' + title + "</span>" + badge + machine +
+      '<span class="age">' + esc(t.age) + "</span></button>";
+  }
+
+  function sortedGroups() {
+    var groups = GROUPS.slice();
+    if (state.sortByName) {
+      groups.sort(function (a, b) { return a.repo.localeCompare(b.repo); });
+    }
+    return groups;
+  }
+
+  function renderTree() {
+    var html = "";
+    sortedGroups().forEach(function (g) {
+      var collapsed = !!state.collapsed[g.id];
+      var expanded = !!state.expanded[g.id];
+      var visible = expanded ? g.tabs : g.tabs.slice(0, PREVIEW_ROWS);
+      var hiddenCount = g.tabs.length - visible.length;
+      html += '<div class="group">' +
+        '<button class="group-head" data-group="' + g.id + '" aria-expanded="' + !collapsed + '">' +
+        ICONS.chevron +
+        '<span class="repo-badge" style="background:' + g.badgeBg + '" aria-hidden="true">' + g.badge + "</span>" +
+        '<span class="name">' + esc(g.repo) + "</span>" +
+        '<span class="count">' + g.tabs.length + (g.tabs.length === 1 ? " project" : " projects") + "</span></button>";
+      if (!collapsed) {
+        html += '<div class="rows" role="group">';
+        visible.forEach(function (t) { html += rowHtml(t, g); });
+        if (g.tabs.length > PREVIEW_ROWS) {
+          html += '<button class="show-more" data-group="' + g.id + '">' +
+            (expanded ? "Show less" : "Show more") + "</button>";
+        }
+        html += "</div>";
+      }
+      html += "</div>";
+    });
+    tree.classList.remove("results");
+    tree.innerHTML = html;
+  }
+
+  function renderResults() {
+    var results = searchTabs(state.query);
+    if (state.resultIndex >= results.length) state.resultIndex = results.length - 1;
+    var html = '<div class="results-meta">' + results.length +
+      (results.length === 1 ? " result" : " results") + " · ↑↓ move · enter open · esc clear</div>";
+    if (!results.length) {
+      html += '<div class="empty">No tabs match “' + esc(state.query) + '”.<br>' +
+        '<button type="button" id="clearSearchBtn">Clear search</button></div>';
+    } else {
+      var byGroup = {};
+      var order = [];
+      results.forEach(function (r, i) {
+        if (!byGroup[r.group.id]) { byGroup[r.group.id] = []; order.push(r.group); }
+        byGroup[r.group.id].push({ r: r, i: i });
+      });
+      order.forEach(function (g) {
+        html += '<div class="result-group-label">' +
+          '<span class="repo-badge" style="background:' + g.badgeBg + '" aria-hidden="true">' + g.badge + "</span>" +
+          esc(g.repo) + "</div>";
+        byGroup[g.id].forEach(function (entry) {
+          html += rowHtml(entry.r.tab, g, {
+            query: state.query, source: entry.r.source, resultIndex: entry.i
+          });
+        });
+      });
+    }
+    tree.classList.add("results");
+    tree.innerHTML = html;
+    markActiveResult();
+  }
+
+  function markActiveResult() {
+    tree.querySelectorAll("[data-result-index]").forEach(function (el) {
+      var active = Number(el.getAttribute("data-result-index")) === state.resultIndex;
+      el.setAttribute("aria-current", active ? "true" : (el.getAttribute("data-id") === state.selectedId ? "true" : "false"));
+      if (active) el.scrollIntoView({ block: "nearest" });
+    });
+  }
+
+  function render() {
+    if (state.query.trim()) renderResults(); else renderTree();
+    renderDetail();
+    document.getElementById("optProvider").checked = state.showProvider;
+    document.getElementById("optMachine").checked = state.showMachine;
+    document.getElementById("optProviderRow").setAttribute("aria-checked", String(state.showProvider));
+    document.getElementById("optMachineRow").setAttribute("aria-checked", String(state.showMachine));
+  }
+
+  function findTab(id) {
+    for (var gi = 0; gi < GROUPS.length; gi++) {
+      for (var ti = 0; ti < GROUPS[gi].tabs.length; ti++) {
+        if (GROUPS[gi].tabs[ti].id === id) return { tab: GROUPS[gi].tabs[ti], group: GROUPS[gi] };
+      }
+    }
+    return null;
+  }
+
+  function renderDetail() {
+    var found = findTab(state.selectedId);
+    var titleEl = document.getElementById("detailTitle");
+    var crumbEl = document.getElementById("detailCrumb");
+    var bodyEl = document.getElementById("detailBody");
+    if (!found) {
+      titleEl.textContent = "—";
+      crumbEl.textContent = "";
+      bodyEl.innerHTML = '<span class="tm">Select a tab in the sidebar.</span>';
+      return;
+    }
+    var t = found.tab, g = found.group;
+    titleEl.textContent = t.title;
+    crumbEl.textContent = g.repo + " · " + PROVIDERS[t.provider].name + " · " + t.machine;
+    var lines = [
+      '<span class="tm"># mock terminal snapshot — no live agent data</span>',
+      "",
+      '<span class="tb">$</span> herdr agent read ' + esc(t.session) + " <span class=tm># simulated</span>",
+      esc(t.tail),
+      "",
+      '<span class="tm">status:</span> ' + esc(t.status) +
+      '   <span class="tm">age:</span> ' + esc(t.age) +
+      '   <span class="tm">machine:</span> ' + esc(t.machine)
+    ];
+    if (t.status === "completed") lines.push('<span class="tg">● completed</span> <span class="tm">— unread result waiting</span>');
+    if (t.status === "blocked") lines.push('<span style="color:var(--amber)">● blocked</span> <span class="tm">— the oldest blocker surfaces in the inbox</span>');
+    bodyEl.innerHTML = lines.join("\n");
+  }
+
+  function selectTab(id) {
+    state.selectedId = id;
+    state.query = "";
+    input.value = "";
+    render();
+    if (window.matchMedia("(max-width: 720px)").matches) {
+      showToast("Selected “" + (findTab(id).tab.title) + "”");
+    }
+  }
+
+  // ---------- events ----------
+  tree.addEventListener("click", function (ev) {
+    var head = ev.target.closest(".group-head");
+    if (head) {
+      var gid = head.getAttribute("data-group");
+      state.collapsed[gid] = !state.collapsed[gid];
+      render();
+      return;
+    }
+    var more = ev.target.closest(".show-more");
+    if (more) {
+      var mg = more.getAttribute("data-group");
+      state.expanded[mg] = !state.expanded[mg];
+      render();
+      return;
+    }
+    var clear = ev.target.closest("#clearSearchBtn");
+    if (clear) {
+      state.query = "";
+      input.value = "";
+      render();
+      input.focus();
+      return;
+    }
+    var row = ev.target.closest(".row");
+    if (row) selectTab(row.getAttribute("data-id"));
+  });
+
+  input.addEventListener("input", function () {
+    state.query = input.value;
+    state.resultIndex = state.query.trim() ? 0 : -1;
+    render();
+  });
+
+  input.addEventListener("keydown", function (ev) {
+    var results = state.query.trim() ? searchTabs(state.query) : [];
+    if (ev.key === "ArrowDown") {
+      ev.preventDefault();
+      if (results.length) { state.resultIndex = Math.min(state.resultIndex + 1, results.length - 1); markActiveResult(); }
+    } else if (ev.key === "ArrowUp") {
+      ev.preventDefault();
+      if (results.length) { state.resultIndex = Math.max(state.resultIndex - 1, 0); markActiveResult(); }
+    } else if (ev.key === "Enter") {
+      ev.preventDefault();
+      if (results.length && state.resultIndex >= 0) selectTab(results[state.resultIndex].tab.id);
+    } else if (ev.key === "Escape") {
+      ev.preventDefault();
+      state.query = "";
+      state.resultIndex = -1;
+      input.value = "";
+      render(); // tree restore keeps collapsed/expanded state untouched
+      input.blur();
+    }
+  });
+
+  // Cmd/Ctrl+K focuses search (browser stand-in for Herdr's prefix+f agent finder)
+  document.addEventListener("keydown", function (ev) {
+    if ((ev.metaKey || ev.ctrlKey) && !ev.shiftKey && !ev.altKey && ev.key.toLowerCase() === "k") {
+      ev.preventDefault();
+      input.focus();
+      input.select();
+    }
+  });
+
+  // ---------- header controls ----------
+  var sortBtn = document.getElementById("sortBtn");
+  sortBtn.innerHTML = ICONS.sort;
+  sortBtn.addEventListener("click", function () {
+    state.sortByName = !state.sortByName;
+    sortBtn.setAttribute("aria-pressed", String(state.sortByName));
+    sortBtn.setAttribute("aria-label", state.sortByName ? "Sort projects by recent activity" : "Sort projects by name");
+    sortBtn.title = state.sortByName ? "Sort: name (click for recent activity)" : "Sort: recent activity (click for name)";
+    render();
+  });
+
+  document.getElementById("newProjectBtn").innerHTML = ICONS.folderPlus;
+  document.getElementById("newProjectBtn").addEventListener("click", function () {
+    showToast("Prototype only — project creation is out of scope here.");
+  });
+
+  // ---------- display options dropdown ----------
+  var displayBtn = document.getElementById("displayBtn");
+  displayBtn.innerHTML = ICONS.display;
+  var menu = document.getElementById("displayMenu");
+  var menuOpen = false;
+
+  function openMenu() {
+    menu.hidden = false;
+    menuOpen = true;
+    displayBtn.setAttribute("aria-expanded", "true");
+    menu.querySelector("input").focus();
+  }
+  function closeMenu(refocus) {
+    menu.hidden = true;
+    menuOpen = false;
+    displayBtn.setAttribute("aria-expanded", "false");
+    if (refocus) displayBtn.focus();
+  }
+  displayBtn.addEventListener("click", function () {
+    if (menuOpen) closeMenu(false); else openMenu();
+  });
+  document.addEventListener("click", function (ev) {
+    if (menuOpen && !menu.contains(ev.target) && ev.target !== displayBtn && !displayBtn.contains(ev.target)) {
+      closeMenu(false);
+    }
+  });
+  document.addEventListener("keydown", function (ev) {
+    if (menuOpen && ev.key === "Escape") {
+      ev.stopPropagation();
+      closeMenu(true);
+    }
+  });
+
+  document.getElementById("optProvider").addEventListener("change", function (ev) {
+    state.showProvider = ev.target.checked; // indexing untouched: search reads fixtures, not the DOM
+    save();
+    render();
+  });
+  document.getElementById("optMachine").addEventListener("change", function (ev) {
+    state.showMachine = ev.target.checked;
+    save();
+    render();
+  });
+  document.getElementById("resetDisplay").addEventListener("click", function () {
+    state.showProvider = false;
+    state.showMachine = false;
+    save();
+    render();
+    showToast("Display options reset to defaults.");
+  });
+
+  // ---------- test hooks ----------
+  window.__sidebarProto = {
+    state: state,
+    search: searchTabs,
+    setQuery: function (q) { input.value = q; input.dispatchEvent(new Event("input")); },
+    select: selectTab,
+    groups: GROUPS
+  };
+
+  render();
+})();
+</script>
+</body>
+</html>

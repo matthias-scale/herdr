@@ -1,0 +1,233 @@
+<!doctype html>
+<!-- tsd:template v2 — replace the sample content, keep the structure and theme.css.
+     Sections are optional: delete what the run has nothing to say about. Never
+     invent a second page style; every tsd dashboard looks like this one.
+     Built once with Astro (npx astro build); edit this file directly, it is the
+     shipped artifact. Every headline figure keeps its data-tip tooltip. -->
+<html lang="en" data-theme="light" data-width="standard">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Herdr TUI: T3-style typography prototype</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2714%27 fill=%27%230f766e%27/%3E%3Ctext x=%2732%27 y=%2745%27 font-size=%2738%27 font-family=%27sans-serif%27 font-weight=%27700%27 text-anchor=%27middle%27 fill=%27white%27%3ET%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="theme.css">
+<style>
+/* Prototype-only: a terminal cell-grid mock. Every glyph sits on the monospace grid Herdr renders to. */
+.cmp{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:12px 0 4px}
+.cmp>div>.cap{font-size:12px;opacity:.7;margin:0 0 6px}
+.term{background:#0a0c10;color:#f0f3f6;border-radius:10px;padding:12px 14px;overflow:hidden;white-space:pre;font-size:13px}
+.term.before{font-family:"JetBrains Mono","JetBrainsMono Nerd Font Mono",Menlo,monospace;font-weight:600;line-height:1.15}
+.term.after{background:#000;color:#f1f3f7;font-family:"SF Mono",SFMono-Regular,Menlo,monospace;font-weight:500;line-height:1.3;padding:16px 20px}
+.b{font-weight:700}.d{color:#a3a3a3}.dd{color:#6b6f76}.y{color:#f0b72f}.r{color:#ff9492}.g{color:#26cd4d}.bl{color:#71b7ff}.o{color:#f07a35}.cy{color:#39c5cf}
+.after .b{font-weight:700}.after .lk{color:#60a5fa}
+.chip{background:#191a1d;color:#f1f3f7;border-radius:3px}
+.cb{background:#0a0a0a;display:inline-block;width:100%}
+.ub{background:#191a1d;display:inline-block;border-radius:6px}
+.sel{background:#1b1d22;display:inline-block;width:100%}
+.ic{display:inline-block;width:1ch;text-align:center;font-weight:700}
+.ic.gh{color:#f1f3f7}.ic.ln{color:#8b8ff5}.ic.vc{color:#f1f3f7}.ic.st{color:#8f86ff}.ic.web{color:#a3a3a3}
+.hr{color:#26282c}
+@media (max-width:900px){.cmp{grid-template-columns:1fr}}
+</style>
+<script>
+  // Applied before first paint so the chosen theme and width never flash.
+  try {
+    var t = localStorage.getItem("tsd-theme");
+    var w = localStorage.getItem("tsd-width");
+    document.documentElement.dataset.theme = t === "dark" || t === "system" ? t : "light";
+    document.documentElement.dataset.width = w === "wide" ? "wide" : "standard";
+  } catch (e) {}
+</script></head>
+<body>
+<header>
+  <div class="head">
+    <div class="title">
+      <h1>Herdr TUI: T3-style typography prototype</h1>
+      <span class="meta">herdr / herdr-t3-typography · generated 2026-10-13 17:55 UTC · /Users/matthiasschedel/workspaces/scalable/repos/worktrees/scalablev2/ccfm-scalablev2-20261013-152603-5773</span>
+    </div>
+    <div class="head-actions"><a class="session-link" href="https://matthiass-macbook-pro.tailc1d69d.ts.net:38443/focus?target=mbpro%3A%3Aw2J%3Ap6&amp;host=mbpro"><span aria-hidden="true">↗</span> open session</a>
+      <a class="pdf-download" href="herdr-t3-typography.pdf" download><span aria-hidden="true">↓</span> PDF</a>
+    </div>
+    <div class="spacer"></div>
+    <button id="tsd-width" class="width-toggle" type="button" aria-pressed="false">wide</button>
+    <div class="themepick">
+      <label for="tsd-theme">theme</label>
+      <select id="tsd-theme" aria-label="Colour theme">
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+        <option value="system">System</option>
+      </select>
+    </div>
+  </div>
+</header>
+<main>
+
+  <!-- Headline numbers. 2-6 of them. Every one carries data-tip: what the
+       number means and where it came from. A figure without a tooltip is a
+       figure the reader has to guess at, so never ship one. -->
+  <div class="kpis">
+    <div class="kpi" tabindex="0" data-tip="Herdr surfaces this prototype restyles: sidebar, chat markdown, and the new transcript view.">
+      <span class="k">surfaces</span><span class="v">3</span>
+    </div>
+    <div class="kpi" tabindex="0" data-tip="Typography values taken from T3 Code source (pingdotgg/t3code at 8ac4b97d: apps/web/src/index.css, appearanceFonts.ts, packages/contracts/src/settings.ts), listed in the source values table.">
+      <span class="k">T3 source values mapped</span><span class="v ok">11</span>
+    </div>
+    <div class="kpi" tabindex="0" data-tip="Choices that need the owner before any Herdr implementation, listed under open. Herdr AGENTS.md requires prototype sign-off before a worker brief or PR.">
+      <span class="k">sign-off needed</span><span class="v warn">1</span>
+    </div>
+  </div>
+
+  
+
+  <!-- tsd:toc:start -->
+<nav class="toc" aria-label="Contents"><a href="#summary">summary</a>
+<a href="#sidebar">sidebar</a>
+<a href="#chat-markdown">chat markdown</a>
+<a href="#transcript-view">transcript view</a>
+<a href="#source-values">source values</a>
+<a href="#open">open</a></nav>
+<!-- tsd:toc:end --><!-- One paragraph: what this run did and what the reader should conclude. -->
+  <h3 id="summary">summary</h3>
+  <p class="lead">Herdr keeps its terminal grid, so this does not copy T3 pixel for pixel. It copies T3's text hierarchy: regular-weight body text, one muted grey for metadata, bold only for headings and the focused row, links in blue with no underline, inline code as a shaded chip, brand icons before links, and air between groups. Font and line height come from T3's own settings: SF Mono, 1.3 line height. Left is today, right is the proposal. Brand icons render from the Herdr Icons font in the terminal; this page approximates them with coloured glyphs.</p>
+
+  <h3 id="sidebar">sidebar</h3>
+  <p>Titles in regular weight, ages right-aligned in muted grey, group headers muted, one blank row between groups, one dot glyph with colour carrying the state. Bold marks only the focused row.</p>
+  <div class="cmp">
+    <div><p class="cap">today</p><div class="term before"><span class="b">▾ mcs-bank-checks-and-concise-topic-…</span>
+<span class="g">○</span> <span class="b">NetFlow alternative using Chrom…</span> <span class="o">✱m</span> <span class="y">1h</span>
+<span class="g">○</span> <span class="b">Average provider cost per n8n c…</span> <span class="o">✱m</span> <span class="y">17m</span>
+<span class="dd">·</span> <span class="b">text</span>                  <span class="bl">◷</span> <span class="g">✓</span><span class="r">✗</span>  <span class="y">1h</span>
+<span class="b">▾ ccga-statusline-verification¹</span>
+<span class="dd">·</span> ~/workspaces/harness/repos/dotfile… <span class="y">2h</span>
+<span class="b">▾ n8n-review-nodes-move-to-3-8-flash…</span>
+<span class="bl">●</span> <span class="b">Harness and herder Lanta readin…</span> <span class="o">✱m</span>  <span class="y">2m</span>
+<span class="bl">●</span> <span class="b">n8n review nodes 3.8 Flash low …</span> <span class="o">✱m</span>
+<span class="r">◌</span> <span class="b">restore quality raw experiments</span> <span class="o">✱F</span>m</div></div>
+    <div><p class="cap">proposed</p><div class="term after"><span class="d">▾ mcs-bank-checks-and-concise…  3</span>
+<span class="sel"><span class="g">•</span> <span class="b">NetFlow alternative using Chrome</span>   <span class="d">1h</span></span>
+<span class="g">•</span> Average provider cost per n8n    <span class="d">17m</span>
+<span class="dd">•</span> text                             <span class="d">1h</span>
+
+<span class="d">▾ ccga-statusline-verification  1</span>
+<span class="dd">•</span> ~/workspaces/harness/repos/dot…  <span class="d">2h</span>
+
+<span class="d">▾ n8n-review-nodes-move-to-3-8…  3</span>
+<span class="bl">•</span> Harness and herder Lanta readi…  <span class="d">2m</span>
+<span class="bl">•</span> n8n review nodes 3.8 Flash low   <span class="d">now</span>
+<span class="r">•</span> restore quality raw experiments  <span class="r">!</span></div></div>
+  </div>
+
+  <h3 id="chat-markdown">chat markdown</h3>
+  <p>Applies to PR bodies, ticket bodies and settled transcripts, which all go through Herdr's markdown renderer. Headings bold; body regular; inline code as a shaded chip in full-brightness text; code blocks on their own surface with a language label; bullets with hanging indent; links blue, not underlined, with the brand icon in front; task notifications collapsed to one muted line.</p>
+  <div class="cmp">
+    <div><p class="cap">today</p><div class="term before"><span class="b">Session recap</span>
+- Merged https://github.com/scalable-so/niche-scout-
+extension/pull/1 and #2.
+- Created two private repos. Both have branch protecti
+on on `main` (CodeRabbit required).
+&lt;task-notification&gt; &lt;task-id&gt;bamvshxmq&lt;/task-id&gt; &lt;
+tool-use-id&gt;toolu_01BFwCPGMDxXj28xqHTebGSk&lt;/tool-use-
+id&gt; &lt;output-file&gt;/private/tmp/claude-501/-Users-…
+```json
+{"v":3,"state":"idle"}
+```
+See SCA-4858 in https://linear.app/scalable/issue/SCA-4858</div></div>
+    <div><p class="cap">proposed</p><div class="term after"><span class="b">Session recap</span>
+
+<span class="d">•</span> Merged <span class="ic gh">●</span> <span class="lk">niche-scout-extension#1</span> and <span class="ic gh">●</span> <span class="lk">#2</span>.
+<span class="d">•</span> Created two private repos. Both have branch
+  protection on <span class="chip"> main </span> (CodeRabbit required).
+
+<span class="dd">⟳ background task Wait out PR #2 head-age floor (exit 0)</span>
+
+<span class="cb"><span class="dd"> json</span></span>
+<span class="cb"> {"v":3,"state":"idle"}</span>
+
+See <span class="ic ln">◆</span> <span class="lk">SCA-4858</span> · preview <span class="ic vc">▲</span> <span class="lk">scalable-git-4f3a…</span> · <span class="ic web">◎</span> <span class="lk">ziglang.org/download</span></div></div>
+  </div>
+
+  <h3 id="transcript-view">transcript view</h3>
+  <p>New per-pane toggle for Claude panes: the pane shows the session as a chat built from its transcript file, while Claude Code keeps running underneath and still receives every keystroke. User turns sit right-aligned in a shaded block, at most 80% wide like T3, with the time below. Tool calls collapse to one muted line. One key returns to the raw terminal.</p>
+  <div class="cmp">
+    <div><p class="cap">today: raw Claude Code terminal</p><div class="term before"><span class="o">▐▛███▜▌</span>  <span class="b">Claude Code</span> v2.1.296
+<span class="o">▝▜█████▛▘</span> Fable 5.1 with medium effort
+<span class="dd">  ▘▘ ▝▝</span>  ~/workspaces/scalable/repos/worktrees/…
+
+<span class="d">&gt;</span> how close can we make the tui look like t
+  he web view?
+
+<span class="b">⏺</span> Short answer: about three quarters of the
+  look, and the chat side gets closer than y
+  ou'd expect because Herdr already parses…
+<span class="b">⏺</span> <span class="b">Bash</span>(cd ~/Repos/herdr &amp;&amp; rg -n "stream-js…
+  ⎿  src/ghostty/bindings.rs:124:pub struct…</div></div>
+    <div><p class="cap">proposed: transcript view</p><div class="term after">                <span class="ub"> how close can we make the TUI look </span>
+                <span class="ub"> like the web view?                 </span>
+                                       <span class="d">14:48</span>
+
+Short answer: about three quarters of the look,
+and the chat side gets closer than you'd expect
+because Herdr already parses the transcript.
+
+<span class="dd">⟳ Bash  cd ~/Repos/herdr &amp;&amp; rg -n "stream-json…</span>
+<span class="dd">⟳ Read  src/ui/markdown.rs</span>
+
+<span class="b">What gets you there</span>
+<span class="d">•</span> <span class="b">Rendered chat view.</span> A pane mode that draws
+  the transcript instead of the raw terminal.
+<span class="hr">────────────────────────────────────────────────</span>
+<span class="d">transcript view · t to return</span></div></div>
+  </div>
+
+  <h3 id="source-values">source values</h3>
+  <table>
+    <thead><tr><th>element</th><th>T3 Code source</th><th>Herdr mapping</th></tr></thead>
+    <tbody>
+      <tr><td>code font</td><td>"SF Mono", Menlo, monospace; code 13px, terminal 12px</td><td>WezTerm SF Mono Medium, Nerd font and Herdr Icons as fallback</td></tr>
+      <tr><td>line height</td><td>headings 1.3</td><td>WezTerm 1.15 → 1.30</td></tr>
+      <tr><td>canvas / text</td><td>#000 / #f1f3f7</td><td>terminal background / palette text</td></tr>
+      <tr><td>muted text</td><td>#a3a3a3</td><td>palette overlay0: ages, group meta, tool lines</td></tr>
+      <tr><td>surfaces</td><td>accent #191a1d, muted #0a0a0a, border white 8%</td><td>surface0 for chips and user blocks, surface_dim for code blocks</td></tr>
+      <tr><td>headings</td><td>weight 600; 1.25rem above, 0.5rem below</td><td>bold; one blank row above, none below</td></tr>
+      <tr><td>paragraphs and lists</td><td>0.65rem apart; li 0.25rem; disc, circle, square</td><td>one blank row between paragraphs; • ◦ ▪ with hanging indent</td></tr>
+      <tr><td>links</td><td>info-foreground blue, no underline; dotted on hover</td><td>palette blue, no underline, brand icon before</td></tr>
+      <tr><td>inline code</td><td>muted surface, 1px border, 6px radius, foreground text</td><td>surface0 chip, one cell padding each side, text colour</td></tr>
+      <tr><td>user message</td><td>right-aligned, max 80%, rounded, padding 0.75rem</td><td>right-aligned shaded block, max 80%, one cell padding</td></tr>
+      <tr><td>timestamp</td><td>below the bubble, xs, tabular, muted</td><td>row below the block, right-aligned, overlay0</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="open">open</h3>
+  <ul>
+    <li><b>Sign-off on all three surfaces.</b> Herdr AGENTS.md requires your approval of this prototype before any worker brief or PR. Approving releases one worker per surface. Each goes behind a <code>[ui] typography = "classic" | "soft"</code> switch, so the old look stays one config line away.</li>
+    <li><b>What stays terminal:</b> one font size for sidebar and chat, box-glyph corners instead of real rounding, no hover underline. A webview pane is the only way past that.</li>
+  </ul>
+  <footer>
+    <span class="pill">tsd</span>
+    <span>Built by an agent run. Source of truth stays in the repository; this page is a view of it.</span>
+  </footer>
+</main>
+<script>
+  (function () {
+    var sel = document.getElementById("tsd-theme");
+    if (sel) {
+      var cur = document.documentElement.dataset.theme || "light";
+      sel.value = cur;
+      sel.addEventListener("change", function () {
+        document.documentElement.dataset.theme = sel.value;
+        try { localStorage.setItem("tsd-theme", sel.value); } catch (e) {}
+      });
+    }
+    var width = document.getElementById("tsd-width");
+    if (width) {
+      width.setAttribute("aria-pressed", document.documentElement.dataset.width === "wide" ? "true" : "false");
+      width.addEventListener("click", function () {
+        var wide = document.documentElement.dataset.width !== "wide";
+        document.documentElement.dataset.width = wide ? "wide" : "standard";
+        width.setAttribute("aria-pressed", wide ? "true" : "false");
+        try { localStorage.setItem("tsd-width", wide ? "wide" : "standard"); } catch (e) {}
+      });
+    }
+  })();
+</script></body>
+</html>

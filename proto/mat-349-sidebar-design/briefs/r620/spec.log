@@ -1,0 +1,7 @@
+ra-launch: auto host: ub2 (preferred; within limits)
+ra-launch: preflight passed: host=ub2 target=/home/ubuntu2/wt/ra-261016-review-620-spec-9ca6f14 repo=https://github.com/matthias-scale/herdr.git
+Preparing worktree (detached HEAD 3ef6a7e6e)
+HEAD is now at 3ef6a7e6e test: profile expanded working rows in unified sidebar
+worktree-bootstrap: libghostty-vt cache hit: 48541a0e2fc77168d10902c6b2e7ff428a0f96ba-x86_64-linux-gnu-ReleaseFast
+LIBGHOSTTY_VT_LIB_DIR=/home/ubuntu2/.cache/ra-libghostty-vt/48541a0e2fc77168d10902c6b2e7ff428a0f96ba-x86_64-linux-gnu-ReleaseFast/lib
+worktree-bootstrap: no package.json in /home/ubuntu2/wt/ra-261016-review-620-spec-9ca6f14 — searching tracked nested apps

@@ -1,0 +1,151 @@
+<!doctype html>
+<!-- tsd:template v2 — replace the sample content, keep the structure and theme.css.
+     Sections are optional: delete what the run has nothing to say about. Never
+     invent a second page style; every tsd dashboard looks like this one.
+     Built once with Astro (npx astro build); edit this file directly, it is the
+     shipped artifact. Every headline figure keeps its data-tip tooltip. -->
+<html lang="en" data-theme="light" data-width="standard">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Herdr sidebar — compact row proposal</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2714%27 fill=%27%230f766e%27/%3E%3Ctext x=%2732%27 y=%2745%27 font-size=%2738%27 font-family=%27sans-serif%27 font-weight=%27700%27 text-anchor=%27middle%27 fill=%27white%27%3ET%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="theme.css">
+<script>
+  // Applied before first paint so the chosen theme and width never flash.
+  try {
+    var t = localStorage.getItem("tsd-theme");
+    var w = localStorage.getItem("tsd-width");
+    document.documentElement.dataset.theme = t === "dark" || t === "system" ? t : "light";
+    document.documentElement.dataset.width = w === "wide" ? "wide" : "standard";
+  } catch (e) {}
+</script></head>
+<body>
+<header>
+  <div class="head">
+    <div class="title">
+      <h1>Herdr sidebar — compact row proposal</h1>
+      <span class="meta">personal / herdr-sidebar-compact · generated 2026-10-10 12:57 UTC · /home/ubuntu2/wt/mat-310-contract</span>
+    </div>
+    <div class="head-actions"><a class="session-link" href="https://ub2.tailc1d69d.ts.net:38443/focus?target=f14b9774-f139-4b66-91c7-f16b32e6afd7&amp;host=ub2"><span aria-hidden="true">↗</span> open session</a>
+      <a class="pdf-download" href="herdr-sidebar-compact.pdf" download><span aria-hidden="true">↓</span> PDF</a>
+    </div>
+    <div class="spacer"></div>
+    <button id="tsd-width" class="width-toggle" type="button" aria-pressed="false">wide</button>
+    <div class="themepick">
+      <label for="tsd-theme">theme</label>
+      <select id="tsd-theme" aria-label="Colour theme">
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+        <option value="system">System</option>
+      </select>
+    </div>
+  </div>
+</header>
+<main>
+
+
+<style>.pair{display:flex;gap:2rem;margin:1rem 0;flex-wrap:wrap}.term pre{padding:.5rem;font:13px/1.35 ui-monospace,monospace;overflow:hidden;margin:0;box-sizing:content-box}.cap{font-size:.8rem;opacity:.7;margin-bottom:.2rem}</style>
+<div class="kpis">
+ <div class="kpi" tabindex="0" data-tip="Columns a task row spends on fixed fields today: indent 4 + dot 3 + provider 8 + machine 4 + age 5 (src/ui/sidebar.rs constants, compact_row_widths)."><b>24</b><span>fixed cols now</span></div>
+ <div class="kpi" tabindex="0" data-tip="Fixed columns in the proposal: indent 1 + dot 2 + gap 1 + provider/device tag 2 + gap 1 + age 3."><b>10</b><span>fixed cols proposed</span></div>
+ <div class="kpi" tabindex="0" data-tip="Title columns gained per row at any width: current fixed minus proposed fixed."><b>+14</b><span>title cols gained</span></div>
+</div>
+
+
+  <!-- tsd:toc:start -->
+<nav class="toc" aria-label="Contents"><a href="#summary">summary</a>
+<a href="#side-by-side">side by side</a>
+<a href="#proposed-rules">proposed rules</a>
+<a href="#open">open</a></nav>
+<!-- tsd:toc:end --><style id="termcss">:root,[data-theme=light]{--tbg:#eff1f5;--tfg:#4c4f69;--dim:#9ca0b0;--ok:#40a02b;--warn:#df8e1d;--idle:#8c8fa1;--cc:#d97757;--cx:#1e66f5;--ki:#8839ef;--dv:#179299}[data-theme=dark]{--tbg:#1e1e2e;--tfg:#cdd6f4;--dim:#6c7086;--ok:#a6e3a1;--warn:#f9e2af;--idle:#7f849c;--cc:#e8956f;--cx:#89b4fa;--ki:#cba6f7;--dv:#94e2d5}@media (prefers-color-scheme:dark){[data-theme=system]{--tbg:#1e1e2e;--tfg:#cdd6f4;--dim:#6c7086;--ok:#a6e3a1;--warn:#f9e2af;--idle:#7f849c;--cc:#e8956f;--cx:#89b4fa;--ki:#cba6f7;--dv:#94e2d5}}
+.term pre{background:var(--tbg);color:var(--tfg);border:1px solid var(--dim)}.dim{color:var(--dim)}.sw{color:var(--ok)}.sn{color:var(--warn)}.si{color:var(--idle)}.pc{color:var(--cc);font-weight:700}.px{color:var(--cx);font-weight:700}.pk{color:var(--ki);font-weight:700}.dv{color:var(--dv)}</style>
+<h3 id="summary">summary</h3>
+<p class="lead">Today a row burns ~24 columns before the title gets any: a 4-col indent, a 3-col dot field, the full provider word, a 3-letter host and a 5-col age. Proposal: collapse provider+device into one right-aligned 2-char tag (<code>C2</code> = claude on ub2), shrink indent to 1 and the dot to 2, age to 3. The title gains ~13 columns, so the sidebar stays readable at 26 cols where it currently truncates to a stub.</p>
+<h3 id="side-by-side">side by side</h3>
+<p class="lead">Icons: <span class="pc">✳</span> claude · <span class="px">◎</span> codex · <span class="pk">◆</span> kimi; the device char follows the icon (1 ub1, 2 ub2, m mac). In herdr these are the existing Nerd Font glyphs from <code>src/ui/icons.rs</code> (<code>agent_icon</code>), with the <code>cc/cx/ki</code> text tags as fallback.</p>
+<div class="pair"><div class="term"><div class="cap">current · 40 cols</div><pre style="width:40ch"> ▾ ub2 · this device                    
+    <span class="sw">●  </span>mat-310 contrac…<span class="dim">  claudeub2    3m</span>
+    <span class="sw">●  </span>herdr sidebar c…<span class="dim">   codexub1   12m</span>
+    <span class="sn">◐  </span>sca-3604 billin…<span class="dim">  claudembp    1h</span>
+    <span class="si">○  </span>fleet PR #1685 …<span class="dim">    kimiub2    2d</span>
+    <span class="sw">●  </span>scalablev2 prev…<span class="dim">   codexub1   40s</span></pre></div><div class="term"><div class="cap">proposed · 40 cols</div><pre style="width:40ch"> ▾ <span class="dv">▪</span> ub2 <span class="dim">· this device</span>
+ <span class="sw">● </span>mat-310 contract tests         <span class="pc">✳</span><span class="dv">2</span> <span class="dim"> 3m</span>
+ <span class="sw">● </span>herdr sidebar compact          <span class="px">◎</span><span class="dv">1</span> <span class="dim">12m</span>
+ <span class="sn">◐ </span>sca-3604 billing ACs           <span class="pc">✳</span><span class="dv">m</span> <span class="dim"> 1h</span>
+ <span class="si">○ </span>fleet PR #1685 aloop           <span class="pk">◆</span><span class="dv">2</span> <span class="dim"> 2d</span>
+ <span class="sw">● </span>scalablev2 preview qa          <span class="px">◎</span><span class="dv">1</span> <span class="dim">40s</span></pre></div></div><div class="pair"><div class="term"><div class="cap">current · 32 cols</div><pre style="width:32ch"> ▾ ub2 · this device            
+    <span class="sw">●  </span>mat-310…<span class="dim">  claudeub2    3m</span>
+    <span class="sw">●  </span>herdr s…<span class="dim">   codexub1   12m</span>
+    <span class="sn">◐  </span>sca-360…<span class="dim">  claudembp    1h</span>
+    <span class="si">○  </span>fleet P…<span class="dim">    kimiub2    2d</span>
+    <span class="sw">●  </span>scalabl…<span class="dim">   codexub1   40s</span></pre></div><div class="term"><div class="cap">proposed · 32 cols</div><pre style="width:32ch"> ▾ <span class="dv">▪</span> ub2 <span class="dim">· this device</span>
+ <span class="sw">● </span>mat-310 contract tests <span class="pc">✳</span><span class="dv">2</span> <span class="dim"> 3m</span>
+ <span class="sw">● </span>herdr sidebar compact  <span class="px">◎</span><span class="dv">1</span> <span class="dim">12m</span>
+ <span class="sn">◐ </span>sca-3604 billing ACs   <span class="pc">✳</span><span class="dv">m</span> <span class="dim"> 1h</span>
+ <span class="si">○ </span>fleet PR #1685 aloop   <span class="pk">◆</span><span class="dv">2</span> <span class="dim"> 2d</span>
+ <span class="sw">● </span>scalablev2 preview qa  <span class="px">◎</span><span class="dv">1</span> <span class="dim">40s</span></pre></div></div><div class="pair"><div class="term"><div class="cap">current · 26 cols</div><pre style="width:26ch"> ▾ ub2 · this device      
+    <span class="sw">●  </span>mat-310 c…<span class="dim">ub2    3m</span>
+    <span class="sw">●  </span>herdr sid…<span class="dim">ub1   12m</span>
+    <span class="sn">◐  </span>sca-3604 …<span class="dim">mbp    1h</span>
+    <span class="si">○  </span>fleet PR …<span class="dim">ub2    2d</span>
+    <span class="sw">●  </span>scalablev…<span class="dim">ub1   40s</span></pre></div><div class="term"><div class="cap">proposed · 26 cols</div><pre style="width:26ch"> ▾ <span class="dv">▪</span> ub2 <span class="dim">· this device</span>
+ <span class="sw">● </span>mat-310 contrac… <span class="pc">✳</span><span class="dv">2</span> <span class="dim"> 3m</span>
+ <span class="sw">● </span>herdr sidebar c… <span class="px">◎</span><span class="dv">1</span> <span class="dim">12m</span>
+ <span class="sn">◐ </span>sca-3604 billin… <span class="pc">✳</span><span class="dv">m</span> <span class="dim"> 1h</span>
+ <span class="si">○ </span>fleet PR #1685 … <span class="pk">◆</span><span class="dv">2</span> <span class="dim"> 2d</span>
+ <span class="sw">● </span>scalablev2 prev… <span class="px">◎</span><span class="dv">1</span> <span class="dim">40s</span></pre></div></div><div class="pair"><div class="term"><div class="cap">current · 22 cols</div><pre style="width:22ch"> ▾ ub2 · this device  
+    <span class="sw">●  </span>mat-310 co…<span class="dim">ub2 </span>
+    <span class="sw">●  </span>herdr side…<span class="dim">ub1 </span>
+    <span class="sn">◐  </span>sca-3604 b…<span class="dim">mbp </span>
+    <span class="si">○  </span>fleet PR #…<span class="dim">ub2 </span>
+    <span class="sw">●  </span>scalablev2…<span class="dim">ub1 </span></pre></div><div class="term"><div class="cap">proposed · 22 cols</div><pre style="width:22ch"> ▾ <span class="dv">▪</span> ub2 <span class="dim">· this device</span>
+ <span class="sw">● </span>mat-310 con… <span class="pc">✳</span><span class="dv">2</span> <span class="dim"> 3m</span>
+ <span class="sw">● </span>herdr sideb… <span class="px">◎</span><span class="dv">1</span> <span class="dim">12m</span>
+ <span class="sn">◐ </span>sca-3604 bi… <span class="pc">✳</span><span class="dv">m</span> <span class="dim"> 1h</span>
+ <span class="si">○ </span>fleet PR #1… <span class="pk">◆</span><span class="dv">2</span> <span class="dim"> 2d</span>
+ <span class="sw">● </span>scalablev2 … <span class="px">◎</span><span class="dv">1</span> <span class="dim">40s</span></pre></div></div>
+<h3 id="proposed-rules">proposed rules</h3>
+<table><thead><tr><th>field</th><th>now</th><th>proposed</th></tr></thead><tbody>
+<tr><td>indent (depth 1)</td><td class="num">4</td><td>1 per depth level (tree guide, not spaces)</td></tr>
+<tr><td>state dot</td><td class="num">3</td><td>2 (glyph + space)</td></tr>
+<tr><td>provider</td><td>full word, ~8</td><td>1 glyph, provider colour: C claude, X codex, K kimi, A agy</td></tr>
+<tr><td>device</td><td>3-letter host + gap</td><td>1 char, glued to provider: 1 ub1, 2 ub2, m mac; hidden when the group header already says the device</td></tr>
+<tr><td>age</td><td class="num">5</td><td>3 (<code>3m</code>, <code>12m</code>, <code>2d</code>); dropped first below 22 cols</td></tr>
+<tr><td>drop order when narrow</td><td>provider, then age</td><td>age → device char → provider glyph; title never under 8</td></tr>
+</tbody></table>
+<h3 id="open">open</h3>
+<ul>
+<li>Device char mapping: derive from host config (last digit / first letter) or a configurable <code>short:</code> per host?</li>
+<li>Glyph-only provider needs the colour to carry meaning; keep a hover/tooltip with the full name.</li>
+<li>Ship as a toggle (<code>sidebar.density = compact</code>) first, or replace the default?</li>
+</ul>
+  <footer>
+    <span class="pill">tsd</span>
+    <span>Built by an agent run. Source of truth stays in the repository; this page is a view of it.</span>
+  </footer>
+</main>
+<script>
+  (function () {
+    var sel = document.getElementById("tsd-theme");
+    if (sel) {
+      var cur = document.documentElement.dataset.theme || "light";
+      sel.value = cur;
+      sel.addEventListener("change", function () {
+        document.documentElement.dataset.theme = sel.value;
+        try { localStorage.setItem("tsd-theme", sel.value); } catch (e) {}
+      });
+    }
+    var width = document.getElementById("tsd-width");
+    if (width) {
+      width.setAttribute("aria-pressed", document.documentElement.dataset.width === "wide" ? "true" : "false");
+      width.addEventListener("click", function () {
+        var wide = document.documentElement.dataset.width !== "wide";
+        document.documentElement.dataset.width = wide ? "wide" : "standard";
+        width.setAttribute("aria-pressed", wide ? "true" : "false");
+        try { localStorage.setItem("tsd-width", wide ? "wide" : "standard"); } catch (e) {}
+      });
+    }
+  })();
+</script></body>
+</html>

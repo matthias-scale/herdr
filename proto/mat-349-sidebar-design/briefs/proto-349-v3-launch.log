@@ -1,0 +1,48 @@
+ra-launch: explicit --host ub1 requested while ub2 has capacity; consider --host auto
+ra-launch: preflight passed: host=ub1 target=/home/ubuntu/wt/ra-261016-mat-349-design-proto-v3-f6ee8be repo=https://github.com/matthias-scale/herdr.git
+Preparing worktree (checking out 'feat/mat-349-project-first-sidebar')
+HEAD is now at 4e06ec137 fix: preserve deferred sidebar shelves and headless sort
+worktree-bootstrap: libghostty-vt cache hit: 48541a0e2fc77168d10902c6b2e7ff428a0f96ba-x86_64-linux-gnu-ReleaseFast
+LIBGHOSTTY_VT_LIB_DIR=/home/ubuntu/.cache/ra-libghostty-vt/48541a0e2fc77168d10902c6b2e7ff428a0f96ba-x86_64-linux-gnu-ReleaseFast/lib
+worktree-bootstrap: no package.json in /home/ubuntu/wt/ra-261016-mat-349-design-proto-v3-f6ee8be — searching tracked nested apps
+{"orchestration_state":"skipped","reason":"lock_timeout"}
+ra-launch: launched: ub1/ra-261016-mat-349-design-proto-v3-f6ee8be turn=turn-c5001fd3160e89dc90edbfd1
+{
+  "schema": 1,
+  "version": 1,
+  "run_id": "ra-261016-mat-349-design-proto-v3-f6ee8be",
+  "turn_id": "turn-c5001fd3160e89dc90edbfd1",
+  "parent_session": "e5e3c6a0-7f80-41ef-b1b0-5f8a90f50f17",
+  "run_started_at": "2026-10-16T15:21:09Z",
+  "started_at": "2026-10-16T15:21:09Z",
+  "exited_at": "2026-10-16T15:23:04Z",
+  "elapsed_ms": 115117,
+  "exit_code": 0,
+  "result_ref": "turns/turn-c5001fd3160e89dc90edbfd1/result.md",
+  "result_status": "available",
+  "trace_ref": "turns/turn-c5001fd3160e89dc90edbfd1/trace.log",
+  "status": "ended-unverified",
+  "wrapper_revision": "git:fc67f840f6d3a0edc1493c24bf41f83583eeab40:sha256:df7160bf21d04d20abac0a8b35ea5133704d527c93125eef000798e93edcb4f2",
+  "parent_run": null,
+  "edge": {
+    "agent": "codex",
+    "attempt": null,
+    "effort": "medium",
+    "ended": "2026-10-16T15:23:04Z",
+    "escalated_from": null,
+    "from_skill": null,
+    "host": "ub1",
+    "key": null,
+    "model": "gpt-6-luna",
+    "outcome": "ended-unverified",
+    "started": "2026-10-16T15:21:09Z",
+    "to_skill": null,
+    "tokens_in": null,
+    "tokens_out": null,
+    "trigger": "unknown"
+  },
+  "trigger": "unknown",
+  "key": null,
+  "attempt": null,
+  "run_exit_code": 0
+}

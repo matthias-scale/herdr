@@ -1,0 +1,185 @@
+<!doctype html>
+<!-- tsd:template v2 — keep the structure and theme.css.
+     Sections are optional: delete what the run has nothing to say about. Never
+     invent a second page style; every tsd dashboard looks like this one.
+     Built once with Astro (npx astro build); edit this file directly, it is the
+     shipped artifact. Every headline figure keeps its data-tip tooltip. -->
+<html lang="en" data-theme="light" data-width="standard">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Herdr sidebar: one list across hosts (MAT-344 prototype)</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2714%27 fill=%27%230f766e%27/%3E%3Ctext x=%2732%27 y=%2745%27 font-size=%2738%27 font-family=%27sans-serif%27 font-weight=%27700%27 text-anchor=%27middle%27 fill=%27white%27%3ET%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="theme.css">
+<script>
+  // Applied before first paint so the chosen theme and width never flash.
+  try {
+    var t = localStorage.getItem("tsd-theme");
+    var w = localStorage.getItem("tsd-width");
+    document.documentElement.dataset.theme = t === "dark" || t === "system" ? t : "light";
+    document.documentElement.dataset.width = w === "wide" ? "wide" : "standard";
+  } catch (e) {}
+</script></head>
+<body>
+<header>
+  <div class="head">
+    <div class="title">
+      <h1>Herdr sidebar: one list across hosts (MAT-344 prototype)</h1>
+      <span class="meta">personal / herdr-sidebar-proto · generated 2026-10-15 19:52 UTC · /home/ubuntu/Repos/scalable-agent-fleet</span>
+    </div>
+    <div class="head-actions"><a class="session-link" href="https://ubuntu-direct.tailc1d69d.ts.net:38443/focus?target=ub1%3A%3Aw98%3Ap16&amp;host=ub1"><span aria-hidden="true">↗</span> open session</a>
+      <a class="pdf-download" href="herdr-sidebar-proto.pdf" download><span aria-hidden="true">↓</span> PDF</a>
+    </div>
+    <div class="spacer"></div>
+    <button id="tsd-width" class="width-toggle" type="button" aria-pressed="false">wide</button>
+    <div class="themepick">
+      <label for="tsd-theme">theme</label>
+      <select id="tsd-theme" aria-label="Colour theme">
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+        <option value="system">System</option>
+      </select>
+    </div>
+  </div>
+</header>
+<main>
+<style>
+.term{font-family:ui-monospace,"JetBrains Mono",Menlo,monospace;font-size:13px;line-height:1.55;background:#14161a;color:#d4d7dc;border-radius:6px;padding:6px 0;width:34ch;box-sizing:content-box;overflow:hidden}
+.term.n28{width:28ch}
+.term .r{display:flex;align-items:center;white-space:nowrap;padding:0 1ch;gap:1ch}
+.term .h{color:#e8eaed;font-weight:600} .term .p{color:#9aa3ad}
+.term .i1{padding-left:2ch} .term .i2{padding-left:3ch} .term .i3{padding-left:5ch}
+.term .dim{color:#6b727b} .term .cnt{color:#9aa3ad;font-weight:400}
+.term .l{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.term .a{flex:0 0 auto;color:#7d858f;min-width:3ch;text-align:right}
+.term .d{flex:0 0 auto} .d.b{color:#e5534b} .d.w{color:#d4a72c} .d.r{color:#57ab5a} .d.d{color:#6b727b}
+.term .pt{flex:0 0 auto;display:inline-flex}
+.pv.cc{color:#e8875a} .pv.cx{color:#c9ccd1}
+.term .dc{font:inherit;border:0;background:none;padding:0;cursor:pointer;color:#7fa6c9}
+.dc.stale{opacity:.45;text-decoration:underline dashed}
+.dc.on{color:#fff;text-decoration:underline}
+.term .sel{margin-left:auto;font:inherit;font-weight:400;background:#262a31;color:#d4d7dc;border:0;border-radius:3px;padding:0 4px;cursor:pointer}
+.term .sel.static{cursor:default}
+.term[data-filter] .r[data-host]{display:none}
+.term[data-filter=u1] .r[data-host=u1],.term[data-filter=u2] .r[data-host=u2],.term[data-filter=mb] .r[data-host=mb],.term[data-filter=he] .r[data-host=he]{display:flex}
+.chips{font-family:ui-monospace,monospace;font-size:12px;margin:.4rem 0}
+.chips button{font:inherit;margin-right:4px;border-radius:10px;border:1px solid #888;padding:0 8px;background:transparent;color:inherit;cursor:pointer}
+.chips button[aria-pressed=true]{background:#0f766e;color:#fff;border-color:#0f766e}
+.mocks{display:flex;flex-wrap:wrap;gap:1.5rem;align-items:flex-start}
+.mocks figure{margin:0} .mocks figcaption{font-size:12px;margin-top:.3rem;max-width:36ch}
+</style>
+
+<div class="kpis">
+  <div class="kpi" tabindex="0" data-tip="Sidebar mock width in monospace columns, matching the current Herdr sidebar (~32-36 cols).">
+    <span class="k">sidebar width</span><span class="v">34 <small>cols</small></span>
+  </div>
+  <div class="kpi" tabindex="0" data-tip="Narrow variant width. Label truncates first; age and the provider+device token never drop.">
+    <span class="k">narrow variant</span><span class="v">28 <small>cols</small></span>
+  </div>
+  <div class="kpi" tabindex="0" data-tip="Hosts in the synthetic mock and their existing device codes (device_code in src/ui/sidebar.rs): ub1 → 1, ub2 → 2, mbpro → m, hetzner → h.">
+    <span class="k">hosts</span><span class="v">4</span>
+  </div>
+  <div class="kpi" tabindex="0" data-tip="Decisions listed at the bottom that need Matthias. Each has a recommended option marked.">
+    <span class="k">open decisions</span><span class="v warn">3</span>
+  </div>
+</div>
+
+
+
+  <!-- tsd:toc:start -->
+<nav class="toc" aria-label="Contents"><a href="#summary">summary</a>
+<a href="#before-today-s-sidebar">before: today&#x27;s sidebar</a>
+<a href="#after-state-project-agent-all-hosts">after: state → project → agent, all hosts</a>
+<a href="#narrow-width-28-cols-truncation-rules">narrow width (28 cols): truncation rules</a>
+<a href="#plain-text-fallback-nerd-font-glyphs-off">plain-text fallback (Nerd Font glyphs off)</a>
+<a href="#decisions-for-matthias">decisions for Matthias</a></nav>
+<!-- tsd:toc:end --><h3 id="summary">summary</h3>
+<p class="lead">Static prototype of MAT-344 section 4: the sidebar stops grouping by device and lists every agent as state → project → agent across ub1, ub2, mbpro and hetzner, with host shown the way Herdr already shows it: the provider icon followed by the one-character device code (<code>✱1</code> = Claude on ub1, <code>⊚2</code> = Codex on ub2, <code>m</code> mbpro, <code>h</code> hetzner). The device character doubles as a filter. Agent names are synthetic. No Herdr code changed.</p>
+
+<h3 id="before-today-s-sidebar">before: today's sidebar</h3>
+<div class="mocks"><figure><div class="term"><div class="r h">▾ Blockers <span class="cnt">2</span><span class="sel static">Local ▾</span></div>
+<div class="r i1"><span class="d b">○</span><span class="l">worker cleanup approve</span></div>
+<div class="r i1 dim">2 more on other devices</div>
+<div class="r h">▾ Working</div>
+<div class="r i1">▾ ub1 · this device</div>
+<div class="r i2">▾ scalablev2</div>
+<div class="r i3"><span class="d r">●</span><span class="l">upload dialog component</span></div>
+<div class="r i2">▾ herdr</div>
+<div class="r i3"><span class="d r">●</span><span class="l">MAT-344 sidebar proto</span></div>
+<div class="r i3"><span class="d w">●</span><span class="l">remote session support</span></div>
+<div class="r i2">▾ scalable-agent-fleet</div>
+<div class="r i3"><span class="d r">●</span><span class="l">cross-repo task tracking</span></div>
+<div class="r i1">▾ scalablev2 · ub2</div>
+<div class="r i2"><span class="d r">●</span><span class="l">SCA-4869 photo checklist build</span></div>
+<div class="r i1 dim">▸ hetzner (2) · ▸ mbpro (25) · ▸ ub2 (5)</div></div>
+<figcaption>Host is a grouping key; 32 remote agents hide behind collapsed device rows; the same project appears once per host; Blockers header carries <code>Local ▾</code>.</figcaption></figure></div>
+
+<h3 id="after-state-project-agent-all-hosts">after: state → project → agent, all hosts</h3>
+<div class="chips" id="chips">filter:
+  <button type="button" data-f="" aria-pressed="true">all hosts</button><button type="button" data-f="u1" aria-pressed="false">1 ub1</button><button type="button" data-f="u2" aria-pressed="false" title="ub2 reconnecting, 4 s">2 ub2 (stale)</button><button type="button" data-f="mb" aria-pressed="false">m mbpro</button><button type="button" data-f="he" aria-pressed="false">h hetzner</button>
+</div>
+<div class="mocks"><figure><div class="term" id="after"><div class="r h">▾ blocked <span class="cnt">3</span><button type="button" class="sel" data-tip="Filter by host" title="Filter by host">all hosts ▾</button></div><div class="r i1 p">▾ scalablev2</div><div class="r i2" data-host="mb"><span class="d b">●</span><span class="l">SCA-4901 billing copy review</span><span class="pt"><span class="pv cx" title="Codex">⊚</span><button type="button" class="dc" data-h="mb" title="mbpro">m</button></span><span class="a">2m</span></div><div class="r i2" data-host="u2"><span class="d b">●</span><span class="l">sfl triage approval</span><span class="pt"><span class="pv cc" title="Claude">✱</span><button type="button" class="dc stale" data-h="u2" title="ub2 reconnecting, 4 s">2</button></span><span class="a">14m</span></div><div class="r i1 p">▾ scalable-agent-fleet</div><div class="r i2" data-host="u1"><span class="d b">●</span><span class="l">worker cleanup approve</span><span class="pt"><span class="pv cx" title="Codex">⊚</span><button type="button" class="dc" data-h="u1" title="ub1">1</button></span><span class="a">6m</span></div><div class="r h ">▾ waiting <span class="cnt">3</span></div><div class="r i1 p">▾ herdr</div><div class="r i2" data-host="u1"><span class="d w">●</span><span class="l">remote session support</span><span class="pt"><span class="pv cc" title="Claude">✱</span><button type="button" class="dc" data-h="u1" title="ub1">1</button></span><span class="a">1m</span></div><div class="r i2" data-host="he"><span class="d w">●</span><span class="l">symphony run paused</span><span class="pt"><span class="pv cx" title="Codex">⊚</span><button type="button" class="dc" data-h="he" title="hetzner">h</button></span><span class="a">9m</span></div><div class="r i1 p">▾ dotfiles</div><div class="r i2" data-host="mb"><span class="d w">●</span><span class="l">zsh prompt lag</span><span class="pt"><span class="pv cc" title="Claude">✱</span><button type="button" class="dc" data-h="mb" title="mbpro">m</button></span><span class="a">22m</span></div><div class="r h ">▾ working <span class="cnt">6</span></div><div class="r i1 p">▾ scalablev2</div><div class="r i2" data-host="u1"><span class="d r">●</span><span class="l">upload dialog component</span><span class="pt"><span class="pv cx" title="Codex">⊚</span><button type="button" class="dc" data-h="u1" title="ub1">1</button></span><span class="a">0s</span></div><div class="r i2" data-host="u2"><span class="d r">●</span><span class="l">SCA-4869 photo checklist build</span><span class="pt"><span class="pv cc" title="Claude">✱</span><button type="button" class="dc stale" data-h="u2" title="ub2 reconnecting, 4 s">2</button></span><span class="a">12s</span></div><div class="r i2" data-host="mb"><span class="d r">●</span><span class="l">sidebar search settings</span><span class="pt"><span class="pv cx" title="Codex">⊚</span><button type="button" class="dc" data-h="mb" title="mbpro">m</button></span><span class="a">40s</span></div><div class="r i1 p">▾ herdr</div><div class="r i2" data-host="u1"><span class="d r">●</span><span class="l">MAT-344 sidebar proto</span><span class="pt"><span class="pv cc" title="Claude">✱</span><button type="button" class="dc" data-h="u1" title="ub1">1</button></span><span class="a">3s</span></div><div class="r i2" data-host="u2"><span class="d r">●</span><span class="l">warm channel supervisor</span><span class="pt"><span class="pv cx" title="Codex">⊚</span><button type="button" class="dc stale" data-h="u2" title="ub2 reconnecting, 4 s">2</button></span><span class="a">1m</span></div><div class="r i1 p">▾ scalable-agent-fleet</div><div class="r i2" data-host="u1"><span class="d r">●</span><span class="l">cross-repo task tracking</span><span class="pt"><span class="pv cc" title="Claude">✱</span><button type="button" class="dc" data-h="u1" title="ub1">1</button></span><span class="a">4m</span></div><div class="r h dim">▸ done / idle <span class="cnt">31</span></div></div>
+<figcaption>Rows within a project sort by activity age regardless of host. Click a device character, a chip or <code>all hosts ▾</code> to filter (the selector label shows the active host). The dimmed, dashed <code>2</code> shows a stale host; hover for "ub2 reconnecting, 4 s". <code>done / idle</code> is collapsed.</figcaption></figure></div>
+
+<h3 id="narrow-width-28-cols-truncation-rules">narrow width (28 cols): truncation rules</h3>
+<div class="mocks"><figure><div class="term n28"><div class="r h">▾ working <button type="button" class="sel" title="Filter by host">all ▾</button></div><div class="r i1 p">▾ scalablev2</div><div class="r i2" data-host="u2"><span class="d r">●</span><span class="l">SCA-4869 photo checklist build</span><span class="pt"><span class="pv cx" title="Codex">⊚</span><button type="button" class="dc" data-h="u2" title="ub2">2</button></span><span class="a">12s</span></div><div class="r i2" data-host="u1"><span class="d r">●</span><span class="l">upload dialog component</span><span class="pt"><span class="pv cc" title="Claude">✱</span><button type="button" class="dc" data-h="u1" title="ub1">1</button></span><span class="a">0s</span></div><div class="r i1 p">▾ scalable-agent-fleet</div><div class="r i2" data-host="u1"><span class="d r">●</span><span class="l">cross-repository task tracking</span><span class="pt"><span class="pv cx" title="Codex">⊚</span><button type="button" class="dc" data-h="u1" title="ub1">1</button></span><span class="a">4m</span></div><div class="r i2" data-host="he"><span class="d r">●</span><span class="l">MAT-344 sidebar proto with a long label</span><span class="pt"><span class="pv cc" title="Claude">✱</span><button type="button" class="dc" data-h="he" title="hetzner">h</button></span><span class="a">3s</span></div></div>
+<figcaption>Drop order: label is ellipsised first, then the project indent shrinks; the provider+device token and the age are fixed-width and never drop. Rows stay single-line.</figcaption></figure></div>
+
+<h3 id="plain-text-fallback-nerd-font-glyphs-off">plain-text fallback (Nerd Font glyphs off)</h3>
+<div class="mocks"><figure><div class="term"><div class="r h"><span title="collapse group">v</span> blocked <span class="cnt">3</span><span class="sel static" title="host filter">all hosts v</span></div><div class="r i1 p"><span title="collapse group">v</span> scalablev2</div><div class="r i2" data-host="mb"><span class="d b" title="blocked">!</span><span class="l">SCA-4901 billing copy review</span><span class="pt"><span class="pv cc" title="Claude">c</span><button type="button" class="dc" data-h="mb" title="mbpro">m</button></span><span class="a">2m</span></div><div class="r i1 p"><span title="collapse group">v</span> herdr</div><div class="r i2" data-host="u1"><span class="d w" title="waiting">?</span><span class="l">remote session support</span><span class="pt"><span class="pv cx" title="Codex">x</span><button type="button" class="dc" data-h="u1" title="ub1">1</button></span><span class="a">1m</span></div><div class="r i2" data-host="u1"><span class="d r" title="working">*</span><span class="l">MAT-344 sidebar proto</span><span class="pt"><span class="pv cc" title="Claude">c</span><button type="button" class="dc" data-h="u1" title="ub1">1</button></span><span class="a">3s</span></div><div class="r h dim"><span title="expand group">&gt;</span> done / idle <span class="cnt">31</span></div></div>
+<figcaption>Glyphs map to ASCII: <code>!</code> blocked, <code>?</code> waiting, <code>*</code> working, <code>.</code> done/idle, <code>v</code>/<code>&gt;</code> expand state. Icons stay in place of words; every icon carries a tooltip. The provider icon falls back to its existing letter tag (<code>c</code> Claude, <code>x</code> Codex); the device character is unchanged.</figcaption></figure></div>
+
+<h3 id="decisions-for-matthias">decisions for Matthias</h3>
+<table>
+  <thead><tr><th>decision</th><th>options</th><th>recommended</th></tr></thead>
+  <tbody>
+    <tr><td>host display</td><td>a) existing provider icon + one-character device code · b) full host name right-aligned</td><td><span class="pill ok">a) provider + device code</span> already shipped style; one extra column, no new visual language</td></tr>
+    <tr><td>done / idle group</td><td>a) collapsed by default · b) expanded</td><td><span class="pill ok">a) collapsed</span> it is the largest group and least actionable</td></tr>
+    <tr><td>sort within project</td><td>a) activity age · b) time in current state</td><td><span class="pill ok">a) activity age</span> matches the design doc; state age goes in the tooltip</td></tr>
+  </tbody>
+</table>
+
+<footer>
+  <span class="pill">tsd</span>
+  <span>MAT-344 prototype. Source: unified-fleet-sessions-design.md section 4 and the herdr-unified-sidebar direction mock. Synthetic data.</span>
+</footer>
+<script>
+(function(){
+  var t=document.getElementById("after"),chips=document.querySelectorAll("#chips button"),sel=t.querySelector(".sel");
+  var names={u1:"ub1",u2:"ub2",mb:"mbpro",he:"hetzner"},order=["","u1","u2","mb","he"];
+  function set(f){
+    if(f) t.dataset.filter=f; else delete t.dataset.filter;
+    chips.forEach(function(c){c.setAttribute("aria-pressed",c.dataset.f===f?"true":"false");});
+    t.querySelectorAll(".dc").forEach(function(b){b.classList.toggle("on",!!f&&b.dataset.h===f);});
+    sel.textContent=(f?names[f]:"all hosts")+" ▾";
+  }
+  chips.forEach(function(c){c.addEventListener("click",function(){set(c.dataset.f);});});
+  t.querySelectorAll(".dc").forEach(function(b){b.addEventListener("click",function(){var h=b.dataset.h;set(t.dataset.filter===h?"":h);});});
+  sel.addEventListener("click",function(){var i=order.indexOf(t.dataset.filter||"");set(order[(i+1)%order.length]);});
+})();
+</script>
+</main>
+<script>
+  (function () {
+    var sel = document.getElementById("tsd-theme");
+    if (sel) {
+      var cur = document.documentElement.dataset.theme || "light";
+      sel.value = cur;
+      sel.addEventListener("change", function () {
+        document.documentElement.dataset.theme = sel.value;
+        try { localStorage.setItem("tsd-theme", sel.value); } catch (e) {}
+      });
+    }
+    var width = document.getElementById("tsd-width");
+    if (width) {
+      width.setAttribute("aria-pressed", document.documentElement.dataset.width === "wide" ? "true" : "false");
+      width.addEventListener("click", function () {
+        var wide = document.documentElement.dataset.width !== "wide";
+        document.documentElement.dataset.width = wide ? "wide" : "standard";
+        width.setAttribute("aria-pressed", wide ? "true" : "false");
+        try { localStorage.setItem("tsd-width", wide ? "wide" : "standard"); } catch (e) {}
+      });
+    }
+  })();
+</script></body>
+</html>

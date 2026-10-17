@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MAT-349 · project sidebar in terminal cells</title>
+<style>
+:root{color-scheme:dark;--page:#101216;--panel:#171a20;--line:#2b3039;--text:#e7e9ed;--muted:#858b96;--quiet:#626975;--blue:#72a9ff;--green:#45c582;--red:#ef777a;--amber:#e6b75c;--focus:#292e38;--cell:13px}
+*{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--text);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+header{padding:26px 30px 20px;border-bottom:1px solid var(--line);display:flex;align-items:end;gap:20px;flex-wrap:wrap}h1{font-size:23px;line-height:1.2;margin:0 0 5px;font-weight:650;letter-spacing:-.025em}.sub{color:var(--muted)}.controls{margin-left:auto;display:flex;gap:7px}.controls button{background:#20242c;border:1px solid #343a45;color:var(--text);padding:7px 11px;border-radius:7px;cursor:pointer}.controls button[aria-pressed=true]{background:#34445d;border-color:#5d7daa}
+main{padding:22px 30px 44px;max-width:1800px;margin:auto}.intro{color:#b6bbc4;margin:0 0 18px}.fixture-note{font-size:12px;color:var(--muted);margin:8px 0 22px}.scale{margin:28px 0 40px}.scale-title{font-size:17px;font-weight:650;margin:0 0 12px}.columns{display:grid;grid-template-columns:minmax(390px,1.05fr) minmax(310px,.88fr) minmax(310px,.88fr);gap:13px;align-items:start;overflow-x:auto;padding-bottom:5px}.column{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}.colhead{height:44px;padding:11px 13px;border-bottom:1px solid var(--line);font-size:12px;font-weight:650;letter-spacing:.045em;text-transform:uppercase;color:#c1c6cf}.tag{float:right;text-transform:none;letter-spacing:0;color:var(--muted);font-weight:450}.screen{padding:14px;min-height:410px}.refwrap{background:#0b0d11;border-radius:7px;padding:8px;margin-bottom:9px;overflow:hidden}.refwrap img{display:block;width:100%;height:auto}.refcaption{font-size:11px;color:var(--muted);padding:0 2px 2px}.terminal{display:flex;justify-content:center;padding:12px 8px 18px}.term{width:calc(var(--cols)*var(--cell));max-width:100%;background:#080a0d;color:#e8eaf0;border:1px solid #282c34;border-radius:5px;padding:8px 0 10px;overflow:hidden;white-space:pre;font:13px/1.6 "JetBrains Mono Nerd Font Mono","JetBrains Mono","SFMono-Regular",Menlo,monospace;font-weight:400;font-variant-ligatures:none;box-shadow:0 10px 32px #0005}.line{display:block;height:1.6em;padding:0 1ch;overflow:hidden;white-space:pre}.muted{color:#737a86}.quiet{color:#555c67}.green{color:var(--green)}.red{color:var(--red)}.blue{color:var(--blue)}.amber{color:var(--amber)}.bold{font-weight:750;color:#f5f6f8}.focused{background:#242a34}.project{color:#c2c7d0;font-weight:600}.headrow{color:#8e95a1;font-weight:500}.badge{display:inline-block;background:#365580;color:#f4f7ff;font-weight:750;min-width:2ch;text-align:center}.badge.purple{background:#604a81}.badge.greenbg{background:#315e4b}.fallback .nerd{display:none}.nerd-mode .plain{display:none}.nerd-mode .nerd{display:inline}.note{border-top:1px solid var(--line);padding:12px 14px 14px;color:#aeb4bf;font-size:12px;min-height:83px}.note strong{color:#e0e3e9;font-weight:600}.legend{display:flex;gap:16px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin:8px 1px 0}.key{color:#d7dbe2;border:1px solid #404651;border-radius:4px;padding:0 5px;font:11px ui-monospace,monospace}.details{margin-top:24px;padding:16px 18px;border:1px solid var(--line);background:#15181e;border-radius:9px;color:#b4bac4}.details h2{font-size:15px;margin:0 0 8px;color:#e4e7ec}.details ul{margin:7px 0 0;padding-left:20px}.details li{margin:4px 0}.small{font-size:12px;color:var(--muted)}
+.age{float:right;padding-right:1ch}.dim{color:#9aa0aa}.cdone{color:#3fb950;font-size:11px}.small2{color:#6b7280}.badge{border-radius:2px}.badge.sv{background:#3a1f24;color:#f07a85}.badge.vd{background:#2c2147;color:#a98bf0}.term .line{height:1.75em}.term{font-size:13px}.project{color:#e8eaf0;font-weight:600}
+@media(max-width:900px){header{padding:20px}main{padding:18px}.columns{grid-template-columns:repeat(3,minmax(320px,1fr))}.controls{margin-left:0}}
+</style>
+</head>
+<body>
+<header><div><h1>MAT-349 · project sidebar, translated to terminal cells</h1><div class="sub">The same fixture across the 13 Oct reference, PR #620 today, and a reference-led restyle.</div></div><div class="controls" aria-label="Prototype options"><button id="glyphs" type="button" aria-pressed="false">Nerd Font glyphs: off</button></div></header>
+<main>
+<p class="intro">Compare at <b>32</b> and <b>40</b> terminal columns. The HTML panels scale their cell grid; color is 24-bit and every sidebar row stays on one terminal line.</p>
+<p class="fixture-note">Stable project identity order: <code>acme/herdr</code>, then <code>acme/scalable</code>. Fixture ages are display-only. Local rows stand for tabs; remote rows stand for individual panes.</p>
+<div id="scales"></div>
+<section class="details"><h2>Behavior held from #620</h2><ul><li>Project-first grouping, folding, and project counts stay in place; the collapsed project remains a one-line project row.</li><li>Working rows stay hidden under the collapsed per-project <b>working (N)</b> fold. Blocked rows are promoted into the visible project rows.</li><li>Existing lifecycle shelves remain after the project groups. Remote agents remain per pane and include their host in the row.</li><li>Rows shown in this mock are ordered by stable identity for comparison; ages never determine ordering. Parked remote agents display as idle, the existing known gap owned elsewhere.</li></ul><div class="legend"><span><span class="green">●</span> idle/done</span><span><span class="blue">●</span> working (inside folded working group)</span><span><span class="red">●</span> blocked</span><span>focused = full row background + bold title</span></div></section>
+</main>
+<script>
+const reference='https://ub2.tailc1d69d.ts.net/herdr-sidebar-reference-20261013/';
+function refCol(){return `<section class="column"><div class="colhead">13 Oct reference <span class="tag">actual reference screenshots</span></div><div class="screen"><div class="refwrap"><img src="${reference}reference.png" alt="Matthias’s T3 Code sidebar reference screenshot"><div class="refcaption">Matthias’s T3 Code screenshot</div></div><div class="refwrap"><img src="${reference}desktop.png" alt="Rendered 13 October sidebar prototype screenshot"><div class="refcaption">Rendered reference prototype</div></div></div><div class="note"><strong>Terminal compromises</strong><br>Reference uses proportional UI typography, smooth rounded selection and pixel spacing. Its actual screenshots are shown here; the two terminal columns preserve content and hierarchy on a fixed cell grid.</div></section>`}
+function line(s,cls=''){return `<span class="line ${cls}">${s}</span>`}
+function today(cols){const rows=[];
+rows.push(line('⌕ Search                         ⋯','muted'));
+rows.push(line('─'.repeat(cols-2),'quiet'));
+rows.push(line('PROJECTS','headrow'));
+rows.push(line('▾  acme/herdr (3/5)','project'));
+rows.push(line('  ● fix remote pane restore  4m','focused'));
+rows.push(line('  ! approve database change  8m','red'));
+rows.push(line('  + release notes            2h','green'));
+rows.push(line('  ◦ triage crash report      6h','muted'));
+rows.push(line('  ▸ working (2)','muted'));
+rows.push(line('▸  acme/scalable (1/2)','project'));
+rows.push(line('─'.repeat(cols-2),'quiet'));
+rows.push(line('SNOOZED  (1)','muted'));
+rows.push(line('  ◦ design review      1d','muted'));
+rows.push(line('─'.repeat(cols-2),'quiet'));
+rows.push(line('COMPLETED','green'));
+rows.push(line('  + update onboarding  2d','muted'));
+rows.push(line('',''));
+rows.push(line('REMOTE · PER PANE','headrow'));
+rows.push(line('  + ub1  worker docs   12m','green'));
+rows.push(line('  ● ub2  worker tests   3m','blue'));
+rows.push(line('',''));
+rows.push(line('Tabs / panes: 4','muted'));
+return `<section class="column"><div class="colhead">#620 today <span class="tag">current row grammar</span></div><div class="terminal"><div class="term" style="--cols:${cols}">${rows.join('')}</div></div><div class="note"><strong>Today’s rendering, from sidebar.rs + fleet_grouping.rs</strong><br>Divider rules and uppercase section labels; plain status symbols (+ / ! / ◦ / ●), depth spaces, activity age in title text, and a dim working fold line. Project rows retain the project-first behavior.</div></section>`}
+function proposed(cols){let rows=[];
+const R=(l,a,cls='')=>line(l+(a?`<span class="muted age">${a}</span>`:''),cls);
+const blank=()=>line(' ');
+rows.push(line('<span class="muted">⌕</span> <span class="muted">Search</span><span class="quiet age">⌘K</span>'));
+rows.push(blank());
+rows.push(line('<span class="muted">Projects</span><span class="quiet age">↕ +</span>'));
+rows.push(line('<span class="muted">⌄</span> <span class="badge sv">AH</span> <span class="project">acme/herdr</span> <span class="muted small2">3 projects</span>'));
+rows.push(R('   <span class="red">●</span> <span class="red">approve database change</span>','8m'));
+rows.push(R('   <span class="bold">fix remote pane restore</span>','4m','focused'));
+rows.push(R('   <span class="cdone">Completed</span> <span class="dim">release notes</span>','2h'));
+rows.push(R('   <span class="dim">triage crash report</span>','6h'));
+rows.push(line('   <span class="muted">› working (2)</span>'));
+rows.push(line('   <span class="muted">Show more</span>'));
+rows.push(line('<span class="muted">›</span> <span class="badge vd">AS</span> <span class="project">acme/scalable</span> <span class="muted small2">2 projects</span>'));
+rows.push(blank());
+rows.push(line('<span class="muted">Snoozed</span><span class="quiet age">1</span>'));
+rows.push(R('   <span class="dim">design review</span>','1d'));
+rows.push(blank());
+rows.push(line('<span class="muted">Completed</span><span class="quiet age">1</span>'));
+rows.push(R('   <span class="cdone">Completed</span> <span class="dim">update onboarding</span>','2d'));
+rows.push(blank());
+rows.push(line('<span class="muted">Remote · per pane</span>'));
+rows.push(R('   <span class="green">●</span> <span class="dim">worker docs</span> <span class="muted">ub1</span>','12m'));
+rows.push(R('   <span class="blue">●</span> <span class="dim">worker tests</span> <span class="muted">ub2</span>','3m'));
+return `<section class="column"><div class="colhead">Proposed terminal restyle <span class="tag">same #620 structure</span></div><div class="terminal"><div class="term" style="--cols:${cols}">${rows.join('')}</div></div><div class="note"><strong>Terminal compromises</strong><br>Cell backgrounds approximate rounded focus; dot color carries state, muted ages align at the right edge where cells permit, and colored two-cell badges stand in for soft chips. No pixel font or box-drawing frame.</div><div class="note" style="border-top:0;padding-top:0"><strong>Glyph fallback</strong><br><span class="fallback"><span class="plain">Default shown: text-safe chevrons, dot, plus, and ⌘K hint.</span><span class="nerd">Nerd Font mode:  󰄾 󰐕 󰋼 󰓅</span></span></div></section>`}
+function render(){document.getElementById('scales').innerHTML=[32,40].map(n=>`<section class="scale"><h2 class="scale-title">${n} column sidebar</h2><div class="columns">${refCol()}${today(n)}${proposed(n)}</div></section>`).join('')}
+render();document.getElementById('glyphs').addEventListener('click',e=>{const on=document.body.classList.toggle('nerd-mode');e.currentTarget.setAttribute('aria-pressed',String(on));e.currentTarget.textContent=`Nerd Font glyphs: ${on?'on':'off'}`});
+</script>
+</body>
+</html>

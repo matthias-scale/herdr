@@ -1,0 +1,8 @@
+<ul class="notes">
+<li><b>Dots</b> follow the states Herdr actually has: <span class="r">○</span> blocked, <span class="b">●</span> working, <span class="g">◉</span> done (unseen), <span class="m">○</span> idle (seen), <span style="color:#8b929e">?</span> unknown — the glyphs #620 already uses. A question mark inside a one-cell dot is not legible, so unknown keeps the existing grey <code>?</code>.</li>
+<li><b>Repo icons:</b> repos with a built-in icon in <code>src/ui/icons.rs</code> show it (herdr and scalablev2 from the Herdr Icons font; fleet, harness, dotfiles, obsidian from Nerd Font). Other repos get a T3-style chip with first and last letter (mable → ME).</li>
+<li><b>No repo yet</b> group collects agents whose folder has no detected repo; it reuses the existing "No repo yet" title and icon.</li>
+<li><b>Settings:</b> a cog between the view selector and <code>All projects ▾</code> opens provider icon on/off, machine name on/off, and the machine picker (moved from the Blocked header).</li>
+<li><b>Working</b> lines (<code>● N working ›</code> and all-working groups like mable) render at 50% opacity.</li><li><b>Pinned and Blocked</b> rows are single lines: state glyph, the row's repo icon or chip, title, token, age. No project sub-lines.</li>
+<li>Kept from round 5: Pinned / Blocked (with project lines) / groups / Snoozed / Settled, every section collapsible from column 0, no Show more, no local/remote split, stable-identity order.</li>
+</ul>

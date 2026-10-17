@@ -1,0 +1,109 @@
+<!doctype html>
+<!-- tsd:template v2 — replace the sample content, keep the structure and theme.css.
+     Sections are optional: delete what the run has nothing to say about. Never
+     invent a second page style; every tsd dashboard looks like this one.
+     Built once with Astro (npx astro build); edit this file directly, it is the
+     shipped artifact. Every headline figure keeps its data-tip tooltip. -->
+<html lang="en" data-theme="light" data-width="standard">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Herdr sidebar prototype</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2714%27 fill=%27%230f766e%27/%3E%3Ctext x=%2732%27 y=%2745%27 font-size=%2738%27 font-family=%27sans-serif%27 font-weight=%27700%27 text-anchor=%27middle%27 fill=%27white%27%3ET%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="theme.css">
+<script>
+  // Applied before first paint so the chosen theme and width never flash.
+  try {
+    var t = localStorage.getItem("tsd-theme");
+    var w = localStorage.getItem("tsd-width");
+    document.documentElement.dataset.theme = t === "dark" || t === "system" ? t : "light";
+    document.documentElement.dataset.width = w === "wide" ? "wide" : "standard";
+  } catch (e) {}
+</script></head>
+<body>
+<header>
+  <div class="head">
+    <div class="title">
+      <h1>Herdr sidebar prototype</h1>
+      <span class="meta">Herdr · 13 October 2026 · interactive design study, mock data only</span>
+    </div>
+    <div class="head-actions"><a class="session-link" href="https://matthiass-macbook-pro.tailc1d69d.ts.net:38443/focus?target=mbpro%3A%3Aw2J%3ApC&amp;host=mbpro"><span aria-hidden="true">↗</span> open session</a>
+      <a class="pdf-download" href="herdr-sidebar-reference-20261013.pdf" download><span aria-hidden="true">↓</span> PDF</a>
+    </div>
+    <div class="spacer"></div>
+    <button id="tsd-width" class="width-toggle" type="button" aria-pressed="false">wide</button>
+    <div class="themepick">
+      <label for="tsd-theme">theme</label>
+      <select id="tsd-theme" aria-label="Colour theme">
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+        <option value="system">System</option>
+      </select>
+    </div>
+  </div>
+</header>
+<main>
+<!-- tsd:toc:start -->
+<nav class="toc" aria-label="Contents"><a href="#try-the-sidebar">Try the sidebar</a>
+<a href="#what-to-try">What to try</a>
+<a href="#preview">Preview</a>
+<a href="#verification">Verification</a>
+<a href="#scope">Scope</a></nav>
+<!-- tsd:toc:end -->
+
+  <h3 id="try-the-sidebar">Try the sidebar</h3>
+  <p class="lead"><a href="prototype.html">Open the interactive prototype</a>. A compact, project-grouped sidebar based on your reference, with instant search and optional provider and machine labels.</p>
+  <p>This is a separate HTML mockup. It does not connect to your tabs, start agents, or change the installed Herdr.</p>
+
+  <h3 id="what-to-try">What to try</h3>
+  <table>
+    <thead><tr><th>Action</th><th>Expected behavior</th></tr></thead>
+    <tbody>
+      <tr><td>Type in Search</td><td>Results update without pressing Enter, including tabs hidden inside collapsed groups.</td></tr>
+      <tr><td>Open Display options</td><td>Turn provider icons and machine names on independently. Both start off to keep the reference's quiet layout.</td></tr>
+      <tr><td>Select a tab</td><td>The row highlights and the mock detail area changes. Nothing happens to real sessions.</td></tr>
+      <tr><td>Collapse a project or show more</td><td>The tree changes locally; search still reaches all fixture tabs.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="preview">Preview</h3>
+  <p><a href="prototype.html"><img src="desktop.png" alt="HTML prototype: compact dark project-grouped Herdr sidebar beside a mock terminal" style="display:block;max-width:100%;height:auto"></a></p>
+  <p><a href="settings.png">Display options enabled</a> · <a href="search.png">Search results</a> · <a href="mobile.png">Narrow-screen layout</a></p>
+
+  <h3 id="verification">Verification</h3>
+  <p>Headless Chromium passed 20 interaction and layout checks with no uncaught browser errors: instant search, hidden-group results, independent display toggles, unchanged search indexing, keyboard selection, Escape, empty results, reset, reload persistence, and desktop/mobile overflow.</p>
+  <p>Cmd/Ctrl+K focuses the prototype search field. Herdr's inspected defaults call the native action <code>agent_finder</code> with <code>prefix+f</code>; user-customized bindings may differ. Live transcript matching is simulated on fixture text here.</p>
+
+  <h3 id="scope">Scope</h3>
+  <p>The row layout and interactions are the proposal. Native terminal glyphs, actual search integration, live status, and production settings persistence are not implemented by this prototype.</p>
+  <p><a href="reference.png">View your reference image</a></p>
+
+  <footer>
+    <span class="pill">tsd</span>
+    <span>Built by an agent run. Source of truth stays in the repository; this page is a view of it.</span>
+  </footer>
+</main>
+<script>
+  (function () {
+    var sel = document.getElementById("tsd-theme");
+    if (sel) {
+      var cur = document.documentElement.dataset.theme || "light";
+      sel.value = cur;
+      sel.addEventListener("change", function () {
+        document.documentElement.dataset.theme = sel.value;
+        try { localStorage.setItem("tsd-theme", sel.value); } catch (e) {}
+      });
+    }
+    var width = document.getElementById("tsd-width");
+    if (width) {
+      width.setAttribute("aria-pressed", document.documentElement.dataset.width === "wide" ? "true" : "false");
+      width.addEventListener("click", function () {
+        var wide = document.documentElement.dataset.width !== "wide";
+        document.documentElement.dataset.width = wide ? "wide" : "standard";
+        width.setAttribute("aria-pressed", wide ? "true" : "false");
+        try { localStorage.setItem("tsd-width", wide ? "wide" : "standard"); } catch (e) {}
+      });
+    }
+  })();
+</script></body>
+</html>

@@ -1,0 +1,47 @@
+ra-launch: explicit --host ub1 requested while ub2 has capacity; consider --host auto
+ra-launch: preflight passed: host=ub1 target=/home/ubuntu/wt/ra-261016-mat-349-design-proto-v2-09a3717 repo=https://github.com/matthias-scale/herdr.git
+Preparing worktree (checking out 'feat/mat-349-project-first-sidebar')
+HEAD is now at 4e06ec137 fix: preserve deferred sidebar shelves and headless sort
+worktree-bootstrap: libghostty-vt cache hit: 48541a0e2fc77168d10902c6b2e7ff428a0f96ba-x86_64-linux-gnu-ReleaseFast
+LIBGHOSTTY_VT_LIB_DIR=/home/ubuntu/.cache/ra-libghostty-vt/48541a0e2fc77168d10902c6b2e7ff428a0f96ba-x86_64-linux-gnu-ReleaseFast/lib
+worktree-bootstrap: no package.json in /home/ubuntu/wt/ra-261016-mat-349-design-proto-v2-09a3717 — searching tracked nested apps
+ra-launch: launched: ub1/ra-261016-mat-349-design-proto-v2-09a3717 turn=turn-086ca23b852226fe05971f5b
+{
+  "schema": 1,
+  "version": 1,
+  "run_id": "ra-261016-mat-349-design-proto-v2-09a3717",
+  "turn_id": "turn-086ca23b852226fe05971f5b",
+  "parent_session": "e5e3c6a0-7f80-41ef-b1b0-5f8a90f50f17",
+  "run_started_at": "2026-10-16T15:16:51Z",
+  "started_at": "2026-10-16T15:16:51Z",
+  "exited_at": "2026-10-16T15:19:31Z",
+  "elapsed_ms": 159931,
+  "exit_code": 0,
+  "result_ref": "turns/turn-086ca23b852226fe05971f5b/result.md",
+  "result_status": "available",
+  "trace_ref": "turns/turn-086ca23b852226fe05971f5b/trace.log",
+  "status": "ended-unverified",
+  "wrapper_revision": "git:fc67f840f6d3a0edc1493c24bf41f83583eeab40:sha256:df7160bf21d04d20abac0a8b35ea5133704d527c93125eef000798e93edcb4f2",
+  "parent_run": null,
+  "edge": {
+    "agent": "codex",
+    "attempt": null,
+    "effort": "medium",
+    "ended": "2026-10-16T15:19:31Z",
+    "escalated_from": null,
+    "from_skill": null,
+    "host": "ub1",
+    "key": null,
+    "model": "gpt-6-luna",
+    "outcome": "ended-unverified",
+    "started": "2026-10-16T15:16:51Z",
+    "to_skill": null,
+    "tokens_in": null,
+    "tokens_out": null,
+    "trigger": "unknown"
+  },
+  "trigger": "unknown",
+  "key": null,
+  "attempt": null,
+  "run_exit_code": 0
+}

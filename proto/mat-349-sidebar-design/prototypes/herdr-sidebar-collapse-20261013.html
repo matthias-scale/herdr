@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en" data-theme="light" data-width="standard">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Herdr sidebar: collapse and hover</title>
+<link rel="stylesheet" href="theme.css">
+<script>
+try {
+  var t = localStorage.getItem('tsd-theme');
+  var w = localStorage.getItem('tsd-width');
+  document.documentElement.dataset.theme = t === 'dark' || t === 'system' ? t : 'light';
+  document.documentElement.dataset.width = w === 'wide' ? 'wide' : 'standard';
+} catch (e) {}
+</script>
+</head>
+<body>
+<header><div class="head">
+  <div class="title"><h1>Herdr sidebar: collapse and hover</h1><span class="meta">13 October 2026 · interactive prototype · mock tabs only</span></div>
+  <div class="head-actions">
+    <a class="session-link" href="https://matthiass-macbook-pro.tailc1d69d.ts.net:38443/focus?target=mbpro%3A%3Aw2J%3ApC&amp;host=mbpro">open session</a>
+    <a class="pdf-download" href="herdr-sidebar-collapse-20261013.pdf" download>PDF</a>
+  </div>
+  <div class="spacer"></div>
+  <button id="tsd-width" class="width-toggle" type="button" aria-pressed="false">wide</button>
+  <div class="themepick"><label for="tsd-theme">theme</label><select id="tsd-theme" aria-label="Colour theme"><option value="light">Light</option><option value="dark">Dark</option><option value="system">System</option></select></div>
+</div></header>
+<main>
+<!-- tsd:toc:start -->
+<nav class="toc" aria-label="Contents"><a href="#try-the-updated-sidebar">Try the updated sidebar</a>
+<a href="#what-changed">What changed</a>
+<a href="#your-references">Your references</a>
+<a href="#prototype-captures">Prototype captures</a>
+<a href="#spacing-correction">Spacing correction</a>
+<a href="#verified-behavior">Verified behavior</a>
+<a href="#t3-source-reference">T3 source reference</a>
+<a href="#scope">Scope</a></nav>
+<!-- tsd:toc:end -->
+  <h3 id="try-the-updated-sidebar">Try the updated sidebar</h3>
+  <p class="lead"><a href="prototype.html">Open the interactive prototype</a>. The approved layout, with your active tab retained when its project is collapsed and a status-dot-to-chevron swap on hover.</p>
+  <p>Nothing connects to real agents or changes installed Herdr. <a href="https://ub2.tailc1d69d.ts.net/herdr-sidebar-reference-20261013/">The first prototype remains available</a>.</p>
+  <h3 id="what-changed">What changed</h3>
+  <table><thead><tr><th>Action</th><th>Behavior to try</th></tr></thead><tbody>
+    <tr><td>Collapse the selected tab's project</td><td>Only your active tab remains visible beneath the header. Siblings and Show more disappear; selection does not change.</td></tr>
+    <tr><td>Hover or keyboard-focus the project header</td><td>The leading status dot gives way to the disclosure chevron in the same position. The project icon and title stay still.</td></tr>
+    <tr><td>Select a tab in another collapsed project through Search</td><td>Clear Search. The newly selected tab remains under its collapsed project, without leaving an old active-row copy behind.</td></tr>
+    <tr><td>Enable provider and machine labels</td><td>The retained active row uses the same display options as other rows.</td></tr>
+  </tbody></table>
+  <h3 id="your-references">Your references</h3>
+  <p>Collapsed active project:</p><p><img src="reference-collapse.png" alt="Reference: collapsed project still shows the selected session underneath" style="max-width:100%;height:auto"></p>
+  <p>Hover disclosure:</p><p><img src="reference-hover.png" alt="Reference: hovering the project header replaces the green status dot with a right-facing chevron" style="max-width:100%;height:auto"></p>
+  <h3 id="prototype-captures">Prototype captures</h3>
+  <p><a href="collapsed.png">Collapsed active project</a> · <a href="hover.png">Hovered project header</a> · <a href="mobile.png">Mobile layout</a></p>
+  <p><a href="prototype.html"><img src="collapsed.png" alt="Updated prototype with the active tab retained under a collapsed project" style="display:block;max-width:100%;height:auto"></a></p>
+  <h3 id="spacing-correction">Spacing correction</h3>
+  <p>Session rows now sit just 8px inside the folder header edge, down from 32px. Measured at both 1440px desktop and 390px mobile widths. The indentation rail moved with the rows; no interaction code changed. The 27 interaction checks passed again after this correction.</p>
+  <h3 id="verified-behavior">Verified behavior</h3>
+  <p>Before the two-value spacing correction, 32 browser checks passed with no uncaught page errors: 27 collapse, selection, search, settings, keyboard, and responsive checks, plus five direct checks of resting/hover/focus disclosure visibility, dot restoration, and selected rows beyond the preview limit. Before this revision, collapsing the active project retained zero rows; now it retains exactly one. Independent review found no material issues within this refinement.</p>
+  <p>Status colors keep the prototype's Herdr meaning: running blue, blocked amber, completed green. The screenshots show a blue running dot rather than forcing every project to green; the hover behavior matches your reference.</p>
+  <h3 id="t3-source-reference">T3 source reference</h3>
+  <p><a href="https://github.com/pingdotgg/t3code/blob/main/apps/web/src/components/LegacySidebar.tsx">T3 Code's LegacySidebar</a> keeps the selected child visible when collapsed (inspected lines 1375–1386 and 1422–1438) and swaps the collapsed status dot for a hover chevron (2448–2474). Inspected file blob: <code>50de33c68fd3d629b327021435bb7c1e2ac1088a</code>. Keyboard-focus swapping is an accessibility addition in this prototype.</p>
+  <h3 id="scope">Scope</h3>
+  <p>This proposes client-side presentation only. Native terminal glyphs, actual search integration, live status aggregation, and production settings persistence still need implementation after design sign-off. Fixture status labels are not live agent evidence.</p>
+  <footer><span class="pill">tsd</span><span>Isolated prototype. Source stays in the task worktree; this page is a review copy.</span></footer>
+</main>
+<script>
+(function(){
+  var sel=document.getElementById('tsd-theme');
+  sel.value=document.documentElement.dataset.theme||'light';
+  sel.addEventListener('change',function(){document.documentElement.dataset.theme=sel.value;try{localStorage.setItem('tsd-theme',sel.value)}catch(e){}});
+  var width=document.getElementById('tsd-width');
+  width.setAttribute('aria-pressed',document.documentElement.dataset.width==='wide'?'true':'false');
+  width.addEventListener('click',function(){var wide=document.documentElement.dataset.width!=='wide';document.documentElement.dataset.width=wide?'wide':'standard';width.setAttribute('aria-pressed',wide?'true':'false');try{localStorage.setItem('tsd-width',wide?'wide':'standard')}catch(e){}});
+})();
+</script>
+</body>
+</html>

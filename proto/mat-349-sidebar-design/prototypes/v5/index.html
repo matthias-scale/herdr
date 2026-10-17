@@ -1,0 +1,96 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MAT-349 · sidebar restyle round 5</title>
+<style>
+:root{--bg:#0e1014;--panel:#15181e;--line:#262a32;--text:#e8eaf0;--muted:#737a86;--dim:#a2a8b2;--green:#3fb950;--red:#f0656f;--blue:#5b9cf5;--amber:#e3b341}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,"Inter","Segoe UI",sans-serif}
+header{padding:22px 30px 14px;border-bottom:1px solid var(--line)}h1{font-size:21px;margin:0 0 4px}.sub{color:var(--muted);max-width:1100px}
+main{padding:18px 30px 40px}
+.cols{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}
+.col{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+.col h2{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:#c1c6cf;margin:0 0 4px}.col p{margin:0 0 10px;font-size:12px;color:var(--muted);max-width:330px}
+.ref img{display:block;width:400px;border-radius:6px}
+.term{background:#080a0d;border:1px solid #282c34;border-radius:5px;padding:5px 0;white-space:pre;font:13px/1.45 "JetBrains Mono","SFMono-Regular",Menlo,monospace;width:calc(var(--c)*1ch);overflow:hidden}
+.l{display:block;overflow:hidden;white-space:pre;padding-right:1ch}.a{float:right;color:var(--muted)}
+.m{color:var(--muted)}.q{color:#4d535d}.d{color:var(--dim)}.g{color:var(--green)}.r{color:var(--red)}.b{color:var(--blue)}.y{color:var(--amber)}
+.f{background:#242a34}.f .t{color:#f5f6f8;font-weight:700}.p{color:var(--text);font-weight:600}.h{color:#8e95a1;font-weight:600}
+.k{display:inline-block;width:2ch;text-align:center;font-weight:700}
+.k1{background:#3a1f24;color:#f07a85}.k2{background:#2c2147;color:#a98bf0}.k3{background:#1d3328;color:#5fd08a}.k4{background:#3a2c18;color:#e8a54a}.k5{background:#1f2c40;color:#79a8f0}
+.tok{color:#c98a5a}
+svg.i{width:1ch;height:1em;vertical-align:-2px;fill:currentColor}
+.notes{margin-top:20px;max-width:1050px;color:#b4bac4}.notes li{margin:4px 0}code{background:#20242c;padding:0 4px;border-radius:3px}
+.menu{position:relative}.pop{display:inline-block;background:#1b1f27;border:1px solid #343a45;border-radius:4px;padding:2px 1ch;margin:2px 0 4px 2ch;font:12px/1.5 "JetBrains Mono",monospace;color:var(--dim)}
+</style></head><body>
+<header><h1>MAT-349 · sidebar restyle, round 5</h1><div class="sub">13 Oct styling on today's #620 sidebar: same header settings, Pinned / Blocked / groups / Snoozed / Settled, every section collapsible, dots carry state, no "Show more".</div></header>
+<main><div class="cols" id="cols"></div>
+<ul class="notes">
+<li><b>Header kept as today:</b> <code>« ⌕ Search ☆ ✎ + …</code>, then the view selector (<code>Repos ▾</code> / <code>Spaces ▾</code> / other views) and the project filter (<code>All projects ▾</code>). The host filter (<code>all hosts ▾</code>) stays on the first section header. <code>…</code> keeps the display switches: provider icon on/off, machine name on/off.</li>
+<li><b>Sections:</b> <code>⌄ pin Pinned</code> → <code>⌄ octagon Blocked</code> → one group per repo/space → <code>⌄ Snoozed</code> → <code>› Settled</code>. Each has its collapse chevron at column 0, directly before its icon. Pinned keeps its existing pin glyph (plain <code>P</code>). Blocked gets a new icon, proposed <code>nf-md-alert_octagon</code> (plain <code>!</code>); today it has none.</li>
+<li><b>Blocked keeps the project separator:</b> its rows are grouped under a muted project line with the same badge chip as below.</li>
+<li><b>Groups:</b> header reads <code>3 of 7</code> (rows needing a look of all agents). Every non-working row shows; working rows stay behind the dim <code>● 4 working ›</code> line. No "Show more".</li>
+<li><b>Compact:</b> no blank lines between sections, rows indented 2 cells, line height as T3's 1.3–1.45, chevrons start at column 0.</li>
+<li><b>No local/remote split:</b> host shows as the provider+machine token (<code class="tok">✱1</code> = Claude on ub1, <code class="tok">⊛2</code> = Codex on ub2), which the display switches can hide.</li>
+<li>Icons here are SVG stand-ins because this page has no Nerd Font; the build uses the existing glyphs. Order uses stable identity, never activity time.</li>
+</ul></main>
+<script>
+const PIN='<svg class="i" viewBox="0 0 24 24"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2z"/></svg>';
+const OCT='<svg class="i" viewBox="0 0 24 24"><path d="M15.7 3H8.3L3 8.3v7.4L8.3 21h7.4l5.3-5.3V8.3zM13 17h-2v-2h2zm0-4h-2V7h2z"/></svg>';
+const ZZ='<svg class="i" viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 11h-6v-1.5L10.2 8H7V6.5h6V8l-3.2 3.5H13z"/></svg>';
+const CHK='<svg class="i" viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg>';
+const L=(s,a='',c='')=>`<span class="l ${c}">${s}${a?`<span class="a">${a}</span>`:''}</span>`;
+function R(o,dot,title,tok,age,cls=''){const showTok=o.tok&&tok;const t0=showTok?tok:'';const fixed=2+2+(showTok?3:0)+(age?age.length+1:0)+1;let w=o.c-fixed;let t=title;if(t.length>w)t=t.slice(0,Math.max(1,w-1))+'…';
+const tt=cls==='f'?`<span class="t">${t}</span>`:`<span class="d">${t}</span>`;
+return L(`  <span class="${dot}">●</span> ${tt}${showTok?` <span class="tok">${t0}</span>`:''}`,age,cls)}
+function G(o,open,k,kc,name,count){let n=name;const w=o.c-2-3-1-(count.length+2);if(n.length>w)n=n.slice(0,w-1)+'…';return L(`<span class="m">${open?'⌄':'›'}</span> <span class="k ${kc}">${k}</span> <span class="p">${n}</span> <span class="m">${count}</span>`)}
+function S(open,icon,name,right=''){return L(`<span class="m">${open?'⌄':'›'}</span> <span class="h">${icon} ${name}</span>`,right)}
+function sub(k,kc,name){return L(`  <span class="k ${kc}">${k}</span> <span class="m">${name}</span>`)}
+function side(o){const r=[];const c=o.c;
+r.push(L('<span class="m">« ⌕ Search</span>','<span class="m">☆ ✎ + …</span>'));
+r.push(L(`<span class="m">${o.view} ▾</span>`,'<span class="m">All projects ▾</span>'));
+if(o.menu)r.push(`<span class="pop">☐ provider icon  ☐ machine name</span>`);
+r.push(S(1,PIN,'Pinned','1'));
+r.push(R(o,'g','release checklist','✱1','2h'));
+r.push(S(1,OCT,'Blocked','<span class="m">all hosts ▾</span> <span class="r">2</span>'));
+if(o.view==='Repos'){r.push(sub('HE','k1','herdr'));r.push(R(o,'r','approve database change','✱2','8m'));r.push(sub('SF','k3','scalable-agent-fleet'));r.push(R(o,'r','worker cleanup approve','⊛1','6m'));}
+else{r.push(sub('AG','k3','agent-harness'));r.push(R(o,'r','approve database change','✱2','8m'));r.push(R(o,'r','worker cleanup approve','⊛1','6m'));}
+if(o.view==='Repos'){
+r.push(G(o,1,'HE','k1','herdr','3 of 7'));
+r.push(R(o,'g','fix remote pane restore','✱1','4m','f'));
+r.push(R(o,'g','MAT-341 warm channel','✱1','3m'));
+r.push(R(o,'y','remote session support','✱1','1m'));
+r.push(L('  <span class="b">●</span> <span class="m">4 working ›</span>'));
+r.push(G(o,1,'SV','k2','scalablev2','4 of 6'));
+r.push(R(o,'g','upload dialog QA ready','⊛2','8m'));
+r.push(R(o,'y','SCA-4869 photo checklist','✱2','9m'));
+r.push(R(o,'m','identify the current model','✱m','1h'));
+r.push(R(o,'m','restore quality raw experiments','✱1','2h'));
+r.push(L('  <span class="b">●</span> <span class="m">2 working ›</span>'));
+r.push(G(o,1,'SF','k3','scalable-agent-fleet','2 of 3'));
+r.push(R(o,'g','review lane PASS #1702','⊛1','40m'));
+r.push(R(o,'y','hago reorg runner','⊛1','22m'));
+r.push(L('  <span class="b">●</span> <span class="m">1 working ›</span>'));
+r.push(G(o,0,'DF','k4','dotfiles','1 of 2'));
+r.push(L('<span class="m">›</span> <span class="k k5">MA</span> <span class="p">mable</span> <span class="b">●</span> <span class="m">3 working</span>'));
+}else{
+r.push(G(o,1,'AG','k3','agent-harness','3 of 6'));
+r.push(R(o,'g','fix remote pane restore','✱1','4m','f'));
+r.push(R(o,'g','review lane PASS #1702','⊛1','40m'));
+r.push(R(o,'y','hago reorg runner','⊛1','22m'));
+r.push(L('  <span class="b">●</span> <span class="m">3 working ›</span>'));
+r.push(G(o,1,'SC','k2','scalable','3 of 5'));
+r.push(R(o,'g','upload dialog QA ready','⊛2','8m'));
+r.push(R(o,'y','SCA-4869 photo checklist','✱2','9m'));
+r.push(R(o,'m','identify the current model','✱m','1h'));
+r.push(L('  <span class="b">●</span> <span class="m">2 working ›</span>'));
+r.push(G(o,0,'PE','k4','personal','1 of 1'));
+}
+r.push(S(1,ZZ,'Snoozed','1'));
+r.push(R(o,'m','design review','✱m','1d'));
+r.push(S(0,CHK,'Settled','4'));
+return `<div class="term" style="--c:${c}">${r.join('')}</div>`}
+const ref='https://ub2.tailc1d69d.ts.net/herdr-sidebar-reference-20261013/';
+document.getElementById('cols').innerHTML=
+`<div class="col ref"><h2>13 Oct reference</h2><p>T3 screenshot</p><img src="${ref}reference.png" alt="T3 reference screenshot"></div>`+
+`<div class="col"><h2>Repos view · 34 cols</h2><p>Default display: provider + machine shown.</p>${side({c:34,view:'Repos',tok:1})}</div>`+
+`<div class="col"><h2>Spaces view · 34 cols</h2><p>Same styling for another view.</p>${side({c:34,view:'Spaces',tok:1})}</div>`+
+`<div class="col"><h2>Repos · display off · 30 cols</h2><p>… menu: provider and machine switched off.</p>${side({c:30,view:'Repos',tok:0,menu:1})}</div>`;
+</script></body></html>

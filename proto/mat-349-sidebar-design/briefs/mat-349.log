@@ -1,0 +1,48 @@
+ra-launch: auto host: ub2 (preferred; within limits)
+ra-launch: preflight passed: host=ub2 target=/home/ubuntu2/wt/ra-261016-mat-349-project-first-sidebar-bcc7b47 repo=https://github.com/matthias-scale/herdr.git
+Preparing worktree (new branch 'feat/mat-349-project-first-sidebar')
+HEAD is now at 2f04f2746 feat(MAT-344): one sidebar list across hosts (#615)
+worktree-bootstrap: libghostty-vt cache hit: 48541a0e2fc77168d10902c6b2e7ff428a0f96ba-x86_64-linux-gnu-ReleaseFast
+LIBGHOSTTY_VT_LIB_DIR=/home/ubuntu2/.cache/ra-libghostty-vt/48541a0e2fc77168d10902c6b2e7ff428a0f96ba-x86_64-linux-gnu-ReleaseFast/lib
+worktree-bootstrap: no package.json in /home/ubuntu2/wt/ra-261016-mat-349-project-first-sidebar-bcc7b47 — searching tracked nested apps
+{"orchestration_state":"skipped","reason":"lock_timeout"}
+ra-launch: launched: ub2/ra-261016-mat-349-project-first-sidebar-bcc7b47 turn=turn-83373448132aa43f6e6a1047
+{
+  "schema": 1,
+  "version": 1,
+  "run_id": "ra-261016-mat-349-project-first-sidebar-bcc7b47",
+  "turn_id": "turn-83373448132aa43f6e6a1047",
+  "parent_session": "1876d81b-d57b-4f45-b3d7-f87976cd7510",
+  "run_started_at": "2026-10-16T10:30:37Z",
+  "started_at": "2026-10-16T10:30:37Z",
+  "exited_at": "2026-10-16T12:20:47Z",
+  "elapsed_ms": 6610283,
+  "exit_code": 0,
+  "result_ref": "turns/turn-83373448132aa43f6e6a1047/result.md",
+  "result_status": "available",
+  "trace_ref": "turns/turn-83373448132aa43f6e6a1047/trace.log",
+  "status": "ended-unverified",
+  "wrapper_revision": "git:347105b2d3a6cccbc1a6a9cef876694487462814:sha256:df7160bf21d04d20abac0a8b35ea5133704d527c93125eef000798e93edcb4f2",
+  "parent_run": null,
+  "edge": {
+    "agent": "codex",
+    "attempt": null,
+    "effort": "medium",
+    "ended": "2026-10-16T12:20:47Z",
+    "escalated_from": null,
+    "from_skill": null,
+    "host": "ub2",
+    "key": null,
+    "model": "gpt-6.1-sol",
+    "outcome": "ended-unverified",
+    "started": "2026-10-16T10:30:37Z",
+    "to_skill": null,
+    "tokens_in": null,
+    "tokens_out": null,
+    "trigger": "unknown"
+  },
+  "trigger": "unknown",
+  "key": null,
+  "attempt": null,
+  "run_exit_code": 0
+}

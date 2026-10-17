@@ -1,0 +1,5 @@
+ra-launch: explicit --host ub1 requested while ub2 has capacity; consider --host auto
+ra-launch: preflight passed: host=ub1 target=/home/ubuntu/wt/ra-261016-mat-349-design-proto-r3-ac2aa56 repo=https://github.com/matthias-scale/herdr.git
+ra-launch: refusing stale worktree reclaim: checkout contains ignored content: /home/ubuntu/wt/ra-261016-mat-349-design-proto-r2-cfbe2f7; launch on a fresh pushed branch instead of main
+ra-launch: remote mutation exited with status 73 near line unknown: exit "${worktree_reclaim_exit:-73}"
+ra-launch: launch failed on ub1

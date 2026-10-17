@@ -1,0 +1,113 @@
+<!doctype html>
+<!-- tsd:template v2 — replace the sample content, keep the structure and theme.css.
+     Sections are optional: delete what the run has nothing to say about. Never
+     invent a second page style; every tsd dashboard looks like this one.
+     Built once with Astro (npx astro build); edit this file directly, it is the
+     shipped artifact. Every headline figure keeps its data-tip tooltip. -->
+<html lang="en" data-theme="light" data-width="standard">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Herdr sidebar adjustments</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2714%27 fill=%27%230f766e%27/%3E%3Ctext x=%2732%27 y=%2745%27 font-size=%2738%27 font-family=%27sans-serif%27 font-weight=%27700%27 text-anchor=%27middle%27 fill=%27white%27%3ET%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="theme.css">
+<script>
+  // Applied before first paint so the chosen theme and width never flash.
+  try {
+    var t = localStorage.getItem("tsd-theme");
+    var w = localStorage.getItem("tsd-width");
+    document.documentElement.dataset.theme = t === "dark" || t === "system" ? t : "light";
+    document.documentElement.dataset.width = w === "wide" ? "wide" : "standard";
+  } catch (e) {}
+</script></head>
+<body>
+<header>
+  <div class="head">
+    <div class="title">
+      <h1>Herdr sidebar adjustments</h1>
+      <span class="meta">personal / herdr-sidebar-adjustments-20261011 · generated 2026-10-11 08:19 UTC · /home/ubuntu2/.local/state/agent-inbox/inbox</span>
+    </div>
+    <div class="head-actions"><a class="session-link" href="https://ub2.tailc1d69d.ts.net:38443/focus?target=ub2%3A%3Aw79%3ApTM&amp;host=ub2"><span aria-hidden="true">↗</span> open session</a>
+      <a class="pdf-download" href="herdr-sidebar-adjustments-20261011.pdf" download><span aria-hidden="true">↓</span> PDF</a>
+    </div>
+    <div class="spacer"></div>
+    <button id="tsd-width" class="width-toggle" type="button" aria-pressed="false">wide</button>
+    <div class="themepick">
+      <label for="tsd-theme">theme</label>
+      <select id="tsd-theme" aria-label="Colour theme">
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+        <option value="system">System</option>
+      </select>
+    </div>
+  </div>
+</header>
+<main>
+<!-- tsd:toc:start -->
+<nav class="toc" aria-label="Contents"><a href="#seconds-and-active-workspace">Seconds and active workspace</a>
+<a href="#blocker-scope">Blocker scope</a>
+<a href="#clickable-pins-and-pinned-section">Clickable pins and Pinned section</a>
+<a href="#precise-edit-plans">Precise edit plans</a>
+<a href="#worker-plans">Worker plans</a></nav>
+<!-- tsd:toc:end -->
+<p class="lead">Proposed appearance for approval. These are HTML sketches, not captured candidate builds.</p>
+<h3 id="seconds-and-active-workspace">Seconds and active workspace</h3>
+<table><thead><tr><th>Current screenshot</th><th>Proposed sidebar</th></tr></thead><tbody><tr><td><img src="before.png" alt="User screenshot with seconds shown" style="max-width:100%"></td><td><pre style="background:#fff;color:#798493;padding:12px">▾ <strong style="color:#151b24">📥 Inbox · 3 waiting</strong>
+○ inbox | Ready | Review agent-inbox   15m
+● Run /hago across ub1 and ub2
+● Machine onboarding file or repo
+○ inbox | Ready | Show next request   15m
+<span style="background:#dce7f6;color:#111"><strong>○ inbox | Ready | 01a12a08-15cc…</strong>      </span></pre></td></tr></tbody></table>
+<p>Hide age labels below one minute. Retain whole minutes and hours. Use the existing active-tab foreground and bold treatment for the active workspace heading; keep the selected tab distinct.</p>
+<h3 id="blocker-scope">Blocker scope</h3>
+<div class="card"><pre>Blockers ▾  [ Local device ▾ ]
+
+✓ Local device
+  All devices</pre></div>
+<p>Local device is the default for new settings and missing legacy settings. Preserve an explicitly saved choice. Opening the selector must focus the current option.</p>
+<h3 id="clickable-pins-and-pinned-section">Clickable pins and Pinned section</h3>
+<div class="card"><pre>▾ 📌 Pinned
+  ○ Review agent-inbox                 📌  15m
+
+▾ <strong>📥 Inbox · 3 waiting</strong>
+  ● Machine onboarding                ♧
+  ○ Show next request                 ♧  15m</pre></div>
+<p>The pin at the end of a tab row has its own click target. Clicking toggles pin state without activating the tab. Pinned tabs appear in the Pinned section; unpinning restores normal placement. The section hides when empty. Glyphs are illustrative; implementation reuses Herdr’s icons and text fallback.</p>
+<h3 id="precise-edit-plans">Precise edit plans</h3><ul>
+<li>Luna: src/ui/sidebar.rs compact_age currently shows a dash under 60s. Omit that label; preserve minute refresh; check 0/59/60s and hour boundaries in both renderers.</li>
+<li>Luna: workspace emphasis already exists on desktop/mobile. Reproduce the affected renderer; inspect missing collapsed title bold in src/client/shell/sidebar.rs. Test active workspace independently of navigation selection.</li>
+<li>Luna: change BlockerScope default Fleet to ThisDevice in src/app/state.rs. Update legacy fallback in src/client/presentation.rs and menu fixtures; retain explicit saved choices.</li>
+<li>Sol low: reproduce pin hover/click through src/app/input/mouse.rs and recomputed sidebar view. Pin actions already exist; narrow width hides them and blocker filtering can hide Pinned. Fix the observed hitbox/grouping defect, then verify pin/unpin, section visibility, persisted state, and desktop/mobile at narrow and normal widths.</li>
+</ul><p>Current source does not yet reproduce the screenshot’s seconds or pin failure. Verify the running build version and renderer during reproduction.</p><h3 id="worker-plans">Worker plans</h3>
+<table><thead><tr><th>Change</th><th>Worker</th><th>Verification</th></tr></thead><tbody>
+<tr><td>Age labels</td><td>Luna low</td><td>0/59/60 seconds, minute/hour boundaries, desktop/mobile and 18-column width; preserve minute refresh.</td></tr>
+<tr><td>Active workspace</td><td>Luna low</td><td>Active workspace versus navigation selection, desktop/mobile and client sidebar renderers.</td></tr>
+<tr><td>Local blocker default</td><td>Luna low</td><td>Missing config, explicit saved choice, selector focus and persistence.</td></tr>
+<tr><td>Pin interactions and grouping</td><td>Sol low</td><td>Mouse hitbox, no accidental tab activation, pin/unpin, persistence and empty/nonempty section.</td></tr>
+</tbody></table>
+<p>Investigations are read-only until visual approval. Implementation will use isolated worktrees and a PR. Installation on running hosts remains a separate per-change approval.</p>
+</main>
+<script>
+  (function () {
+    var sel = document.getElementById("tsd-theme");
+    if (sel) {
+      var cur = document.documentElement.dataset.theme || "light";
+      sel.value = cur;
+      sel.addEventListener("change", function () {
+        document.documentElement.dataset.theme = sel.value;
+        try { localStorage.setItem("tsd-theme", sel.value); } catch (e) {}
+      });
+    }
+    var width = document.getElementById("tsd-width");
+    if (width) {
+      width.setAttribute("aria-pressed", document.documentElement.dataset.width === "wide" ? "true" : "false");
+      width.addEventListener("click", function () {
+        var wide = document.documentElement.dataset.width !== "wide";
+        document.documentElement.dataset.width = wide ? "wide" : "standard";
+        width.setAttribute("aria-pressed", wide ? "true" : "false");
+        try { localStorage.setItem("tsd-width", wide ? "wide" : "standard"); } catch (e) {}
+      });
+    }
+  })();
+</script></body>
+</html>

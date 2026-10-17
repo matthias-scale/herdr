@@ -1,0 +1,80 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MAT-349 · sidebar restyle v4 (13 Oct styling, #620 structure)</title>
+<style>
+:root{--bg:#0e1014;--panel:#15181e;--line:#262a32;--text:#e8eaf0;--muted:#737a86;--dim:#9aa0aa;--green:#3fb950;--red:#f0656f;--blue:#5b9cf5;--amber:#e3b341}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,"Inter","Segoe UI",sans-serif}
+header{padding:24px 30px 16px;border-bottom:1px solid var(--line)}h1{font-size:22px;margin:0 0 4px}.sub{color:var(--muted)}
+main{padding:20px 30px 40px;max-width:1700px}
+.cols{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start}
+.col{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+.col h2{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:#c1c6cf;margin:0 0 10px}
+.ref img{display:block;width:430px;border-radius:6px}
+.term{background:#080a0d;border:1px solid #282c34;border-radius:5px;padding:8px 0;white-space:pre;font:13px/1.75 "JetBrains Mono","SFMono-Regular",Menlo,monospace;width:calc(var(--c)*1ch + 2ch);overflow:hidden}
+.l{display:block;padding:0 1ch;overflow:hidden;white-space:pre}.a{float:right;color:var(--muted)}
+.m{color:var(--muted)}.d{color:var(--dim)}.g{color:var(--green)}.r{color:var(--red)}.b{color:var(--blue)}.y{color:var(--amber)}
+.f{background:#242a34}.f .t{color:#f5f6f8;font-weight:700}.p{color:var(--text);font-weight:600}
+.k{display:inline-block;width:2ch;text-align:center;font-weight:700;border-radius:2px}
+.k1{background:#3a1f24;color:#f07a85}.k2{background:#2c2147;color:#a98bf0}.k3{background:#1d3328;color:#5fd08a}.k4{background:#3a2c18;color:#e8a54a}.k5{background:#1f2c40;color:#79a8f0}
+.tok{color:#c98a5a}
+.notes{margin-top:22px;max-width:980px;color:#b4bac4}.notes li{margin:4px 0}code{background:#20242c;padding:0 4px;border-radius:3px}
+</style></head><body>
+<header><h1>MAT-349 · sidebar restyle, round 4</h1><div class="sub">13 Oct reference styling on the #620 structure. Pinned and Blocked on top, then one group per repo (or space), then Snoozed and Settled. Dots carry state; no status words; no local/remote split.</div></header>
+<main><div class="cols" id="cols"></div>
+<ul class="notes">
+<li><b>Order</b> (as #620 builds it today): <code>Pinned</code> → <code>Blocked</code> → repo/space groups → <code>Snoozed</code> → <code>Settled</code>. Section headers are muted text and keep their existing Nerd Font icon (omitted here because the page has no Nerd Font); no dividers, one blank line between sections.</li>
+<li><b>Groups</b> are repos or spaces depending on the active view (header toggle <code>repos ▾</code>). The header reads <code>3 of 5</code>: rows needing a look out of all agents in that group.</li>
+<li><b>Working</b> rows stay hidden behind a dim <code>● N working ›</code> line per group, as in the approved "project first, working hidden" direction (16 Oct).</li>
+<li><b>One list across hosts:</b> local and remote rows mix in the same group; the host shows as the existing provider+device token (<code class="tok">✱1</code> Claude on ub1, <code class="tok">⊛2</code> Codex on ub2, <code class="tok">✱m</code> mbpro).</li>
+<li><b>State is the dot only:</b> <span class="r">●</span> blocked, <span class="g">●</span> done, <span class="y">●</span> waiting, <span class="b">●</span> working, <span class="m">●</span> idle. No "Completed" label.</li>
+<li><b>Styling from 13 Oct:</b> coloured two-letter badge chip per group, regular-weight muted titles, ages right-aligned and muted, focused row = full-width cell background + bold title, "Show more" per group, collapsed groups as one line.</li>
+<li>Order uses stable identity, never activity time (MAT-340). Plain-text glyph fallback stays as today.</li>
+</ul></main>
+<script>
+const L=(s,a='',c='')=>`<span class="l ${c}">${s}${a?`<span class="a">${a}</span>`:''}</span>`;
+const B=()=>L(' ');
+const esc=t=>t;
+// row: indent 3, dot 2, title, space, token(2), age right. Title truncates to fit cols.
+function R(c,dot,title,tok,age,cls=''){const fixed=1+3+2+(tok?3:0)+(age?age.length+1:0)+1;let w=c-fixed;let t=title;if(t.length>w)t=t.slice(0,Math.max(1,w-1))+'…';
+const tt=cls==='f'?`<span class="t">${t}</span>`:`<span class="d">${t}</span>`;
+return L(`   ${dot?`<span class="${dot}">●</span> `:'  '}${tt}${tok?` <span class="tok">${tok}</span>`:''}`,age,cls)}
+function G(c,open,k,kc,name,count){let n=name;const w=c-2-2-4-1-(count.length+1);if(n.length>w)n=n.slice(0,w-1)+'…';return L(`<span class="m">${open?'⌄':'›'}</span> <span class="k ${kc}">${k}</span> <span class="p">${n}</span> <span class="m">${count}</span>`)}
+function side(c){const r=[];
+r.push(L('<span class="m">⌕ Search</span>','⌘K'));
+r.push(B());
+r.push(L('<span class="m">Pinned</span>'));
+r.push(R(c,'g','release checklist','✱1','2h'));
+r.push(B());
+r.push(L('<span class="m">Blocked</span>','<span class="r">2</span>'));
+r.push(R(c,'r','approve database change','✱2','8m'));
+r.push(R(c,'r','worker cleanup approve','⊛1','6m'));
+r.push(B());
+r.push(L('<span class="m">Repos</span>','<span class="m">repos ▾ ↕</span>'));
+r.push(G(c,1,'HE','k1','herdr','3 of 7'));
+r.push(R(c,'g','fix remote pane restore','✱1','4m','f'));
+r.push(R(c,'g','MAT-341 warm channel','✱1','3m'));
+r.push(R(c,'y','remote session support','✱1','1m'));
+r.push(L('   <span class="b">●</span> <span class="m">4 working ›</span>'));
+r.push(G(c,1,'SV','k2','scalablev2','3 of 5'));
+r.push(R(c,'g','upload dialog QA ready','⊛2','8m'));
+r.push(R(c,'y','SCA-4869 photo checklist','✱2','9m'));
+r.push(R(c,'m','identify the current model','✱m','1h'));
+r.push(L('   <span class="b">●</span> <span class="m">2 working ›</span>'));
+r.push(L('   <span class="m">Show more</span>'));
+r.push(G(c,1,'SF','k3','scalable-agent-fleet','2 of 4'));
+r.push(R(c,'g','review lane PASS #1702','⊛1','40m'));
+r.push(R(c,'y','hago reorg runner','⊛1','22m'));
+r.push(L('   <span class="b">●</span> <span class="m">1 working ›</span>'));
+r.push(G(c,0,'DF','k4','dotfiles','1 of 2'));
+r.push(L('<span class="m">›</span> <span class="k k5">MA</span> <span class="p">mable</span> <span class="m"><span class="b">●</span> 3 working</span>'));
+r.push(B());
+r.push(L('<span class="m">Snoozed</span>','1'));
+r.push(R(c,'m','design review','✱m','1d'));
+r.push(B());
+r.push(L('<span class="m">› Settled</span>','4'));
+return `<div class="term" style="--c:${c}">${r.join('')}</div>`}
+const ref='https://ub2.tailc1d69d.ts.net/herdr-sidebar-reference-20261013/';
+document.getElementById('cols').innerHTML=
+`<div class="col ref"><h2>13 Oct reference</h2><img src="${ref}reference.png" alt="T3 reference screenshot"></div>`+
+`<div class="col"><h2>Proposed · 40 columns</h2>${side(40)}</div>`+
+`<div class="col"><h2>Proposed · 32 columns</h2>${side(32)}</div>`;
+</script></body></html>
