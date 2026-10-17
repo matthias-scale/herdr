@@ -449,6 +449,11 @@ class WezTermEvidenceTests(unittest.TestCase):
         pane = self.pane()
         selected = capture.select_wezterm_pane(json.dumps([pane]))
         self.assertEqual(selected["pane_id"], 7)
+        pane["size"] = {
+            field: pane.pop(field)
+            for field in ("rows", "cols", "pixel_width", "pixel_height")
+        }
+        self.assertEqual(capture.select_wezterm_pane(json.dumps([pane]))["rows"], 30)
         with self.assertRaisesRegex(capture.CaptureError, "exactly one"):
             capture.select_wezterm_pane(json.dumps([]))
         with self.assertRaisesRegex(capture.CaptureError, "exactly one"):
@@ -525,9 +530,7 @@ class WezTermEvidenceTests(unittest.TestCase):
                         lambda _pid: gui,
                     )
                 wrong_gui = capture.dataclasses.replace(gui, pgid=201)
-                with self.assertRaisesRegex(
-                    capture.CaptureError, "GUI identity"
-                ):
+                with self.assertRaisesRegex(capture.CaptureError, "GUI identity"):
                     capture.validate_owned_wezterm_socket(
                         str(endpoint), runtime, gui, lambda _pid: wrong_gui
                     )

@@ -358,15 +358,14 @@ def select_wezterm_pane(output: str) -> dict:
         if value is None or not str(value).strip():
             raise CaptureError(f"WezTerm outer pane lacks {field}")
     for field in ("rows", "cols", "pixel_width", "pixel_height"):
-        value = pane.get(field)
+        value = pane.get("size", pane).get(field)
+        pane[field] = value
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise CaptureError(f"WezTerm outer pane has invalid {field}")
     return pane
 
 
-def wait_for_wezterm_pane(
-    query: Callable[[float], str], timeout: float = 10.0
-) -> dict:
+def wait_for_wezterm_pane(query: Callable[[float], str], timeout: float = 10.0) -> dict:
     """Wait for startup geometry, while refusing every other incomplete pane."""
     deadline = time.monotonic() + timeout
     last_geometry_error = None
@@ -1417,6 +1416,8 @@ class HerdrScenario:
         log_path.write_text(result.stdout + result.stderr, encoding="utf-8")
         if result.returncode:
             raise CaptureError(f"Herdr command {args!r} failed; see {log_path}")
+        if args[:2] == ("pane", "run"):
+            return {}
         try:
             response = json.loads(result.stdout)
         except json.JSONDecodeError as error:
@@ -1487,9 +1488,7 @@ class HerdrScenario:
                     socket_value, self.runtime, process.identity
                 )
                 self.client_processes[app_id] = identity
-                self.run.record_client_process(
-                    self, app_id, identity, process.identity
-                )
+                self.run.record_client_process(self, app_id, identity, process.identity)
                 pane = wait_for_wezterm_pane(
                     lambda timeout: wezterm_cli(
                         self.run.tools["wezterm"],
