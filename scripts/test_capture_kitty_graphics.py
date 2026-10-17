@@ -306,6 +306,7 @@ class IsolationTests(unittest.TestCase):
                     {"baseline": baseline_record, "candidate": candidate_record},
                 )
 
+    @unittest.skipUnless(sys.platform == "linux", "OwnedProcess identity uses Linux /proc")
     def test_owned_process_group_is_stopped_and_recordable(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -320,6 +321,7 @@ class IsolationTests(unittest.TestCase):
             process.stop(timeout=1)
             self.assertFalse(process.alive())
 
+    @unittest.skipUnless(sys.platform == "linux", "process identity termination uses Linux signals")
     def test_server_stop_refuses_identity_mismatch_and_reports_orphan(self):
         expected = capture.ProcessIdentity(
             pid=2345,
@@ -359,6 +361,7 @@ class IsolationTests(unittest.TestCase):
             [capture.signal.SIGTERM, capture.signal.SIGKILL],
         )
 
+    @unittest.skipUnless(sys.platform == "linux", "process identity termination uses Linux signals")
     def test_server_stop_failure_falls_back_only_to_the_owned_identity(self):
         expected = capture.ProcessIdentity(
             pid=3456,
@@ -515,6 +518,7 @@ class WezTermEvidenceTests(unittest.TestCase):
             capture.wait_for_wezterm_pane(query, timeout=1)
         self.assertEqual(query.call_count, 1)
 
+    @unittest.skipUnless(sys.platform == "linux", "GUI socket ownership uses Linux /proc identities")
     def test_live_socket_must_match_exact_launched_gui_identity(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             root = Path(temporary)
@@ -591,6 +595,7 @@ class WezTermEvidenceTests(unittest.TestCase):
             finally:
                 listener.close()
 
+    @unittest.skipUnless(sys.platform == "linux", "process ancestry uses Linux /proc identities")
     def test_only_descendant_client_is_matched_across_pty_process_group(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             root = Path(temporary)
@@ -641,6 +646,7 @@ class WezTermEvidenceTests(unittest.TestCase):
             self.assertNotEqual(client.pgid, gui.pgid)
             self.assertNotEqual(client.session_id, gui.session_id)
 
+    @unittest.skipUnless(sys.platform == "linux", "process ancestry uses Linux /proc identities")
     def test_stale_launched_gui_pid_does_not_prove_client_ancestry(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             root = Path(temporary)
@@ -684,6 +690,7 @@ class WezTermEvidenceTests(unittest.TestCase):
             )
             self.assertEqual(matches, [])
 
+    @unittest.skipUnless(sys.platform == "linux", "input ownership uses Linux uid and /proc TTY data")
     def test_input_ownership_checks_user_private_cwd_tty_and_foreground_group(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             root = Path(temporary)
