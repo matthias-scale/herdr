@@ -400,6 +400,14 @@ class IsolationTests(unittest.TestCase):
 
 
 class WezTermEvidenceTests(unittest.TestCase):
+    """Ownership threats: wrong live GUI, stale PID, foreign socket, and PTY child.
+
+    A same-binary/home/session lookalike is not owned unless its live ancestry
+    reaches the exact launched GUI identity. Process-group and session changes
+    inside the GUI's PTY are expected, while socket path/runtime ownership and
+    the client's cwd, TTY, and foreground checks remain required.
+    """
+
     def pane(self, pane_id=7):
         return {
             "pane_id": pane_id,
@@ -450,7 +458,24 @@ class WezTermEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(capture.CaptureError, "tty_name"):
             capture.select_wezterm_pane(json.dumps([incomplete]))
 
-    def test_live_socket_outside_private_runtime_and_wrong_owner_are_refused(self):
+    def test_outer_pane_wait_retries_startup_geometry_only(self):
+        incomplete = self.pane()
+        incomplete["rows"] = 0
+        query = mock.Mock(
+            side_effect=[json.dumps([incomplete]), json.dumps([self.pane()])]
+        )
+        selected = capture.wait_for_wezterm_pane(query, timeout=1)
+        self.assertEqual(selected["pane_id"], 7)
+        self.assertEqual(query.call_count, 2)
+        self.assertGreater(query.call_args_list[0].args[0], 0)
+
+    def test_outer_pane_wait_does_not_retry_identity_errors(self):
+        query = mock.Mock(return_value=json.dumps([]))
+        with self.assertRaisesRegex(capture.CaptureError, "exactly one"):
+            capture.wait_for_wezterm_pane(query, timeout=1)
+        self.assertEqual(query.call_count, 1)
+
+    def test_live_socket_must_match_exact_launched_gui_identity(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             root = Path(temporary)
             runtime = root / "runtime"
@@ -459,25 +484,15 @@ class WezTermEvidenceTests(unittest.TestCase):
             os.chmod(runtime, 0o700)
             expected_home = root / "home"
             expected_home.mkdir()
-            owner = capture.ProcessIdentity(
-                pid=100,
-                start_ticks=12,
-                executable="/usr/bin/herdr",
-                pgid=100,
-                session_id=100,
-                home=str(expected_home),
-                herdr_session="capture-a",
-                command_line=("herdr", "--session", "capture-a", "client"),
-            )
             gui = capture.ProcessIdentity(
                 pid=200,
                 start_ticks=30,
                 executable="/usr/bin/wezterm-gui",
-                pgid=100,
-                session_id=100,
+                pgid=200,
+                session_id=200,
                 home=str(expected_home),
                 herdr_session="",
-                command_line=("wezterm-gui",),
+                command_line=("wezterm-gui", "--config-file", "private.lua"),
             )
             endpoint = socket_dir / "gui-sock-200"
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -487,25 +502,38 @@ class WezTermEvidenceTests(unittest.TestCase):
                 validated, gui_identity = capture.validate_owned_wezterm_socket(
                     str(endpoint),
                     runtime,
-                    owner,
+                    gui,
                     lambda pid: gui if pid == 200 else None,
                 )
                 self.assertEqual(validated, endpoint)
                 self.assertEqual(gui_identity, gui)
                 with self.assertRaisesRegex(capture.CaptureError, "private runtime"):
                     capture.validate_owned_wezterm_socket(
-                        str(endpoint), root, owner, lambda _pid: gui
+                        str(endpoint), root, gui, lambda _pid: gui
+                    )
+                stale_gui = capture.dataclasses.replace(gui, start_ticks=31)
+                with self.assertRaisesRegex(capture.CaptureError, "GUI identity"):
+                    capture.validate_owned_wezterm_socket(
+                        str(endpoint), runtime, gui, lambda _pid: stale_gui
+                    )
+                another_live_gui = capture.dataclasses.replace(gui, pid=201)
+                with self.assertRaisesRegex(capture.CaptureError, "GUI identity"):
+                    capture.validate_owned_wezterm_socket(
+                        str(endpoint),
+                        runtime,
+                        another_live_gui,
+                        lambda _pid: gui,
                     )
                 wrong_gui = capture.dataclasses.replace(gui, pgid=201)
                 with self.assertRaisesRegex(
-                    capture.CaptureError, "owned process group"
+                    capture.CaptureError, "GUI identity"
                 ):
                     capture.validate_owned_wezterm_socket(
-                        str(endpoint), runtime, owner, lambda _pid: wrong_gui
+                        str(endpoint), runtime, gui, lambda _pid: wrong_gui
                     )
                 with self.assertRaisesRegex(capture.CaptureError, "socket path"):
                     capture.validate_owned_wezterm_socket(
-                        "", runtime, owner, lambda _pid: gui
+                        "", runtime, gui, lambda _pid: gui
                     )
                 external_dir = root / "external"
                 external_dir.mkdir()
@@ -518,12 +546,105 @@ class WezTermEvidenceTests(unittest.TestCase):
                         capture.CaptureError, "private runtime"
                     ):
                         capture.validate_owned_wezterm_socket(
-                            str(external), runtime, owner, lambda _pid: gui
+                            str(external), runtime, gui, lambda _pid: gui
                         )
                 finally:
                     external_listener.close()
             finally:
                 listener.close()
+
+    def test_only_descendant_client_is_matched_across_pty_process_group(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            binary = root / "herdr"
+            binary.write_text("fixture")
+            home = root / "home"
+            home.mkdir()
+            proc_root = root / "proc"
+            proc_root.mkdir()
+            for pid in (200, 201):
+                (proc_root / str(pid)).mkdir()
+
+            gui = capture.ProcessIdentity(
+                pid=100,
+                start_ticks=10,
+                executable="/usr/bin/wezterm-gui",
+                pgid=100,
+                session_id=100,
+                home=str(home),
+                herdr_session="",
+                command_line=("wezterm-gui",),
+                parent_pid=1,
+            )
+            client = capture.ProcessIdentity(
+                pid=200,
+                start_ticks=20,
+                executable=str(binary),
+                pgid=200,
+                session_id=200,
+                home=str(home),
+                herdr_session="",
+                command_line=(str(binary), "--session", "capture-a", "client"),
+                parent_pid=100,
+            )
+            lookalike = capture.dataclasses.replace(
+                client, pid=201, start_ticks=21, parent_pid=300
+            )
+            identities = {100: gui, 200: client, 201: lookalike}
+            matches = capture.matching_processes(
+                binary,
+                "capture-a",
+                home,
+                owned_gui=gui,
+                process_root=proc_root,
+                process_lookup=identities.get,
+            )
+            self.assertEqual(matches, [client])
+            self.assertNotEqual(client.pgid, gui.pgid)
+            self.assertNotEqual(client.session_id, gui.session_id)
+
+    def test_stale_launched_gui_pid_does_not_prove_client_ancestry(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            binary = root / "herdr"
+            binary.write_text("fixture")
+            home = root / "home"
+            home.mkdir()
+            proc_root = root / "proc"
+            proc_root.mkdir()
+            (proc_root / "200").mkdir()
+            expected_gui = capture.ProcessIdentity(
+                pid=100,
+                start_ticks=10,
+                executable="/usr/bin/wezterm-gui",
+                pgid=100,
+                session_id=100,
+                home=str(home),
+                herdr_session="",
+                command_line=("wezterm-gui",),
+                parent_pid=1,
+            )
+            reused_gui = capture.dataclasses.replace(expected_gui, start_ticks=11)
+            client = capture.ProcessIdentity(
+                pid=200,
+                start_ticks=20,
+                executable=str(binary),
+                pgid=200,
+                session_id=200,
+                home=str(home),
+                herdr_session="",
+                command_line=(str(binary), "--session", "capture-a", "client"),
+                parent_pid=100,
+            )
+            matches = capture.matching_processes(
+                binary,
+                "capture-a",
+                home,
+                owned_gui=expected_gui,
+                process_root=proc_root,
+                process_lookup={100: reused_gui, 200: client}.get,
+            )
+            self.assertEqual(matches, [])
 
     def test_input_ownership_checks_user_private_cwd_tty_and_foreground_group(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:

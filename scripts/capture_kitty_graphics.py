@@ -364,6 +364,27 @@ def select_wezterm_pane(output: str) -> dict:
     return pane
 
 
+def wait_for_wezterm_pane(
+    query: Callable[[float], str], timeout: float = 10.0
+) -> dict:
+    """Wait for startup geometry, while refusing every other incomplete pane."""
+    deadline = time.monotonic() + timeout
+    last_geometry_error = None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if last_geometry_error is not None:
+                raise last_geometry_error
+            raise CaptureError("WezTerm outer pane geometry did not become valid")
+        try:
+            return select_wezterm_pane(query(min(1.0, remaining)))
+        except CaptureError as error:
+            if not str(error).startswith("WezTerm outer pane has invalid "):
+                raise
+            last_geometry_error = error
+        time.sleep(min(0.05, remaining))
+
+
 def single_herdr_pane_id(response: dict, workspace_id: str) -> str:
     panes = response.get("result", {}).get("panes", [])
     if not isinstance(panes, list) or len(panes) != 1 or not isinstance(panes[0], dict):
@@ -473,7 +494,7 @@ def require_marker_stays_visible(
 def validate_owned_wezterm_socket(
     value: str | None,
     private_runtime: Path,
-    owner: ProcessIdentity,
+    launched_gui: ProcessIdentity,
     process_lookup: Callable[[int], ProcessIdentity | None] | None = None,
 ) -> tuple[Path, ProcessIdentity]:
     if not value or not Path(value).is_absolute():
@@ -509,12 +530,10 @@ def validate_owned_wezterm_socket(
         gui is None
         or gui.state == "Z"
         or Path(gui.executable).name != "wezterm-gui"
-        or gui.home != owner.home
-        or gui.pgid != owner.pgid
-        or gui.session_id != owner.session_id
+        or not identity_matches(launched_gui, gui)
     ):
         raise CaptureError(
-            "WezTerm GUI does not match the recorded owned process group"
+            "WezTerm GUI identity does not match the exact launched process"
         )
     probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     probe.settimeout(0.5)
@@ -661,6 +680,7 @@ class ProcessIdentity:
     home: str
     herdr_session: str
     command_line: tuple[str, ...]
+    parent_pid: int = 0
     state: str = "?"
     tty_nr: int = 0
     foreground_pgid: int = 0
@@ -714,6 +734,7 @@ def read_process_identity(pid: int) -> ProcessIdentity | None:
             home=process_env.get("HOME", ""),
             herdr_session=process_env.get("HERDR_SESSION", ""),
             command_line=command_line,
+            parent_pid=int(fields[1]),
             state=fields[0],
             tty_nr=int(fields[4]),
             foreground_pgid=int(fields[5]),
@@ -773,6 +794,37 @@ def identity_matches(
     )
 
 
+def process_descends_from(
+    identity: ProcessIdentity,
+    ancestor: ProcessIdentity,
+    process_lookup: Callable[[int], ProcessIdentity | None] = read_process_identity,
+) -> bool:
+    """Prove live, stable parent links to the exact launched process identity."""
+    current = identity
+    visited = {current.pid}
+    for _ in range(64):
+        if current.parent_pid <= 1 or current.parent_pid in visited:
+            return False
+        parent = process_lookup(current.parent_pid)
+        current_again = process_lookup(current.pid)
+        if (
+            parent is None
+            or parent.state == "Z"
+            or parent.pid != current.parent_pid
+            or not identity_matches(current, current_again)
+            or current_again.parent_pid != parent.pid
+        ):
+            return False
+        parent_again = process_lookup(parent.pid)
+        if not identity_matches(parent, parent_again):
+            return False
+        if parent.pid == ancestor.pid:
+            return identity_matches(ancestor, parent)
+        visited.add(parent.pid)
+        current = parent
+    return False
+
+
 def process_group_snapshot(pgid: int) -> list[tuple[int, int, int]]:
     members = []
     for proc in Path("/proc").iterdir():
@@ -793,22 +845,25 @@ def matching_processes(
     session: str,
     home: Path,
     *,
-    pgid: int | None = None,
+    owned_gui: ProcessIdentity | None = None,
     detached_server: bool = False,
+    process_root: Path = Path("/proc"),
+    process_lookup: Callable[[int], ProcessIdentity | None] | None = None,
 ) -> list[ProcessIdentity]:
+    if process_lookup is None:
+        process_lookup = read_process_identity
     executable = str(binary.resolve(strict=True))
     expected_home = str(home.resolve(strict=True))
     matches = []
-    for proc in Path("/proc").iterdir():
+    for proc in process_root.iterdir():
         if not proc.name.isdecimal():
             continue
-        identity = read_process_identity(int(proc.name))
+        identity = process_lookup(int(proc.name))
         if (
             identity is None
             or identity.state == "Z"
             or identity.executable != executable
             or identity.home != expected_home
-            or (pgid is not None and identity.pgid != pgid)
         ):
             continue
         is_server_command = (
@@ -818,13 +873,17 @@ def matching_processes(
             if identity.session_id == identity.pid and is_server_command:
                 matches.append(identity)
         else:
+            if owned_gui is None or not process_descends_from(
+                identity, owned_gui, process_lookup
+            ):
+                continue
             args = identity.command_line[1:]
             session_arg = identity.herdr_session == session or any(
                 arg == f"--session={session}"
                 or (arg == "--session" and args[index + 1 : index + 2] == (session,))
                 for index, arg in enumerate(args)
             )
-            if identity.session_id == pgid and not is_server_command and session_arg:
+            if not is_server_command and session_arg:
                 matches.append(identity)
     return matches
 
@@ -1412,7 +1471,7 @@ class HerdrScenario:
                 self.binary,
                 self.session,
                 self.home,
-                pgid=process.pgid,
+                owned_gui=process.identity,
             )
             if len(clients) == 1:
                 identity = clients[0]
@@ -1425,17 +1484,20 @@ class HerdrScenario:
                     identity.pid, "WEZTERM_UNIX_SOCKET"
                 )
                 socket_path, gui_identity = validate_owned_wezterm_socket(
-                    socket_value, self.runtime, identity
+                    socket_value, self.runtime, process.identity
                 )
                 self.client_processes[app_id] = identity
-                self.run.record_client_process(self, app_id, identity)
-                pane = select_wezterm_pane(
-                    wezterm_cli(
+                self.run.record_client_process(
+                    self, app_id, identity, process.identity
+                )
+                pane = wait_for_wezterm_pane(
+                    lambda timeout: wezterm_cli(
                         self.run.tools["wezterm"],
                         self.run.wezterm_config,
                         self.env,
                         socket_path,
                         ["list", "--format", "json"],
+                        timeout=timeout,
                     )
                 )
                 process_ownership = validate_client_process(
@@ -1502,7 +1564,7 @@ class HerdrScenario:
         socket_path, gui = validate_owned_wezterm_socket(
             read_process_environment_value(expected.pid, "WEZTERM_UNIX_SOCKET"),
             self.runtime,
-            expected,
+            client["gui_identity"],
         )
         if socket_path != client["socket_path"] or not identity_matches(
             client["gui_identity"], gui
@@ -1914,12 +1976,17 @@ class Harness:
         write_json(self.root / "ownership.json", self.ownership)
 
     def record_client_process(
-        self, scenario: HerdrScenario, app_id: str, identity: ProcessIdentity
+        self,
+        scenario: HerdrScenario,
+        app_id: str,
+        identity: ProcessIdentity,
+        launched_gui: ProcessIdentity,
     ) -> None:
         self.ownership.append(
             {
                 "name": f"{scenario.label}-client-{app_id}",
                 "pid": identity.pid,
+                "parent_pid": identity.parent_pid,
                 "pgid": identity.pgid,
                 "session_id": identity.session_id,
                 "start_ticks": identity.start_ticks,
@@ -1927,6 +1994,8 @@ class Harness:
                 "home": identity.home,
                 "herdr_session": identity.herdr_session,
                 "command_line": identity.command_line,
+                "launched_gui_pid": launched_gui.pid,
+                "launched_gui_start_ticks": launched_gui.start_ticks,
                 "state": "running",
                 "detached": False,
             }
