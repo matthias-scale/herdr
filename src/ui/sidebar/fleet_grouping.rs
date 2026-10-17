@@ -244,12 +244,9 @@ pub(super) fn rows<'a>(
             .unwrap_or(3);
         (urgency == 3, urgency, *key)
     });
-    let mut rows = vec![SidebarRow::SectionHeader {
-        title: PROJECTS,
-        count: 0,
-        host_counts: Vec::new(),
-        collapsed: false,
-    }];
+    // Host filter and sort live in the cog menu; the list starts at the
+    // first project group, with no toolbar row above it.
+    let mut rows = Vec::new();
     for (project, (name, mut entries)) in groups {
         entries.sort_by(|left, right| {
             state_index(app, left)

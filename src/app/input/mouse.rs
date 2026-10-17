@@ -1512,26 +1512,6 @@ impl AppState {
                         self.toggle_sidebar_group(crate::ui::sidebar::NEEDS_YOU_SECTION_TITLE);
                         return None;
                     }
-                    if crate::ui::sidebar::fleet_sort_anchor_rect(self, self.view.sidebar_rect)
-                        .contains((mouse.column, mouse.row).into())
-                    {
-                        use crate::app::state::FleetSidebarSort;
-                        self.sidebar_presentation.fleet_sort =
-                            match self.sidebar_presentation.fleet_sort {
-                                FleetSidebarSort::Status => FleetSidebarSort::Activity,
-                                FleetSidebarSort::Activity => FleetSidebarSort::Status,
-                            };
-                        self.sidebar_presentation.fleet_sort_persistence_request =
-                            Some(self.sidebar_presentation.fleet_sort);
-                        self.mark_sidebar_projection_changed();
-                        return None;
-                    }
-                    if crate::ui::sidebar_blocker_scope_anchor_rect(self, self.view.sidebar_rect)
-                        .contains((mouse.column, mouse.row).into())
-                    {
-                        self.open_sidebar_blocker_scope_menu();
-                        return None;
-                    }
                     // Headers are tested before spaces: a header row owns its
                     // whole width, so anywhere on it folds the group.
                     if let Some(title) = self.sidebar_section_header_at(mouse.row) {

@@ -1134,19 +1134,7 @@ fn render_mobile_switcher_content(
                         super::sidebar::SNOOZED_SECTION_TITLE
                             | super::sidebar::SETTLED_SECTION_TITLE
                     );
-                let line = if *title == "projects" {
-                    Line::from(Span::styled(
-                        format!(
-                            " {} ▾  {}",
-                            app.sidebar_presentation
-                                .host_filter
-                                .as_deref()
-                                .unwrap_or("all hosts"),
-                            super::sidebar::fleet_sort_label(app)
-                        ),
-                        Style::default().fg(p.overlay0),
-                    ))
-                } else if shelf {
+                let line = if shelf {
                     let color = if *title == super::sidebar::SNOOZED_SECTION_TITLE {
                         p.peach
                     } else {
@@ -3536,7 +3524,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(shelves.is_empty());
-        assert!(rows.iter().any(|row| matches!(
+        assert!(!rows.iter().any(|row| matches!(
             row,
             SidebarRow::SectionHeader {
                 title: "projects",

@@ -3406,26 +3406,13 @@ mod tests {
         ));
         app.state.sidebar_presentation.host_filter = Some(app.state.agent_host_name.clone());
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
-        let sort =
-            crate::ui::sidebar::fleet_sort_anchor_rect(&app.state, app.state.view.sidebar_rect);
-        assert!(sort.width > 0);
-        let host = app.state.sidebar_presentation.host_filter.clone();
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            sort.x,
-            sort.y,
-        ));
-        assert_eq!(
-            app.state.sidebar_presentation.fleet_sort,
-            crate::app::state::FleetSidebarSort::Activity
-        );
-        assert_eq!(
-            app.state
-                .sidebar_presentation
-                .fleet_sort_persistence_request,
-            Some(crate::app::state::FleetSidebarSort::Activity)
-        );
-        assert_eq!(app.state.sidebar_presentation.host_filter, host);
+        // No host/sort toolbar row sits above the project groups.
+        assert!(!crate::ui::sidebar::compute_sidebar_section_header_areas(
+            &app.state,
+            app.state.view.sidebar_rect
+        )
+        .iter()
+        .any(|header| header.title == "projects"));
     }
 
     #[tokio::test]

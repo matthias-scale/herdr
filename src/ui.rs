@@ -122,8 +122,8 @@ pub(crate) use self::sidebar::{
 };
 pub(crate) use self::sidebar::{
     compute_sidebar_section_header_areas, initial_collapsed_sidebar_groups,
-    sidebar_blocker_scope_anchor_rect, sidebar_blocker_scope_menu_layout,
-    sidebar_display_settings_anchor_rect, sidebar_display_settings_menu_item_at,
+    sidebar_blocker_scope_menu_layout, sidebar_display_settings_anchor_rect,
+    sidebar_display_settings_menu_item_at,
 };
 use self::sidebar::{
     render_sidebar, render_sidebar_blocker_scope_menu, render_sidebar_collapsed,

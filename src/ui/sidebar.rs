@@ -10045,23 +10045,6 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
         .flatten();
 
     let mut targets = Vec::new();
-    for header in compute_sidebar_section_header_areas_from_layout(app, layout) {
-        if header.title == fleet_grouping::PROJECTS {
-            let (host, sort) = fleet_toolbar_rects(app, header.rect);
-            targets.push(crate::app::state::SidebarHoverTarget {
-                rect: sort,
-                label: "Sort projects and agents by status or activity".into(),
-                action: None,
-                row_hover: false,
-            });
-            targets.push(crate::app::state::SidebarHoverTarget {
-                rect: host,
-                label: "Filter agents by host".into(),
-                action: None,
-                row_hover: false,
-            });
-        }
-    }
     let mut host_actions = std::collections::HashMap::<&str, std::sync::Arc<str>>::new();
     for (row, row_y) in &visible {
         let (label, row_hover) = match row {
@@ -12978,19 +12961,6 @@ fn render_section_header(
     if header.rect.width == 0 || header.rect.height == 0 {
         return;
     }
-    if header.title == fleet_grouping::PROJECTS {
-        let (host, sort) = fleet_toolbar_rects(app, header.rect);
-        frame.render_widget(
-            Paragraph::new(format!("{} ▾", fleet_grouping::host_label(app)))
-                .style(Style::default().fg(app.palette.overlay0)),
-            host,
-        );
-        frame.render_widget(
-            Paragraph::new(fleet_sort_label(app)).style(Style::default().fg(app.palette.overlay0)),
-            sort,
-        );
-        return;
-    }
     let rect = sidebar_row_content_rect(header.rect);
     let p = &app.palette;
     if app.sidebar_sections_layout
@@ -14512,38 +14482,9 @@ pub(crate) fn sidebar_filter_anchor_rect(app: &AppState, area: Rect) -> Rect {
     Rect::new(x, mode_anchor.y, width, 1)
 }
 
-pub(super) fn fleet_sort_label(app: &AppState) -> &'static str {
-    match app.sidebar_presentation.fleet_sort {
-        crate::app::state::FleetSidebarSort::Status => "status ⇅",
-        crate::app::state::FleetSidebarSort::Activity => "activity ⇅",
-    }
-}
-
-fn fleet_toolbar_rects(app: &AppState, area: Rect) -> (Rect, Rect) {
-    let rect = sidebar_row_content_rect(area);
-    let width = (display_width(fleet_sort_label(app)) as u16).min(rect.width);
-    let sort = Rect::new(rect.right().saturating_sub(width), rect.y, width, 1);
-    let width = (display_width(&format!("{} ▾", fleet_grouping::host_label(app))) as u16)
-        .min(sort.x.saturating_sub(rect.x + 1));
-    (Rect::new(rect.x + 1, rect.y, width, 1), sort)
-}
-
-pub(crate) fn fleet_sort_anchor_rect(app: &AppState, area: Rect) -> Rect {
-    compute_sidebar_section_header_areas(app, area)
-        .into_iter()
-        .find(|header| header.title == fleet_grouping::PROJECTS)
-        .map_or(Rect::default(), |header| {
-            fleet_toolbar_rects(app, header.rect).1
-        })
-}
-
-pub(crate) fn sidebar_blocker_scope_anchor_rect(app: &AppState, area: Rect) -> Rect {
-    compute_sidebar_section_header_areas(app, area)
-        .into_iter()
-        .find(|header| header.title == fleet_grouping::PROJECTS)
-        .map_or(Rect::default(), |header| {
-            fleet_toolbar_rects(app, header.rect).0
-        })
+/// The machine picker drops from the cog: the cog menu is its only entry point.
+fn sidebar_blocker_scope_anchor_rect(app: &AppState, area: Rect) -> Rect {
+    sidebar_display_settings_anchor_rect(app, area)
 }
 
 pub(crate) fn sidebar_blocker_scope_menu_layout(
@@ -33731,7 +33672,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             titles,
             [
-                fleet_grouping::PROJECTS,
                 NO_REPO_YET_SECTION_TITLE,
                 SNOOZED_SECTION_TITLE,
                 SETTLED_SECTION_TITLE,
@@ -33757,12 +33697,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            &section_titles[..3],
-            [
-                PINNED_SECTION_TITLE,
-                BLOCKERS_SECTION_TITLE,
-                fleet_grouping::PROJECTS
-            ]
+            &section_titles[..2],
+            [PINNED_SECTION_TITLE, BLOCKERS_SECTION_TITLE]
         );
         let promoted = rows
             .iter()
@@ -34430,7 +34366,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 vec![if parked {
                     INBOX_NEW_SECTION_TITLE
                 } else {
-                    crate::ui::sidebar::fleet_grouping::PROJECTS
+                    // Project groups sit at the top level, under no shelf.
+                    ""
                 }],
                 "remote parked={parked} must appear exactly once in its section"
             );
@@ -34885,12 +34822,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_group_mode = SidebarGroupMode::RepoPr;
         let area = Rect::new(0, 0, 60, 30);
         let targets = compute_sidebar_hover_targets(&app, area);
-        for label in ["Sort projects and agents by status or activity", "GitHub"] {
-            assert!(
-                targets.iter().any(|target| target.label == label),
-                "missing {label} tooltip"
-            );
-        }
+        assert!(
+            targets.iter().any(|target| target.label == "GitHub"),
+            "missing GitHub tooltip"
+        );
         assert_eq!(
             section_header_glyph_for_app(&app, SNOOZED_SECTION_TITLE),
             "\u{F0150}z"
